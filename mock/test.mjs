@@ -34,6 +34,8 @@ const TEST_CONFIG_BODY = JSON.stringify({
     // 其余全部透传交给 Claude Code：429/500/502/504（CC 当 5xx 重试）、网络错误/超时/断连
     // （CC 当 APIConnectionError 重试，代理合成 502 回客户端）。
     // 场景 F/G/K/L/M/N 守门这条约束——任何人改回都会让它们 FAIL。
+    // 流式改造后：body-error 判定改为 parse 响应首段（错误 body ~132B 必在首 chunk），
+    // 不再全量缓冲；成功 SSE 首 chunk 非合法 JSON → parse 失败 → 立即流式转发，不误判。
     retryOnStatus: [],
     retryOnBodyErrorCode: [10310],
   },

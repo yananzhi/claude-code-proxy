@@ -182,6 +182,39 @@ const server = http.createServer(async (req, res) => {
       }
       return;
 
+    case 'success-slow':
+      // 流式 SSE，每个 chunk 之间间隔 300ms——用于验证代理是否增量转发
+      // （缓冲式代理会把全部 chunk 攒到 end 后一次性吐，客户端只看到一次到达）。
+      if (!wantStream) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(successJson(reqCount, model));
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+      {
+        const send = (event, data) =>
+          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        const steps = [
+          () => send('message_start', { type: 'message_start', message: { id: `msg_mock_${reqCount}`, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } }),
+          () => send('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+          () => send('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }),
+          () => send('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' from mock.' } }),
+          () => send('content_block_stop', { type: 'content_block_stop', index: 0 }),
+          () => send('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } }),
+          () => { send('message_stop', { type: 'message_stop' }); res.end(); },
+        ];
+        let i = 0;
+        const tick = () => {
+          if (i < steps.length) { steps[i++](); setTimeout(tick, 300); }
+        };
+        tick();
+      }
+      return;
+
     case '503':
       // 标准瞬时错误：HTTP 503 + code 10310 system busy（Claude Code 处理不了，代理应重试）
       res.writeHead(503, { 'content-type': 'application/json' });
@@ -289,7 +322,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   log(`listening on http://127.0.0.1:${PORT}`);
   log(`initial sequence: ${JSON.stringify(sequence)}`);
-  log(`modes: success | 503 | 503-other | 200-busy | 404 | 400 | 429 | 500 | 502 | 504 | timeout | drop`);
+  log(`modes: success | success-slow | 503 | 503-other | 200-busy | 404 | 400 | 429 | 500 | 502 | 504 | timeout | drop`);
 });
 
 server.on('error', (e) => {

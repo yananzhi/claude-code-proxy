@@ -51,6 +51,7 @@
 - **单例**：开多个 VS Code 窗口只有一个实际跑代理（靠端口 bind），其他窗口只心跳监听。
 - **2s 心跳接管**：宿主窗口关了导致代理停，其他窗口 2s 内接管拉起。
 - **精确重试**：代理只重试 Claude Code 处理不了的——`HTTP 503` + body `error.code === 10310`（讯飞 system busy）。其余全部透传交给 Claude Code 自己处理：429/500/502/504（CC 当 5xx 重试）、网络错误/超时/断连/流中断（CC 当 APIConnectionError 重试，代理合成 502 回客户端）。可在控制台调 `retryOnStatus`/`retryOnBodyErrorCode`。
+- **流式增量转发**（1.0.3+）：代理对上游响应（含 SSE）边收边转发给客户端，token 逐个到达，不再整体延迟到上游 `end`。body-error 重试仍生效——错误 body（实测 ~132 字节、合法 JSON、必在首个 chunk）在 `writeHead` 前就判出并丢弃重试；成功 SSE 首 chunk 非 JSON → 不误判、立即流式转发。
 - **跨平台**：`extensionKind: workspace`，WSL 里代理和 Claude Code 同 localhost。
 
 ### 端口（按平台分默认）
