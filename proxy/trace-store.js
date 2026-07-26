@@ -216,12 +216,16 @@ function summarize(trace, { bodyOffset, bodyLen, seq }) {
     finalStatus: r.finalStatus,
     outcome: r.outcome,
     model: r.model || '',
+    firstChunkAt: r.firstChunkAt ?? null,
+    firstChunkMs: r.firstChunkMs ?? null,
+    lastAttemptMs: r.lastAttemptMs ?? null,
     // attempt 摘要：不含上游请求/响应 body（那是 74% 的大头）
     attempts: attempts.map((a) => ({
       attempt: a.attempt,
       status: a.status,
       networkError: a.networkError ?? null,
       elapsedMs: a.elapsedMs,
+      firstChunkMs: a.firstChunkMs ?? null,
       verdict: a.verdict,
       reason: a.reason,
       backoffMs: a.backoffMs,

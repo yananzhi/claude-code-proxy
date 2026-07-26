@@ -141,7 +141,7 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
   return new Promise((resolve) => {
     if (!upstream || !upstream.protocol) {
       detail(reqId, `attempt ${attempt} → NO UPSTREAM`, '代理尚未注入上游配置（请在 claude-code-proxy 激活一条"通过代理"配置）');
-      resolve({ status: 0, headers: {}, body: Buffer.alloc(0), networkError: 'no upstream configured', streamed: false });
+      resolve({ status: 0, headers: {}, body: Buffer.alloc(0), networkError: 'no upstream configured', streamed: false, firstChunkAt: null });
       return;
     }
     const upstreamLib = upstream.protocol === 'https:' ? https : http;
@@ -188,6 +188,10 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
         // streaming 三态：'pending'（还在攒首段判错）、'stream'（已开始转发）、'buffer'（判为重试错误，全量缓冲丢弃）
         let mode = 'pending';
         let bodyErrReason = null; // 判定为 retryable error 时的原因，供上层 verdict
+        // 首个有效 chunk 到达时刻（mode 首次 pending→stream）。失败的 attempt 走 buffer 分支，
+        // 不会置 stream，故 firstChunkAt 保持 null —— 天然满足「前 N 次失败不计入」。
+        let firstChunkAt = null;
+        const markFirstChunk = () => { if (firstChunkAt === null) firstChunkAt = new Date().toISOString(); };
 
         // 在「还没开始转发」时，攒到的 chunk 试判 body-error。返回 true 表示已决断。
         const tryDecide = () => {
@@ -211,6 +215,7 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
           }
           // inspected === 'not-error' 或 攒到上限 → 立即开始转发
           mode = 'stream';
+          markFirstChunk();
           if (clientRes && !clientRes.headersSent) {
             const h = { ...resp.headers };
             delete h['content-encoding'];
@@ -234,6 +239,7 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
           // 必须先 flush 攒到的 chunk 再 end，否则客户端只收到头、body 丢空。
           if (wasPending) {
             mode = 'stream';
+            markFirstChunk();
             if (clientRes && !clientRes.headersSent) {
               const h = { ...resp.headers };
               delete h['content-encoding'];
@@ -251,7 +257,7 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
             }
             try { clientRes.end(); } catch {}
           }
-          const r = { status, headers: resp.headers, body: buf, networkError: null, streamed, bodyErrReason };
+          const r = { status, headers: resp.headers, body: buf, networkError: null, streamed, bodyErrReason, firstChunkAt };
           detail(reqId, `attempt ${attempt} → UPSTREAM RESPONSE`, [
             `Status: ${r.status}${streamed ? ' (streamed to client)' : ' (buffered' + (bodyErrReason ? `: ${bodyErrReason}` : '') + ')'}`,
             'Headers:',
@@ -268,7 +274,7 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
           if (mode === 'stream' && !ended) {
             try { clientRes.end(); } catch {}
           }
-          settle({ status: alreadyStreamed ? status : 0, headers: {}, body: Buffer.concat(chunks), networkError: `response stream error: ${e.message}`, streamed: alreadyStreamed, bodyErrReason: null });
+          settle({ status: alreadyStreamed ? status : 0, headers: {}, body: Buffer.concat(chunks), networkError: `response stream error: ${e.message}`, streamed: alreadyStreamed, bodyErrReason: null, firstChunkAt });
         });
         resp.on('close', () => {
           if (!ended) {
@@ -278,7 +284,7 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
             }
             // 已流式交付时保留 status（客户端已收到），streamed=true 阻止上层再写；
             // networkError 保留原因供 trace，但不影响交付决策。
-            settle({ status: alreadyStreamed ? status : 0, headers: {}, body: Buffer.concat(chunks), networkError: alreadyStreamed ? `stream truncated (already delivered ${status})` : 'response stream closed prematurely', streamed: alreadyStreamed, bodyErrReason: null });
+            settle({ status: alreadyStreamed ? status : 0, headers: {}, body: Buffer.concat(chunks), networkError: alreadyStreamed ? `stream truncated (already delivered ${status})` : 'response stream closed prematurely', streamed: alreadyStreamed, bodyErrReason: null, firstChunkAt });
           }
         });
       },
@@ -286,10 +292,10 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
 
     req.on('timeout', () => {
       req.destroy();
-      settle({ status: 0, headers: {}, body: Buffer.alloc(0), networkError: `timeout (${timeoutMs}ms)`, streamed: false, bodyErrReason: null });
+      settle({ status: 0, headers: {}, body: Buffer.alloc(0), networkError: `timeout (${timeoutMs}ms)`, streamed: false, bodyErrReason: null, firstChunkAt: null });
     });
     req.on('error', (e) => {
-      settle({ status: 0, headers: {}, body: Buffer.alloc(0), networkError: e.message, streamed: false, bodyErrReason: null });
+      settle({ status: 0, headers: {}, body: Buffer.alloc(0), networkError: e.message, streamed: false, bodyErrReason: null, firstChunkAt: null });
     });
 
     req.end(body);
@@ -582,6 +588,10 @@ async function handleRequest(req, res) {
   let attempt = 0;
   let finalDelivered = null;
   let outcome = 'failed';
+  // 最终成功交付那次的首字节到达时刻 / 首字节耗时 / 末次 attempt 耗时。全失败时保持 null。
+  let finalFirstChunkAt = null;
+  let finalFirstChunkMs = null;
+  let finalLastAttemptMs = null;
 
   if (passthrough) {
     attempt = 1;
@@ -590,7 +600,11 @@ async function handleRequest(req, res) {
     const r = await forwardStreaming({ method: req.method, path: req.url, reqHeaders: req.headers, body: outBody, reqId: id, attempt, timeoutMs: upstreamTimeoutMs, upstream, token, clientRes: res, retryOnBodyErrorCode, retryOnStatus });
     const attMs = Date.now() - attT0;
     concise(`     #${id} attempt 1/1 → ${r.status || 'NETERR'} (${attMs}ms) [透传，不重试${r.streamed ? '，流式' : ''}]`);
-    attempts.push({ attempt: 1, status: r.status, networkError: r.networkError ?? null, startedAt: attStart, endedAt: nowIso(), elapsedMs: attMs, verdict: 'passthrough', reason: 'passthrough mode (no retry)', backoffMs: null, upstreamRequestBody: outBody.toString('utf8'), upstreamResponseBody: r.body.toString('utf8') });
+    const firstChunkMs = r.firstChunkAt ? Date.parse(r.firstChunkAt) - attT0 : null;
+    attempts.push({ attempt: 1, status: r.status, networkError: r.networkError ?? null, startedAt: attStart, endedAt: nowIso(), elapsedMs: attMs, firstChunkAt: r.firstChunkAt ?? null, firstChunkMs, verdict: 'passthrough', reason: 'passthrough mode (no retry)', backoffMs: null, upstreamRequestBody: outBody.toString('utf8'), upstreamResponseBody: r.body.toString('utf8') });
+    finalFirstChunkAt = r.firstChunkAt ?? null;
+    finalFirstChunkMs = firstChunkMs;
+    finalLastAttemptMs = attMs;
     if (r.status === 0) {
       const errBody = JSON.stringify({ type: 'error', error: { type: 'upstream_unreachable', message: `upstream ${upstreamBase ?? ''} unreachable (passthrough): ${r.networkError}` } });
       res.writeHead(502, { 'content-type': 'application/json' });
@@ -654,7 +668,8 @@ async function handleRequest(req, res) {
         waitMs = backoffForMs(attempt, backoffSec, backoffMaxSec);
       }
       const is2xx = r.status >= 200 && r.status < 300;
-      attempts.push({ attempt, status: r.status, networkError: r.networkError ?? null, startedAt: attStart, endedAt: nowIso(), elapsedMs: attMs, verdict: verdict === null ? (is2xx ? 'success' : 'pass-through') : verdict.retryable ? 'retryable' : 'not-retryable', reason: verdict === null ? (r.networkError ? `${is2xx ? 'success' : 'delivered'} (truncated: ${r.networkError})` : (is2xx ? '(real success)' : `(delivered ${r.status} as-is)`)) : verdict.reason, backoffMs: waitMs, upstreamRequestBody: outBody.toString('utf8'), upstreamResponseBody: r.body.toString('utf8') });
+      const firstChunkMs = r.firstChunkAt ? Date.parse(r.firstChunkAt) - attT0 : null;
+      attempts.push({ attempt, status: r.status, networkError: r.networkError ?? null, startedAt: attStart, endedAt: nowIso(), elapsedMs: attMs, firstChunkAt: r.firstChunkAt ?? null, firstChunkMs, verdict: verdict === null ? (is2xx ? 'success' : 'pass-through') : verdict.retryable ? 'retryable' : 'not-retryable', reason: verdict === null ? (r.networkError ? `${is2xx ? 'success' : 'delivered'} (truncated: ${r.networkError})` : (is2xx ? '(real success)' : `(delivered ${r.status} as-is)`)) : verdict.reason, backoffMs: waitMs, upstreamRequestBody: outBody.toString('utf8'), upstreamResponseBody: r.body.toString('utf8') });
 
       if (verdict === null) {
         // 已流式回推客户端。2xx 是真成功；非 2xx（如 503-other，body 非 retryable）是
@@ -664,6 +679,10 @@ async function handleRequest(req, res) {
         concise(`     #${id} DONE${truncReason}`);
         detail(id, 'DELIVER TO CLIENT', `${is2xx ? 'real success' : `delivered ${r.status} as-is`}, already streamed upstream response${truncReason}`);
         finalDelivered = r;
+        // 成功交付：取本次首字节时刻/耗时与末次耗时。前 N 次失败 attempt 的 firstChunkAt 为 null，不会覆盖。
+        finalFirstChunkAt = r.firstChunkAt ?? null;
+        finalFirstChunkMs = firstChunkMs;
+        finalLastAttemptMs = attMs;
         if (!is2xx) {
           outcome = 'pass-through';
         } else {
@@ -683,6 +702,8 @@ async function handleRequest(req, res) {
         concise(`     #${id} PASS-THROUGH (${verdict.reason})`);
       }
       detail(id, 'DELIVER TO CLIENT', [verdict.retryable ? 'retry budget exhausted' : 'not retryable, pass-through', `forwarding last upstream response (status ${r.status || 'NETERR'})`].join('\n'));
+      // 末次 attempt 未产生有效首字节（buffer 重试耗尽 / 上游不可达），首字节保持 null。
+      finalLastAttemptMs = attMs;
       if (r.status === 0) {
         const errBody = JSON.stringify({ type: 'error', error: { type: 'upstream_unreachable', message: `upstream ${upstreamBase ?? ''} unreachable (${r.networkError})` } });
         res.writeHead(502, { 'content-type': 'application/json' });
@@ -705,6 +726,9 @@ async function handleRequest(req, res) {
   traceStore.append({
     id, sourceIp: ip, method: req.method, path: req.url, startedAt, endedAt, totalMs,
     finalStatus: finalDelivered?.status ?? 0, outcome, model: reqModel,
+    firstChunkAt: finalFirstChunkAt,
+    firstChunkMs: finalFirstChunkMs,
+    lastAttemptMs: finalLastAttemptMs,
     requestBody: outBody.toString('utf8'),
     responseBody: finalDelivered ? finalDelivered.body.toString('utf8') : '',
     responseHeaders: finalDelivered?.headers ?? {},

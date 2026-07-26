@@ -144,18 +144,34 @@
   .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
   .toolbar label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .toolbar .spacer { flex: 1; }
+  /* 列设置下拉面板 */
+  .col-settings-wrap { position: relative; display: inline-block; }
+  .col-settings-panel {
+    display: none; position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+    min-width: 280px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+    font-size: 13px;
+  }
+  .col-settings-panel.show { display: block; }
+  .col-settings-panel .cs-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 8px; }
+  .col-settings-panel .cs-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+  .col-settings-panel .cs-row label { flex: 1; cursor: pointer; }
+  .col-settings-panel .cs-row input[type="number"] { width: 48px; padding: 2px 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 12px; font-family: ui-monospace, monospace; }
+  .col-settings-panel .cs-row .cs-unit { color: var(--muted); font-size: 11px; }
+  .col-settings-panel .cs-actions { display: flex; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .col-settings-panel .cs-actions button { flex: 1; }
   /* table-layout:fixed + colgroup：让表头与数据行严格共享同一套列宽（auto 布局下 th/td
      宽度算法不一致会整体错位）。表格直接放在 .card 里，不要套 overflow 容器——
      外层 overflow 容器会让 fixed+colgroup 对 tbody 失效（表头遵守、数据行退化成按内容算宽）。 */
   table { width: 100%; border-collapse: collapse; table-layout: fixed; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
-  /* 表格数据行叫 .row，但配置页 .row 是 display:flex（第60行）。flex 会把 <tr> 变成 flex 容器、
-     内部 <td> 退化为 block，脱离表格列布局 → 表头与数据行两套坐标系、整体错位。
-     这里显式恢复 table-row/table-cell，让数据行重新参与 table-layout 列宽分配。 */
-  tr.row { display: table-row; cursor: pointer; }
-  tr.row td { display: table-cell; }
-  tr.row:hover { background: var(--panel2); }
+  /* 表格数据行用 .trow（不用 .row）：配置页 .row 是 display:flex（第60行），flex 会把 <tr>
+     变成 flex 容器、内部 <td> 退化为 block，脱离表格列布局 → 表头与数据行两套坐标系、整体错位。
+     用独立类名 .trow 彻底隔离，无需靠特异性修复。 */
+  tr.trow { display: table-row; cursor: pointer; }
+  tr.trow td { display: table-cell; }
+  tr.trow:hover { background: var(--panel2); }
   td .id { font-family: ui-monospace, monospace; }
   td .time { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
   .badge { padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 500; }
@@ -425,36 +441,16 @@
         <button class="secondary" onclick="openLogsDir()" title="在系统文件管理器里打开 trace 文件所在目录">打开记录目录</button>
         <button class="secondary" onclick="killProxy()" title="关闭代理监听，宿主窗口心跳会在 2s 内自动重起。注意：重起的是宿主内存里已缓存的代码，改了 proxy 代码不会因此重新加载">重启代理</button>
         <button class="secondary" onclick="refreshTraces()">刷新</button>
+        <div class="col-settings-wrap">
+          <button class="secondary" onclick="toggleColSettings(event)" title="配置列的显示/隐藏与宽度">列设置</button>
+          <div class="col-settings-panel" id="col-settings-panel"></div>
+        </div>
       </div>
-      <table>
-        <colgroup>
-          <col style="width:13%" />
-          <col style="width:4%" />
-          <col style="width:6%" />
-          <col style="width:24%" />
-          <col style="width:9%" />
-          <col style="width:5%" />
-          <col style="width:4%" />
-          <col style="width:6%" />
-          <col style="width:16%" />
-          <col style="width:13%" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>发出时间</th>
-            <th>#ID</th>
-            <th>源IP</th>
-            <th>方法/路径</th>
-            <th>Model</th>
-            <th>错误码</th>
-            <th>尝试</th>
-            <th>总耗时</th>
-            <th>结束时间</th>
-            <th>结果</th>
-          </tr>
-        </thead>
+      <table id="trace-table">
+        <colgroup id="trace-colgroup"></colgroup>
+        <thead id="trace-thead"></thead>
         <tbody id="trace-tbody">
-          <tr><td colspan="10" class="empty">加载中…</td></tr>
+          <tr><td class="empty">加载中…</td></tr>
         </tbody>
       </table>
     </div>
@@ -725,7 +721,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
   });
-  // 初始加载：默认显示重试记录页
+  // 初始加载：列配置 → 渲染表头 → 默认显示重试记录页
+  loadColConfig();
+  renderTableHeader();
   showTab('traces');
 });
 
@@ -793,7 +791,8 @@ async function refreshTraces() {
     lastListCache = list;
     renderTraces(list);
   } catch (e) {
-    document.getElementById('trace-tbody').innerHTML = `<tr><td colspan="8" class="empty">加载失败: ${e.message}</td></tr>`;
+    const n = visibleColumns().length || 1;
+    document.getElementById('trace-tbody').innerHTML = `<tr><td colspan="${n}" class="empty">加载失败: ${e.message}</td></tr>`;
   }
 }
 async function openLogsDir() {
@@ -823,52 +822,201 @@ async function killProxy() {
 // 展开状态按 id 记忆：自动刷新重渲染后恢复展开
 const expandedIds = new Set();
 
+// ── 列配置驱动 ──────────────────────────────────────────
+// 所有列定义集中在此：key/标题/默认宽度/默认显隐/渲染函数/td class/hover 说明。
+// colgroup、thead、renderTraces、所有 colspan 全部由这个数组动态生成——加列只改这里，
+// 永远不会再漏改 colspan（此前 L796/L981 的硬编码 8 就是漏改 bug）。
+const TRACE_COLUMNS = [
+  {
+    key: 'startedAt', title: '发出时间', width: 13, visible: true, tdClass: 'time',
+    hover: '客户端请求到达代理、代理开始处理的时刻。',
+    render: (t, ctx) => `<span class="arrow" onclick="event.stopPropagation();toggleExpand('${t.id}')" style="cursor:pointer;display:inline-block;width:1.2em">${ctx.arrow}</span>${fmtTime(t.startedAt)}`,
+  },
+  {
+    key: 'id', title: '#ID', width: 4, visible: true, tdClass: 'id',
+    hover: '代理为本次请求分配的 4 位标识。',
+    render: (t) => t.id,
+  },
+  {
+    key: 'sourceIp', title: '源IP', width: 6, visible: true,
+    hover: '发起请求的客户端 IP。',
+    render: (t) => t.sourceIp,
+  },
+  {
+    key: 'methodPath', title: '方法/路径', width: 22, visible: true, tdClass: 'id',
+    hover: 'HTTP 方法与请求路径。',
+    render: (t) => `<span style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom">${escapeHtml(t.method + ' ' + t.path)}</span>`,
+  },
+  {
+    key: 'model', title: 'Model', width: 9, visible: true, tdClass: 'id',
+    hover: '请求 body 里提取的 model 字段（已缩短）。',
+    render: (t) => `<span title="${escapeHtml(t.model || '')}" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom">${escapeHtml(shortenModel(t.model || ''))}</span>`,
+  },
+  {
+    key: 'status', title: '错误码', width: 5, visible: true,
+    hover: '最后一次非 2xx 的上游状态码（无则取最终交付状态码）。',
+    render: (t) => { const sc = statusClass(t.lastErrorStatus ?? (t.finalStatus >= 200 && t.finalStatus < 300 ? t.finalStatus : t.finalStatus)); const scText = t.lastErrorStatus ? t.lastErrorStatus : (t.finalStatus || '-'); return `<span class="${sc}">${scText}</span>`; },
+  },
+  {
+    key: 'attempts', title: '尝试', width: 4, visible: true,
+    hover: '代理向 LLM 发起的 attempt 总次数（含成功那次）。',
+    render: (t) => (Array.isArray(t.attempts) ? t.attempts.length : 0),
+  },
+  {
+    key: 'totalMs', title: '总耗时', width: 6, visible: true, tdClass: 'time',
+    hover: '从客户端请求到达到最终交付客户端的总时长，包含所有失败重试和退避等待。',
+    render: (t) => `<span title="含失败重试+退避">${fmtMs(t.totalMs)}</span>`,
+  },
+  {
+    key: 'firstChunk', title: '首字节耗时', width: 7, visible: true, tdClass: 'time',
+    hover: '最后一次成功 attempt 从发出到收到首个有效 chunk 的耗时。前 N 次失败的 attempt 不计入。全失败则为空。',
+    render: (t) => t.firstChunkMs != null
+      ? `<span title="末次成功 attempt 发出→首字节">${fmtMs(t.firstChunkMs)}</span>`
+      : '<span class="muted">-</span>',
+  },
+  {
+    key: 'lastAttemptMs', title: '末次耗时', width: 6, visible: true, tdClass: 'time',
+    hover: '最后一次 attempt 从发出到上游响应结束的耗时。重试场景下只看最后一次。',
+    render: (t) => t.lastAttemptMs != null ? `<span title="末次 attempt 完整耗时">${fmtMs(t.lastAttemptMs)}</span>` : '<span class="muted">-</span>',
+  },
+  {
+    key: 'endedAt', title: '结束时间', width: 10, visible: true, tdClass: 'time',
+    hover: '代理完成交付、写 trace 的时刻。',
+    render: (t) => fmtTime(t.endedAt),
+  },
+  {
+    key: 'outcome', title: '结果', width: 13, visible: true,
+    hover: '最终交付结果分类。',
+    render: (t) => outcomeBadge(t.outcome),
+  },
+];
+
+// 列配置（显隐/宽度）持久化：从 localStorage 读取覆盖默认值
+const COL_CONFIG_KEY = 'trace-columns-config';
+function loadColConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COL_CONFIG_KEY) || '{}');
+    for (const col of TRACE_COLUMNS) {
+      if (saved[col.key] && typeof saved[col.key].visible === 'boolean') col.visible = saved[col.key].visible;
+      if (saved[col.key] && typeof saved[col.key].width === 'number') col.width = saved[col.key].width;
+    }
+  } catch { /* 忽略损坏的配置 */ }
+}
+function saveColConfig() {
+  const cfg = {};
+  for (const col of TRACE_COLUMNS) cfg[col.key] = { visible: col.visible, width: col.width };
+  localStorage.setItem(COL_CONFIG_KEY, JSON.stringify(cfg));
+}
+// 当前可见列（顺序保持定义顺序）
+function visibleColumns() { return TRACE_COLUMNS.filter((c) => c.visible); }
+
+// 动态生成 colgroup + thead
+function renderTableHeader() {
+  const cols = visibleColumns();
+  // 归一化宽度到总和 100%，避免百分比不配凑导致列宽漂移
+  const sum = cols.reduce((s, c) => s + c.width, 0);
+  const cg = document.getElementById('trace-colgroup');
+  cg.innerHTML = cols.map((c) => `<col style="width:${(c.width / sum * 100).toFixed(2)}%" />`).join('');
+  const th = document.getElementById('trace-thead');
+  th.innerHTML = `<tr>${cols.map((c) => `<th title="${escapeHtml(c.hover || '')}">${c.title}</th>`).join('')}</tr>`;
+}
+
 function renderTraces(list) {
   const tb = document.getElementById('trace-tbody');
+  const cols = visibleColumns();
+  const colspan = cols.length;
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="10" class="empty">暂无记录</td></tr>';
+    tb.innerHTML = `<tr><td colspan="${colspan}" class="empty">暂无记录</td></tr>`;
     return;
   }
   const html = [];
   for (const t of list) {
     const atts = Array.isArray(t.attempts) ? t.attempts : [];
     const attCount = atts.length;
-    const time = fmtTime(t.startedAt);
-    const endTime = fmtTime(t.endedAt);
-    const sc = statusClass(t.lastErrorStatus ?? (t.finalStatus >= 200 && t.finalStatus < 300 ? t.finalStatus : t.finalStatus));
-    const scText = t.lastErrorStatus ? t.lastErrorStatus : (t.finalStatus || '-');
-    const badge = outcomeBadge(t.outcome);
     const expanded = expandedIds.has(t.id);
     const arrow = attCount > 1 ? (expanded ? '▾' : '▸') : '<span style="display:inline-block;width:1em"></span>';
-    const modelShort = shortenModel(t.model || '');
-    html.push(`<tr class="row" data-id="${t.id}">
-      <td class="time"><span class="arrow" onclick="event.stopPropagation();toggleExpand('${t.id}')" style="cursor:pointer;display:inline-block;width:1.2em">${arrow}</span>${time}</td>
-      <td class="id">${t.id}</td>
-      <td>${t.sourceIp}</td>
-      <td class="id" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.method} ${t.path}</td>
-      <td class="id" style="padding-left:2px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(t.model || '')}">${modelShort}</td>
-      <td class="${sc}">${scText}</td>
-      <td>${attCount}</td>
-      <td>${fmtMs(t.totalMs)}</td>
-      <td class="time">${endTime}</td>
-      <td>${badge}</td>
-    </tr>`);
+    const ctx = { arrow };
+    const tds = cols.map((c) => `<td class="${c.tdClass || ''}">${c.render(t, ctx)}</td>`).join('');
+    html.push(`<tr class="trow" data-id="${t.id}">${tds}</tr>`);
     if (expanded && attCount > 1) {
-      html.push(`<tr class="sub-row" data-id="${t.id}"><td colspan="10" class="sub-cell">${renderAttempts(atts)}</td></tr>`);
+      html.push(`<tr class="sub-row" data-id="${t.id}"><td colspan="${colspan}" class="sub-cell">${renderAttempts(atts)}</td></tr>`);
     }
   }
   tb.innerHTML = html.join('');
-  // 主行点击仍进详情（箭头已 stopPropagation 不触发展开/详情冲突）
-  tb.querySelectorAll('tr.row').forEach((tr) => {
+  // 主行点击进详情（箭头已 stopPropagation 不触发展开/详情冲突）
+  tb.querySelectorAll('tr.trow').forEach((tr) => {
     tr.onclick = () => openDetail(tr.dataset.id);
   });
 }
 
+// ── 列设置面板 ──────────────────────────────────────────
+function toggleColSettings(ev) {
+  ev.stopPropagation();
+  const panel = document.getElementById('col-settings-panel');
+  const showing = panel.classList.toggle('show');
+  if (showing) renderColSettingsPanel();
+}
+function renderColSettingsPanel() {
+  const panel = document.getElementById('col-settings-panel');
+  const rows = TRACE_COLUMNS.map((c) => `
+    <div class="cs-row">
+      <input type="checkbox" ${c.visible ? 'checked' : ''} onchange="setColVisible('${c.key}', this.checked)" />
+      <label onclick="this.previousElementSibling.click()">${c.title}</label>
+      <input type="number" min="2" max="40" value="${c.width}" onchange="setColWidth('${c.key}', this.value)" title="列宽（相对值）" />
+      <span class="cs-unit">%</span>
+    </div>
+  `).join('');
+  panel.innerHTML = `
+    <div class="cs-title">列显示与宽度</div>
+    ${rows}
+    <div class="cs-actions">
+      <button class="secondary" onclick="resetColConfig()">重置默认</button>
+    </div>
+  `;
+}
+function setColVisible(key, visible) {
+  const col = TRACE_COLUMNS.find((c) => c.key === key);
+  if (!col) return;
+  // 至少保留一列可见
+  if (!visible && visibleColumns().length <= 1) { toast('至少保留一列', false); renderColSettingsPanel(); return; }
+  col.visible = visible;
+  saveColConfig();
+  renderTableHeader();
+  if (lastListCache.length) renderTraces(lastListCache);
+  renderColSettingsPanel();
+}
+function setColWidth(key, val) {
+  const col = TRACE_COLUMNS.find((c) => c.key === key);
+  if (!col) return;
+  const n = Math.max(2, Math.min(40, Number(val) || col.width));
+  col.width = n;
+  saveColConfig();
+  renderTableHeader();
+  if (lastListCache.length) renderTraces(lastListCache);
+}
+function resetColConfig() {
+  localStorage.removeItem(COL_CONFIG_KEY);
+  // 恢复代码里的默认值需重置——这里硬编码默认值与定义一致
+  const defaults = { startedAt: 13, id: 4, sourceIp: 6, methodPath: 22, model: 9, status: 5, attempts: 4, totalMs: 6, firstChunk: 7, lastAttemptMs: 6, endedAt: 10, outcome: 13 };
+  for (const col of TRACE_COLUMNS) { col.width = defaults[col.key] ?? col.width; col.visible = true; }
+  renderTableHeader();
+  if (lastListCache.length) renderTraces(lastListCache);
+  renderColSettingsPanel();
+  toast('已恢复默认列配置');
+}
+// 点击面板外部关闭
+document.addEventListener('click', (e) => {
+  const panel = document.getElementById('col-settings-panel');
+  if (!panel.classList.contains('show')) return;
+  if (!e.target.closest('.col-settings-wrap')) panel.classList.remove('show');
+});
+
 function renderAttempts(atts) {
-  // 每条 attempt：序号 → 状态码(上色) (耗时) [等待] verdict reason
+  // 每条 attempt：序号 → 状态码(上色) (耗时) [首字节] [等待] verdict reason
   const lines = atts.map((a) => {
     const sc = statusClass(a.status);
     const statusText = a.status === 0 ? 'NETERR' : (a.status || '-');
+    const ttfb = a.firstChunkMs != null ? ` <span class="muted" title="本次 attempt 发出→首字节">首字节 ${fmtMs(a.firstChunkMs)}</span>` : '';
     const wait = a.backoffMs != null ? ` <span class="muted">等 ${fmtMs(a.backoffMs)}</span>` : '';
     const verdictTag = a.verdict === 'success' ? '<span class="vtag v-success">success</span>'
       : a.verdict === 'retryable' ? '<span class="vtag v-retry">retryable</span>'
@@ -876,7 +1024,7 @@ function renderAttempts(atts) {
       : a.verdict === 'passthrough' ? '<span class="vtag v-pass">passthrough</span>'
       : `<span class="vtag">${a.verdict || ''}</span>`;
     const reason = a.reason ? ` <span class="muted">${escapeHtml(a.reason)}</span>` : '';
-    return `<div class="att-line"><span class="att-num">attempt ${a.attempt}</span><span class="${sc}">→ ${statusText}</span> <span class="muted">(${fmtMs(a.elapsedMs)})</span>${wait} ${verdictTag}${reason}</div>`;
+    return `<div class="att-line"><span class="att-num">attempt ${a.attempt}</span><span class="${sc}">→ ${statusText}</span> <span class="muted">(${fmtMs(a.elapsedMs)})</span>${ttfb}${wait} ${verdictTag}${reason}</div>`;
   });
   return `<div class="att-list">${lines.join('')}</div>`;
 }
@@ -963,7 +1111,7 @@ function toggleExpand(id) {
   // 但简单起见直接 refreshTraces 也可；这里用轻量重渲染避免闪动
   const tb = document.getElementById('trace-tbody');
   // 找到该 id 的主行和可能的子行，局部替换
-  const mainRow = tb.querySelector(`tr.row[data-id="${id}"]`);
+  const mainRow = tb.querySelector(`tr.trow[data-id="${id}"]`);
   if (!mainRow) return;
   const next = mainRow.nextElementSibling;
   const wasExpanded = next && next.classList.contains('sub-row') && next.dataset.id === id;
@@ -978,7 +1126,7 @@ function toggleExpand(id) {
       const sub = document.createElement('tr');
       sub.className = 'sub-row';
       sub.dataset.id = id;
-      sub.innerHTML = `<td colspan="8" class="sub-cell">${renderAttempts(t.attempts)}</td>`;
+      sub.innerHTML = `<td colspan="${visibleColumns().length}" class="sub-cell">${renderAttempts(t.attempts)}</td>`;
       mainRow.after(sub);
     }
   } else if (!expanded && wasExpanded) {
@@ -1010,7 +1158,9 @@ async function openDetail(id) {
       <span class="k">Model</span><span class="v">${t.model || '-'}</span>
       <span class="k">发出时间</span><span class="v">${fmtTime(t.startedAt)}</span>
       <span class="k">结束时间</span><span class="v">${fmtTime(t.endedAt)}</span>
-      <span class="k">总耗时</span><span class="v">${fmtMs(t.totalMs)}</span>
+      <span class="k">总耗时</span><span class="v" title="从客户端到达到最终交付，含失败重试+退避">${fmtMs(t.totalMs)}</span>
+      <span class="k">首字节耗时</span><span class="v" title="末次成功 attempt 发出→首字节，不含前 N 次失败">${t.firstChunkMs != null ? fmtMs(t.firstChunkMs) : '-'}</span>
+      <span class="k">末次耗时</span><span class="v" title="最后一次 attempt 完整耗时">${t.lastAttemptMs != null ? fmtMs(t.lastAttemptMs) : '-'}</span>
       <span class="k">运行模式</span><span class="v">${t.configSnapshot?.passthrough ? '透传（不重试）' : '拦截重试'}</span>
       <span class="k">最终状态</span><span class="v">${t.finalStatus} (${t.outcome})</span>
       <span class="k">尝试次数</span><span class="v">${t.attempts.length}</span>
@@ -1024,7 +1174,8 @@ async function openDetail(id) {
       div.className = 'attempt-line';
       const sc = statusClass(a.status);
       const wait = a.backoffMs != null ? `等待 ${a.backoffMs}ms` : '';
-      div.innerHTML = `<span class="num">attempt ${a.attempt}</span><span class="${sc}">→ ${a.status || 'NETERR'}</span> (${a.elapsedMs}ms) ${wait} <span style="color:var(--muted)">${a.reason}</span>`;
+      const ttfb = a.firstChunkMs != null ? ` 首字节 ${a.firstChunkMs}ms` : '';
+      div.innerHTML = `<span class="num">attempt ${a.attempt}</span><span class="${sc}">→ ${a.status || 'NETERR'}</span> (${a.elapsedMs}ms)${ttfb} ${wait} <span style="color:var(--muted)">${a.reason}</span>`;
       ac.appendChild(div);
     }
     document.getElementById('detail-overlay').classList.add('show');
