@@ -6,3 +6,4 @@ proxy/logs/
 mock/config.*test*.json
 .test-tmp/
 .claude_proxy/
+.claude/
