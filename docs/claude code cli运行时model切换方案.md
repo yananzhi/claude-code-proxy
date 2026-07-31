@@ -83,6 +83,8 @@ CLI 内部按"档位"路由模型：子任务（子 agent / 后台轻量任务�
 
 ### 3.2 配置规格
 
+> ⚠️ 本节是**单会话简化版**：别名不带编号、写进 settings.json。**§6 派生节点方案落地后，别名改走 shell env、按会话编号区分（`ccp-sonnet-N`），本节的"写 settings.json + 无编号"做法废弃，不与 §6 并存。** 本节保留只为说明机制原理；实际实现以 §6 为准。
+
 **CLI 侧（固定，写入 settings.json）：**
 
 | 环境变量 | 值 | 说明 |
@@ -232,6 +234,14 @@ outBody = rewriteModel(outBody, modelAliasMap, id, req.headers['content-type']);
 
 即"每会话专属别名"成立，但**别名侧须走 shell env、不可走 settings.env**——否则会被运行时重读 / additive 覆盖机制干扰。
 
+> ⚠️ **TODO 第 1 项（待用户协助验证）**：§5.3-5.4 的结论是源码静态调研推出的，但"shell env 别名运行中冻结"这个核心前提**未经运行时实证**。整个方案依赖它，若假设错误则后续全白搭。需用户协助跑下列验证用例（自动化做不了，要人启 CLI 会话观察）：
+>
+> 1. **别名冻结验证**：用一个走代理的 CLI 会话，别名 `ANTHROPIC_DEFAULT_SONNET_MODEL=ccp-sonnet-test1` 经 shell env 注入（settings.json 的 env **不含**此 key）。会话起来后，经代理控制台改 `ccp-sonnet-test1` 指向的模型 → 观察后续请求是否走新模型（走新值=代理替换生效；若 CLI 报 model not found 则别名被某处改了）。
+> 2. **不被 settings 重读干扰验证**：同一会话运行中，**往 settings.json 的 env 里加** `ANTHROPIC_DEFAULT_SONNET_MODEL=别的值` → 观察 CLI 后续请求的 `model` 字段（经代理 trace 看）是否仍是 `ccp-sonnet-test1`（是=别名未被 settings 覆盖、冻结成立；变了=settings.env 覆盖了 shell env、冻结不成立、§5.4 推论错）。
+> 3. **删不掉验证**：运行中从 settings.env 删一个变量，确认 process.env 保留旧值（additive-only，结论 C）。
+>
+> 这三项验证通过，§5.4 前提才成立，才可进入实现。列为实现前第一道闸。
+
 ### 5.5 定案：纯 shell env 每会话专属别名
 
 基于 §5.3 / §5.4，并行会话独立切换采用下列方案，替代 §3 的"别名写进 Workspace Local LLM Config"路径。
@@ -240,13 +250,15 @@ outBody = rewriteModel(outBody, modelAliasMap, id, req.headers['content-type']);
 
 **会话级注入**（launcher `createTerminal` 的 `env` 选项，进程级）：
 
-| 环境变量 | 会话 A 值 | 会话 B 值 |
+| 环境变量 | workspace A 的会话值 | workspace B 的会话值 |
 |---|---|---|
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `ccp-haiku-<idA>` | `ccp-haiku-<idB>` |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `ccp-sonnet-<idA>` | `ccp-sonnet-<idB>` |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `ccp-opus-<idA>` | `ccp-opus-<idB>` |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `ccp-haiku-<N_A>` | `ccp-haiku-<N_B>` |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `ccp-sonnet-<N_A>` | `ccp-sonnet-<N_B>` |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `ccp-opus-<N_A>` | `ccp-opus-<N_B>` |
 
-`<id>` 为会话唯一标识（递增序号 / uuid 前缀）。会话 A、B 各持独立别名，代理映射表各持独立条目。
+`<N>` 为会话专属编号（全局唯一递增整数）。各 workspace 各自起会话，各持独立编号与别名，代理映射表各持独立条目。
+
+> **编号来源（澄清）**：编号 N **全局唯一递增、永不回收**——由共享代理进程的 `nextAliasId` 计数器分配（持久化进 `proxy-config.json`，跨 workspace、跨代理重启不重号，详见 §6.2 P2 修订）。不是按 workspace 分配、不回收。理由：回收会复用旧号，若旧会话终端残留请求命中新会话映射会静默改路由。全局递增最简单、最安全。异常情况（窗口打开但无 workspace）不分配编号——无 workspace 则无法起隔离会话（launcher 依赖 workspaceRoot，§6.5），无编号需求。
 
 **代理映射表（每会话每档一条）**：
 
@@ -264,11 +276,17 @@ outBody = rewriteModel(outBody, modelAliasMap, id, req.headers['content-type']);
 - **`ANTHROPIC_MODEL` 仍走 `/model`**（§3.3），不注入专属别名。
 - launcher 现有 `env: { CLAUDE_CONFIG_DIR: configDir }` 进程级注入机制可直接扩展，追加三个 `ANTHROPIC_DEFAULT_*_MODEL`。
 
-**映射表生命周期**：会话关闭后其专属别名条目可回收（或保留供同名复用）。代理需能区分按会话的映射条目与全局共享条目。
+**映射表生命周期**：会话关闭后其专属别名条目**不回收**——编号 N 递增不复用，避免旧会话残留请求命中新会话映射导致静默改路由（与 §6.9 一致）。代理需能区分按会话的映射条目与全局共享条目。
 
-### 5.6 与 §3 方案的关系
+### 5.6 与 §3 / §6 方案的关系
 
-§3（别名写 Workspace Local LLM Config、全局共享一套）适用于**单会话或同上游并发**场景；§5.5（纯 shell env 每会话专属别名）适用于**并行 CLI 会话各自独立切换**场景。二者在代理层是同一套替换机制（白名单命中即替换），区别仅在别名是否按会话区分。实现时可先落 §3，再扩展到 §5.5 的会话级别名。
+三套别名机制的关系（自洽性修订）：
+
+- **§3**（别名写 settings.json、无编号 `ccp-sonnet`）：单会话简化版，仅说明机制原理。
+- **§5.5**（纯 shell env、每会话编号别名 `ccp-sonnet-N`）：本方案的会话独立切换路径。
+- **§6**（派生虚拟节点）：**§5.5 的具体落地实现**——派生节点带编号 N、别名走 shell env、映射表按会话分区，正是 §5.5 描述的机制。
+
+**落地取舍**：§6 派生节点方案落地后，**§3 的"写 settings.json + 无编号"做法废弃**（别名必须走 shell env 才能运行中冻结，§5.4），二者不并存。§3 仅作为原理说明保留。实现直接落 §6，无需先落 §3 再迁移。代理层是同一套替换机制（白名单命中即替换），区别仅在别名是否带编号、走 shell env 还是 settings.env。
 
 ### 5.7 已验证：memory / skill 的加载依赖（源码调研）
 
@@ -328,12 +346,13 @@ launcher 启动一个会话时注入的 env（`createTerminal` 的 `env` 选项�
 | 环境变量 | 值 | 说明 |
 |---|---|---|
 | `CLAUDE_CONFIG_DIR` | `<共享 config dir>` | 所有会话共用，含 skills / memory |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `ccp-haiku-<sessionId>` | 本会话专属别名 |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `ccp-sonnet-<sessionId>` | 本会话专属别名 |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `ccp-opus-<sessionId>` | 本会话专属别名 |
-| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:<proxyPort>` | 走代理（proxy 模式） |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `ccp-haiku-<sessionId>` | 本会话专属别名，走 shell env（冻结） |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `ccp-sonnet-<sessionId>` | 本会话专属别名，走 shell env（冻结） |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `ccp-opus-<sessionId>` | 本会话专属别名，走 shell env（冻结） |
 
-不写 `settings.json` 的 env 字段（§5.4 约束）。`ANTHROPIC_MODEL` 留给 `/model`（§3.3）。
+**三档别名走 shell env**（§5.4 冻结前提）。**`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 走 settings.json env**（沿用 `synthesizeProxySettings`），不进 shell env——避免 token 出现在进程列表（安全），且 settings.env 不含三档别名同名 key，不影响别名冻结（§6.6 P4 修订）。`ANTHROPIC_MODEL` 留给 `/model`（§3.3）。
+
+> 注：本节是会话级 env 注入的规格骨架，实际启动流程见 §6.5 `launchDerived`（继承父上游快照 + 别名 env + BASE_URL/token 走 settings.env）。
 
 ---
 
@@ -361,6 +380,14 @@ export interface ModelAliasMapping {
     opus?: string;    // ccp-opus-N → 真实模型名
 }
 
+/** 派生节点创建时存的父上游快照（防继承断链，§6.5 P1） */
+export interface DerivedSnapshot {
+    baseUrl: string;
+    token: string;
+    timeoutSec?: number;
+    mode: ConfigMode;
+}
+
 export interface LLMConfig {
     id: string;
     name: string;
@@ -369,17 +396,25 @@ export interface LLMConfig {
     updatedAt: string;
     // —— 派生节点字段（仅派生节点有）——
     derivedFrom?: string;          // 父 local 配置 id
-    derivedIndex?: number;         // 专属编号 N（全局唯一）
+    derivedIndex?: number;         // 专属编号 N（全局唯一，权威在代理 nextAliasId）
     modelAliases?: ModelAliasMapping;  // 三档别名 → 真实模型（本地缓存，权威在代理）
+    derivedSnapshot?: DerivedSnapshot;  // 父上游快照（防父被删/改导致继承断链）
 }
 ```
 
 派生节点仍存进 `local-configs.json`（与父 local 配置同数组，靠 `derivedFrom` 区分）。`LocalConfigStore` 的 load/save/upsert/remove/get 无需改（新字段自然序列化）。新增方法：
 
 - `getDerivedByParent(parentId): LLMConfig[]` — 取某父配置下所有派生节点。
-- `nextDerivedIndex(): number` — 生成下一个全局唯一编号 N。
+- `nextDerivedIndex(): number` — 本地兜底（扫已存派生节点 derivedIndex 取 max+1），**权威编号向代理申请**（见下）。
 
-`nextDerivedIndex` 的全局唯一性：扫所有已存派生节点的 `derivedIndex` 取 max+1。跨窗口唯一性由"代理进程内存维护一个递增计数器"兜底（见 §6.4），webview 创建派生节点时先向代理申请编号，避免两窗口撞号。
+**编号全局唯一性与持久化（修 P2）**：编号 N 必须跨窗口、跨代理重启全局唯一。代理进程**无法访问 VS Code globalStorage**（它是 ESM 模块，只接收 `startServer({configPath, logsDir, logsConfigPath})`），故计数器只能落代理已有的 `proxy-config.json`：
+
+- 顶层新增字段 `nextAliasId: number`，`configStore.init`（`config-store.js:36-45`）时读出（老文件无此字段需兜底 `?? 0`）。
+- `nextAliasId()`：`++config.nextAliasId` + `persist()`。
+- **启动校正**：`init` 完成后扫 `config.modelAliases` 的 key（形如 `ccp-sonnet-N`）取 max N，若 `max ≥ nextAliasId` 则抬 `nextAliasId = max+1`（防御旧数据/手动编辑/代理重启后计数器与已存映射不一致）。
+- webview 创建派生节点时 `POST /api/model-alias/next-id` 向代理申请，拿到 N 再本地落 `local-configs.json`。
+
+这样代理重启（心跳接管 / `/api/kill` / EADDRINUSE）不丢计数器，不会重号覆盖旧会话映射。
 
 ### 6.3 树视图扩展
 
@@ -398,7 +433,7 @@ workspace_local_llm_config
   ▶ sonnet-4 (proxy) [代理 · local]  [+派生] [edit] [del]
 ```
 
-派生节点 description 显示当前映射摘要 `S:sonnet-5 · H:haiku-4 · O:opus-4`；tooltip 显示继承自哪个父配置 + 完整别名串 `ccp-sonnet-1 / ccp-haiku-1 / ccp-opus-1`。icon 用 `symbol-runtime` 之类区分。单击命令绑 `launchDerivedClaude`（而非 switchLocalConfig）。
+派生节点 description 显示当前映射摘要 `S:sonnet-5 · H:haiku-4 · O:opus-4`；tooltip 显示继承自哪个父配置 + 完整别名串 `ccp-sonnet-1 / ccp-haiku-1 / ccp-opus-1`。icon 用 `symbol-runtime` 之类区分。单击命令绑 `launchDerivedClaude`（而非 switchLocalConfig）。**孤儿标记**：若 `derivedFrom` 指向的父配置已不存在，节点 description 前缀 `⚠ 孤儿` 并禁用启动按钮（见 §6.5 继承断链）。
 
 `package.json` menus：新增 `viewItem == derived-config` 行内按钮（启动/edit/del），父 `local-config` 加 `+派生` 按钮（`newDerivedConfig`）。
 
@@ -408,10 +443,10 @@ workspace_local_llm_config
 
 **选定方案：全局共享映射表 + 按会话分区 + webview 只看本窗口（不广播）**
 
-- 映射表 `modelAliases` 存在**那一个共享代理进程**内存（`proxy-config.json` 持久化），所有窗口共用一份。统计信息照常聚合，不分散。
-- 别名按会话编号 N 天然分区：窗口 A 的派生节点 N=1、窗口 B 的 N=2，别名 `ccp-sonnet-1` 与 `ccp-sonnet-2` 不撞，**无跨窗口冲突**。
-- 每个窗口 webview 只展示/编辑自己窗口创建的派生节点映射，**不关心别的窗口的会话** → **不需要跨窗口广播**。窗口 A 改 `ccp-sonnet-1`，窗口 B 根本不显示 1，无需通知。
-- 跨窗口编号唯一性：webview 创建派生节点时，先 `POST /api/model-alias/next-id` 向代理申请编号（代理进程维护递增计数器，全局唯一），再本地落 `local-configs.json`。
+- 映射表 `modelAliases` 存在**那一个共享代理进程**内存（`proxy-config.json` 持久化），所有 workspace 共用一份。统计信息照常聚合，不分散。
+- 别名按会话编号 N 天然分区：workspace A 的会话 N=1、workspace B 的 N=2，别名 `ccp-sonnet-1` 与 `ccp-sonnet-2` 不撞，**无跨 workspace 冲突**。
+- 每个 workspace 的 webview 只展示/编辑自己创建的派生节点映射，**不关心别的 workspace 的会话** → **不需要跨 workspace 广播**。workspace A 改 `ccp-sonnet-1`，workspace B 根本不显示 1，无需通知。
+- 跨 workspace 编号唯一性：webview 创建派生节点时 `POST /api/model-alias/next-id` 向代理申请（计数器持久化见 §6.2），再本地落 `local-configs.json`。
 
 **为什么不用每窗口独立代理**：会分散统计信息、推翻现有 EADDRINUSE 单例 + 心跳接管架构、端口分配复杂。本方案不动架构。
 
@@ -419,45 +454,64 @@ workspace_local_llm_config
 
 | 改动 | 文件:位置 | 说明 |
 |---|---|---|
-| `config.modelAliases` 字段 | `proxy-config.json` 顶层（`effortLevel` 旁） | `{ "ccp-sonnet-1": "claude-sonnet-5", ... }` 扁平字典 |
-| `getModelAliases()` / `updateModelAlias(alias, model)` / `removeModelAlias(alias)` / `nextAliasId()` | `config-store.js` L87 后 | 照 `updateEffort`：校验 → 改 `config.modelAliases` → `persist()` |
-| `POST /api/model-alias` | `server.js` L397 后 | body `{alias, model}` → `updateModelAlias`；照 `/api/effort` |
+| `config.modelAliases` 字段 + `config.nextAliasId` | `proxy-config.json` 顶层（`effortLevel` 旁） | 别名字典 + 编号计数器；DEFAULT_PROXY_CONFIG（`proxyHost.ts:349-369`）补默认 `{}`/`0` |
+| `getModelAliases()` / `updateModelAlias(alias, model)` / `removeModelAlias(alias)` / `nextAliasId()` | `config-store.js` L87 后（紧跟 `updateEffort`） | 照 `updateEffort`：校验 → 改 `config.modelAliases`/`nextAliasId` → `persist()`；`getModelAliases` 兜底 `config.modelAliases ?? {}` |
+| `init` 读取 + 启动校正 | `config-store.js:36-45` | init 读 `modelAliases`/`nextAliasId`（兜底）；init 后扫 key max 校正 `nextAliasId`（§6.2） |
+| `getView()` 加 `modelAliases` | `config-store.js:110-133` | 现有 getView 返回 `{effortLevel, proxy, upstream, listen}`，加 `modelAliases` 字段供前端拉取 |
+| `POST /api/model-alias` | `server.js` L397 后（紧跟 `/api/effort`） | body `{alias, model}` → `updateModelAlias`；照 `/api/effort` |
 | `POST /api/model-alias/delete` | 同上 | body `{alias}` → `removeModelAlias` |
-| `GET /api/model-alias/next-id` | 同上 | 返回 `{id: N}`，递增计数器 |
-| `rewriteModel(body, aliases, reqId, contentType)` | `server.js` L99 后 | 照 `rewriteEffort`：parse → 若 `parsed.model` 命中 aliases 则替换 → 重新序列化 |
+| `GET /api/model-alias/next-id` | 同上 | 返回 `{id: N}`，调 `nextAliasId()` |
+| `rewriteModel(body, aliases, reqId, contentType)` | `server.js` L99 后（紧跟 `rewriteEffort` 函数定义） | 照 `rewriteEffort`：parse → 若 `parsed.model` 命中 aliases 则替换 → 重新序列化。**不受 `isMessagesMain` 守卫**（见下） |
 | 调用 `rewriteModel` | `server.js` L568-571 outBody 链 | 紧跟 `rewriteEffort` 之后追加一层 |
+
+**rewriteModel 关键细节（修 P3/P8）**：
+
+- **不受 `isMessagesMain` 守卫**：`rewriteEffort` 只对 `/v1/messages` 主路径生效（effort 仅主对话有意义），但 model 别名替换**必须覆盖所有带 `model` 字段的请求**，包括 `/v1/messages/count_tokens` 子路径——否则 count_tokens 请求带 `ccp-sonnet-N` 不被替换、原样打到上游报 model not found。故 `rewriteModel` 只要 JSON body 且 `parsed.model` 命中别名表即替换（白名单式，§3.6 已约束安全性）：
+  ```js
+  // 不加 isMessagesMain 守卫
+  outBody = rewriteModel(outBody, modelAliasMap, id, req.headers['content-type']);
+  ```
+- **与 rewriteEffort 串联的重复 parse**：两层各 parse+stringify 一次，大请求体有开销。**推荐合并**成单次 `rewriteBody(body, {effortLevel, modelAliasMap}, ...)`：一次 parse、改 effort + 改 model、一次 stringify。若暂不合并，两层容错独立、`rewritten` 标志需分别记录 `[effort→X]`/`[model→Y]` 日志。
+- **trace 的 model 字段**：`reqModel`（`server.js:554-562`）保留**原始别名**给 trace（改写前），trace 应补一个 `resolvedModel` 字段记替换后的真实模型，否则统计显示别名而非真实模型名。
+- **content-length**：`forwardStreaming`（`server.js:153-156`）浅拷贝 outHeaders 后 `delete content-length`，`req.end(body)` 按实际 body 长度重算——替换后 body 变长不会出问题（非"Buffer 自然更新"，是 delete+重算）。
 
 **扩展侧改动**（`src/proxyHost.ts`，照 `setUpstream` L211-238 模板）：
 
 - 新增 `setModelAlias(alias, model)` / `removeModelAlias(alias)` / `nextAliasId()` — 各自手写 `http.request` POST 到对应 `/api/model-alias*`。
 - `getView()` 返回 `modelAliases`，供 webview 拉取展示。
 
-**rewriteModel 关键细节**（照抄 `rewriteEffort`）：
-- `reqModel`（server.js L555-562）保留**原始 model** 给 trace。
-- `rewriteModel` 在 `reqModel` 提取后、`outBody` 构造前执行；命中则替换 `parsed.model` 为真实模型，未命中原样返回。
-- content-length 由重新序列化的 Buffer 自然更新（同 `rewriteEffort`）。
-
 ### 6.5 继承机制：派生节点如何复用父配置
 
-派生节点本身不存完整 `content`，只存 `derivedFrom` + `modelAliases`。启动时 launcher 合成实际 settings：
+派生节点本身不存完整 `content`，只存 `derivedFrom` + `modelAliases` + 一份**父上游快照**（见下 P1）。启动时 launcher 合成实际 settings：
 
 `src/claudeLauncher.ts` 新增 `launchDerived(derivedCfg)` 流程：
 
-1. 取父配置：`localStore.get(derivedCfg.derivedFrom)` → 父 `LLMConfig`。
-2. **继承父配置的上游**：用父 `content` 解出 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `API_TIMEOUT_MS`（同 `extractUpstream`）。
+1. 取父配置：`localStore.get(derivedCfg.derivedFrom)` → 父 `LLMConfig`。父已删则走快照（见下"继承断链"）。
+2. **继承父配置的上游**：优先用派生节点存的父上游快照，无快照则用父 `content` 解出 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `API_TIMEOUT_MS`（同 `extractUpstream`）。
 3. **proxy 模式**（父 mode=proxy）：`proxyHost.ensureRunning()` + `proxyHost.setUpstream(父上游)`（注入全局代理上游，与现有 `resolveSettingsContent` 一致）。
 4. **别名注入走 shell env**（不走 settings.env，§5.4 约束）：把 `ANTHROPIC_DEFAULT_HAIKU/SONNET/OPUS_MODEL` 三个**别名**（`ccp-*-N`）通过 `createTerminal` 的 `env` 注入，不写进 settings.json。
 5. `ANTHROPIC_BASE_URL` 指代理 `http://127.0.0.1:<port>`（proxy 模式）；直连模式则用父 baseUrl。
 6. **同步代理映射表**：确保 `ccp-haiku-N`/`ccp-sonnet-N`/`ccp-opus-N` 三条已在代理 `modelAliases` 里（启动时若缺则用派生节点的 `modelAliases` 调 `setModelAlias` 补上，默认值可取父配置 content 里的真实模型名）。
 
+**继承断链处理（修 P1）**：派生节点不存 content、启动时从父配置合成，存在断链风险：
+
+- 父配置被**删除** → `localStore.get(derivedFrom)` 返 undefined → 派生节点成孤儿。
+- 父配置被**编辑**（token 轮换、换 baseUrl）→ 派生节点静默继承新上游，用户以为是"自己当时配的上游"。
+
+处理策略：
+
+1. **派生节点创建时存一份父上游快照**（`derivedSnapshot: {baseUrl, token, timeoutSec, mode}`）冗余进 `local-configs.json`。`launchDerived` 优先用快照、父配置仅作显示名。代价是父 token 轮换不自动同步到派生节点——但这恰是用户预期（"这条会话用当时配的上游"）。
+2. **父配置 upsert/remove 时级联**（参照 `deleteLocalConfig` 删 active 清标记，`extension.ts:335-347`）：父 `remove` 时扫 `derivedFrom === parentId` 的派生节点，弹"是否一并删除 N 个派生节点"确认；父 `upsert` 时若有派生节点依赖，提示"上游已变，派生节点仍用旧快照，需手动重建"。
+3. **孤儿标记**：父已删的派生节点树视图打 `⚠ 孤儿` 前缀、禁用启动按钮（§6.3），但保留可删/可重建（手动指回新父配置）。
+
 继承关系图：
 
 ```
 父 local 配置 (content: 上游 baseUrl/token/timeout)
-        │ 继承
+        │ 创建派生节点时快照
         ▼
-派生节点 (derivedFrom, derivedIndex=N, modelAliases)
-        │ 启动时合成
+派生节点 (derivedFrom, derivedIndex=N, modelAliases, derivedSnapshot)
+        │ 启动时合成（优先用快照）
         ▼
 终端 env: CLAUDE_CONFIG_DIR + ANTHROPIC_DEFAULT_*_MODEL=ccp-*-N + ANTHROPIC_BASE_URL
         │
@@ -469,17 +523,23 @@ workspace_local_llm_config
 
 `launchDerived` 通过 `createTerminal` 注入的 env（在现有 `CLAUDE_CONFIG_DIR` + `CLAUDE_BIN` 基础上追加）：
 
-| 环境变量 | 值 | 来源 |
-|---|---|---|
-| `CLAUDE_CONFIG_DIR` | `<共享 config dir>` | §5.9 路A，共享 |
-| `CLAUDE_BIN` | `<claude 二进制>` | 现有 |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `ccp-haiku-<N>` | 派生节点编号 |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `ccp-sonnet-<N>` | 派生节点编号 |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `ccp-opus-<N>` | 派生节点编号 |
-| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:<port>` | proxy 模式；直连则父 baseUrl |
-| `ANTHROPIC_AUTH_TOKEN` | `<父配置 token>` | 继承父配置（proxy 模式可省，代理注入） |
+| 环境变量 | 值 | 来源 | 传递方式 |
+|---|---|---|---|
+| `CLAUDE_CONFIG_DIR` | `<共享 config dir>` | §5.9 路A，共享 | shell env |
+| `CLAUDE_BIN` | `<claude 二进制>` | 现有 | shell env |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `ccp-haiku-<N>` | 派生节点编号 | **shell env**（冻结，§5.4） |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `ccp-sonnet-<N>` | 派生节点编号 | **shell env**（冻结） |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `ccp-opus-<N>` | 派生节点编号 | **shell env**（冻结） |
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:<port>` | proxy 模式；直连则父 baseUrl | **settings.json env**（沿用 `synthesizeProxySettings`） |
+| `ANTHROPIC_AUTH_TOKEN` | `<父配置 token>` | 继承父配置 | **settings.json env**（不进 shell，防进程列表可见） |
 
-**不写 settings.json 的 env**（§5.4：别名走 shell env 才能运行中冻结）。proxy 模式下 settings.json 可只写非 env 字段（如 permissions），或不写（CLI 纯 env 启动，§5.3 结论D 可行）。
+**传递方式划分（修 P4）**：
+
+- **三档别名走 shell env**——这是 §5.4 别名冻结的前提（settings.env 不含同名 key，CLI 运行中重读也读不到别名，别名稳如老狗）。
+- **BASE_URL / token 走 settings.json env**——沿用现有 `synthesizeProxySettings`（`upstream.ts:19-25`）写进 `.claude_proxy/settings.json` 的 env 字段。token 进文件、不进进程 env，**不降级安全性**（shell env 会出现在 `ps e` / 进程列表）。
+- proxy 模式下 token 虽由代理覆盖注入（`forwardStreaming` 的 `outHeaders['authorization']`），但 CLI 行为依赖 token 存在性，故**必传不可省**——删除原"proxy 模式可省代理注入"的含糊表述。
+
+所以 settings.json 的 env 字段里**会有 BASE_URL + token，但没有三档别名**——满足 §5.4"settings.env 不含别名同名 key"的前提，逻辑自洽。settings.json 也可写非 env 字段（如 permissions）。
 
 shellPath / sendText 沿用现有逻辑（Windows PowerShell `& $env:CLAUDE_BIN`，其他 `"$CLAUDE_BIN"`）。
 
@@ -508,7 +568,7 @@ shellPath / sendText 沿用现有逻辑（Windows PowerShell `& $env:CLAUDE_BIN`
 │  连接模式                                                   │
 │  ○ 直连   ● 通过代理连接（继承父配置）                       │
 │                                                            │
-│  settings.json content (继承自父，通常无需改)                │
+│  settings.json content (只读·继承自父，自定义请建普通 local 配置)│
 │  ┌────────────────────────────────────────────────────┐    │
 │  │ { "env": { "ANTHROPIC_BASE_URL": "...", ... } }    │    │
 │  └────────────────────────────────────────────────────┘    │
@@ -520,7 +580,9 @@ shellPath / sendText 沿用现有逻辑（Windows PowerShell `& $env:CLAUDE_BIN`
 **关键交互**：
 
 - 三档映射各一行：左固定别名（只读，显示 `ccp-<档>-N`），右下拉选真实模型。
-- **在线改映射**：改下拉值 → `postMessage({type:'setAlias', tier, model})` → 扩展侧 `proxyHost.setModelAlias(alias, model)` → 代理 `updateModelAlias` 改内存+persist → **下个请求即生效**，无需重启 CLI、无需关闭 webview。
+- **在线改映射（修 P7）**：改下拉值 → `postMessage({type:'setAlias', tier, model})` → 扩展侧 `proxyHost.setModelAlias(alias, model)` → 代理 `updateModelAlias` 改内存+persist → **下个请求即生效**，无需重启 CLI、无需关闭 webview。**且同步本地缓存 + 刷新树**：成功后 `localStore.upsert({...cfg, modelAliases: 更新后})` 写回 `local-configs.json`，并 `refresh()` 刷新派生节点 description（`S:sonnet-5 · ...`）——否则树看不出改了、重开编辑器显示旧值，本地缓存与代理权威数据脱节。
+- **全局模型清单来源（修 P9）**：三档下拉候选从**所有已存配置（global + local + derived）的 `ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_*_MODEL` 字段聚合去重**得来，外加用户手输历史（存 globalStorage）。纯前端聚合，无需代理改动。下拉支持手输自定义模型名（第三方上游模型名千差万别，硬编码官方列表无意义）。
+- **content textarea（修 P11）**：derived scope 下 content **只读**（灰底显示父 content），避免用户改了之后继承语义混乱（改了若 `launchDerived` 仍用父 content 解上游则 textarea 是摆设；若改用派生 content 则继承断了）。若用户确需自定义 content，应另建普通 local 配置而非派生节点。
 - `WebviewMessage` 扩展：
 
 ```typescript
@@ -531,8 +593,10 @@ type WebviewMessage =
     | { type: 'cancel' };
 ```
 
-- `onMessage` 新增 `setAlias` 分支：不关面板、不刷新树，仅调 `proxyHost.setModelAlias`，成功后 `postMessage({type:'aliasSaved', tier})` 让前端轻量确认。
+- `onMessage` 新增 `setAlias` 分支：调 `proxyHost.setModelAlias` + `localStore.upsert` 同步缓存 + `refresh()` 刷新树，成功后 `postMessage({type:'aliasSaved', tier})` 让前端轻量确认（不关面板）。
 - "Save & 启动" = 保存派生节点 + 立即 `launchDerived`。
+
+**跨窗口缓存一致性**：`localStore` 的 cache 是实例级（`localConfigStore.ts:16`），两窗口改同一 `local-configs.json` 会 last-write-wins。`setAlias` 写本地缓存是为本窗口展示一致；权威数据在代理 `proxy-config.json`（§6.4）。跨窗口若需看别人的会话映射，走"全部会话"视图 GET 全表（§6.9）。
 
 ### 6.8 命令与流程清单
 
@@ -543,22 +607,91 @@ type WebviewMessage =
 | `claude-code-proxy.newDerivedConfig` | 在某 local 配置下新建派生节点（向代理申请编号 N） |
 | `claude-code-proxy.editDerivedConfig` | 打开派生节点配置页 |
 | `claude-code-proxy.launchDerivedClaude` | 在派生节点上启动 terminal（受其别名控制） |
-| `claude-code-proxy.deleteDerivedConfig` | 删派生节点 + 调 `removeModelAlias` 清代理映射表三条 |
+| `claude-code-proxy.deleteDerivedConfig` | 删派生节点 + 调 `removeModelAlias` 清代理映射表三条 + 关联处理活终端（见下） |
+
+**与 `launchWorkspaceClaude` 的关系（修 P10）**：`launchDerivedClaude` 与现有 `launchWorkspaceClaude`（`extension.ts:537-540`、`claudeLauncher.ts:212-299`）**并存**。底层共用 `createTerminal` + env 注入逻辑，区别在：
+
+- `launchWorkspaceClaude` 读 `localActiveState`（`local-active.json`）决定用哪条 local 配置——用于普通 local 配置的会话（无别名、无运行时切模型）。
+- `launchDerivedClaude` 跳过 activeState，直接用传入的 `derivedCfg`（有别名、可运行时切模型）。
+
+两者不冲突（不同命令、不同入口），维护上可抽公共方法 `launchClaude(cfg, opts)`，按 `cfg.derivedFrom` 有无分流到派生/普通分支。现有 `launchWorkspaceClaude` 保持不变，派生节点走新命令。
+
+**`deleteDerivedConfig` 与活终端（修 P6）**：删派生节点调 `removeModelAlias` 清三条映射。但若该派生节点的终端还活着，CLI 仍用 `ccp-sonnet-N` 发请求——映射被清后 `rewriteModel` 命中失败、原样透传（§3.6 白名单），请求带别名打到真实上游 → 真实 LLM 不认识 `ccp-sonnet-N` 报 model not found，用户无法理解。
+
+处理：`deleteDerivedConfig` 时遍历 `vscode.window.terminals`，按终端启动时注入的标记（如终端 name 含 `#N` 或 env 里带 `CCP_DERIVED_ID=N`）匹配该派生节点的活终端，弹"派生节点 #N 仍有终端在运行，是否一并关闭？"确认，一并 `terminal.dispose()`。若无活终端，直接删。
 
 完整用户流程：
 
-1. 在 `workspace_local_llm_config` 下某 local 配置点 `+派生` → 扩展向代理 `nextAliasId` 拿编号 N → 本地建派生节点（derivedFrom=父id, derivedIndex=N）→ 打开配置页。
+1. 在 `workspace_local_llm_config` 下某 local 配置点 `+派生` → 扩展向代理 `nextAliasId` 拿编号 N → 本地建派生节点（derivedFrom=父id, derivedIndex=N, derivedSnapshot=父上游快照）→ 打开配置页。
 2. 配置页里三档下拉选真实模型 → Save → 派生节点落 `local-configs.json`，三条别名调 `setModelAlias` 写代理映射表。
-3. 派生节点点 `▶启动` → `launchDerived`：继承父上游 + 注入别名 env + 起终端。
-4. 运行中想换某档模型 → 打开派生节点配置页 → 改下拉 → setAlias 即时生效。
+3. 派生节点点 `▶启动` → `launchDerived`：继承父上游（优先快照）+ 注入别名 env + 起终端。
+4. 运行中想换某档模型 → 打开派生节点配置页 → 改下拉 → setAlias 即时生效 + 同步本地缓存 + 刷树。
 5. 并行：同一父配置再 `+派生` 得 N+1，独立别名、独立映射、互不干扰。
+6. 删派生节点 → 弹"是否一并关闭活终端" → 清映射 + 删本地节点。
 
 ### 6.9 边界与注意
 
 - **`ANTHROPIC_MODEL`（主对话）不纳入**：仍走 `/model`，派生节点只管三档（§3.3）。
-- **代理单例串味（pitfall 文档）**：`setUpstream` 仍是全局共享，多个派生节点若用不同父上游会串味——这是已知限制，本方案不解决；建议同一 workspace 的派生节点共用同一父上游。
-- **编号回收**：删派生节点清映射表三条，编号 N 不回收（避免复用导致旧会话残留映射命中），递增即可。
+- **派生节点的"独立"是有限独立（修 P5）**：模型别名映射独立（三档各自换、并行会话互不干扰），但**上游 baseUrl/token 仍全局共享**（`setUpstream` 全局 last-write-wins）。用户最易误解这点——以为建两个不同父上游的派生节点就能并行用不同上游，实际会串味。**处理**：`launchDerived` 时检测代理当前上游是否与父配置（或快照）上游一致，不一致则弹警告"代理当前上游是 X，本派生节点父上游是 Y，启动后会串味。是否继续？"（参照 `doSwitch` 的 Reload/Undo 交互），不硬阻断但让用户知情。树视图给"与当前代理上游不匹配"的派生节点打标记。
+- **代理单例串味（pitfall 文档）**：即上条的根因。`setUpstream` 全局共享，详见 `docs/pitfall-proxy-shared-upstream.md`。
+- **编号回收**：删派生节点清映射表三条，编号 N 不回收（避免复用导致旧会话残留映射命中），递增即可。计数器持久化与启动校正见 §6.2。
 - **webview 状态同步**：本窗口改映射不需通知别窗口（§6.4 按会话分区）；若将来要全局总览所有会话映射，单独加一个"全部会话"视图 GET `/api/config` 读全表即可。
+
+### 6.9.1 别名格式与 1M 上下文（源码调研）
+
+**调研结论**（`D:\work_dir\Claude_Code-_Source_Code`）：
+
+- **唯一合法长度标记是 `[1m]`**（`utils/context.ts:35-40` `has1mContext` 只匹配 `/\[1m\]/i`）。`[500k]`/`[200k]`/`[2m]` 不被识别，会被当模型名字面量原样传递——不报错但不生效。
+- **`[1m]` 控制 CLI 本地三件事**：contextWindow 取 1,000,000（不带默认 200,000，`context.ts:51-98`）+ API 请求带 `context-1m-2025-08-07` beta header（`utils/betas.ts:254-256`）+ 真实模型名带 `[1m]`（发 API 时被 `normalizeModelStringForAPI` 剥离，靠 beta header 表达）。
+- **`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 是对 contextWindow 的 `min` 钳制上限**（`services/compact/autoCompact.ts:33-49`），非独立阈值。触发阈值 = `min(contextWindow, AUTO_COMPACT_WINDOW) - maxOutputTokens - 13000`。故 200K 模型配 `AUTO_COMPACT_WINDOW=600000` → `min(20万,60万)=20万`，600K 不生效、不会"永远压不到"。
+
+**关键坑（影响别名格式）**：CLI 的 `[1m]` 检测、contextWindow、beta header **全部读 CLI 本地的 model 字符串**，会话初始化时算好且 `getAllModelBetas` 被 memoize 缓存。**代理层在 HTTP 出口把 `ccp-sonnet-1` 替换成 `claude-sonnet-5[1m]`，影响不了 CLI 已缓存的本地决策**——CLI 仍按 200K autocompact、beta header 也不带 1M。代理改写发生在 CLI 之后，回溯不了。
+
+**结论：长度标记必须放在 CLI 能看到的那一侧——别名侧。** 别名格式：
+
+- 支持 1M 的会话，别名带 `[1m]` 后缀：`ccp-sonnet-1[1m]`。CLI 检测到 `[1m]` → 本地按 1M + beta header 带 1M + 请求 model 字段是 `ccp-sonnet-1[1m]`。
+- 代理收到 `ccp-sonnet-1[1m]` → 剥离 `[1m]` → base `ccp-sonnet-1` 查映射表 → 真实模型名（如 `claude-sonnet-5`）→ 发上游（不带 `[1m]`，靠 beta header 表达 1M）。
+- 不需要 1M 的会话别名不带后缀：`ccp-sonnet-1`，按 200K。
+
+**`rewriteModel` 调整**：别名映射表的 key 是 base（`ccp-sonnet-1`），但请求 `model` 字段可能是 `ccp-sonnet-1[1m]`（带后缀）。`rewriteModel` 需先剥离 `[1m]` 再查表、命中后替换 base 为真实模型名（不带后缀，beta header 由 CLI 已带）。即 `rewriteModel` 的匹配规则是"剥离 `[1m]` 后白名单匹配"。
+
+**保留词避让**：别名不得撞 CLI 保留 alias `opus`/`sonnet`/`haiku`/`opusplan`/`best`（`parseUserSpecifiedModel` 对这些有特殊分支，会把 `[1m]` 拼到 default model 上，`model.ts:456-470`）。`ccp-*-N` 不撞，安全。
+
+### 6.10 衍生目标：重试记录按 session 过滤
+
+**目标**：在代理的重试记录页面（`proxy/web/index.html`），能单独跟踪某一个 session 的所有请求记录——即按会话编号 N filter 出该会话的全部 trace。
+
+**前提**：别名按会话唯一（`ccp-sonnet-N` / `ccp-haiku-N` / `ccp-opus-N`），每个请求的 `model` 字段都带会话编号。trace 记录（`proxy/trace-store.js`）已存 `reqModel`（§6.4 P3 修订后会存原始别名 + `resolvedModel` 真实模型）。所以**会话编号天然是 trace 的可过滤维度**——不用额外打 session 标记，从 `reqModel` 解析出 N 即可分组。
+
+**实现方向**：
+
+- trace 列表加一个"session filter"——按编号 N 过滤，展示该会话所有档位的全部请求（haiku/sonnet/opus 三档混在一起，按时间序）。
+- 提取 N：从 `reqModel`（形如 `ccp-sonnet-3`）正则 `ccp-(haiku|sonnet|opus)-(\d+)` 取后缀数字。
+- 这让用户能看"这个会话跑过哪些请求、各自走了哪个真实模型、重试了几次"——对调试运行时切换很有用。
+
+**依赖**：本目标依赖 §6.4 P3 修订——trace 必须既存原始别名（含 N，用于 filter）又存 `resolvedModel`（真实模型，用于展示"实际走了哪个模型"）。若 trace 只存别名，filter 能做但看不出真实模型；若只存真实模型，则无法按 N filter。故 trace 字段补 `resolvedModel` 是本目标的前置。
+
+> 这是别名唯一性的副产品收益：会话独立别名不仅用于运行时切换，还天然成了 trace 的会话标识，无需额外埋点。
+
+### 6.11 审查修订记录
+
+本节为独立子 agent 对照代码挑错后的修订记录（11 个问题）：
+
+| 编号 | 严重度 | 问题 | 修订处 |
+|---|---|---|---|
+| P1 | 🔴 阻塞 | 继承断链：父配置被编辑/删除后派生节点无法合成 | §6.2 加 `derivedSnapshot` 字段；§6.5 加快照优先 + 级联处理 + 孤儿标记；§6.3 加孤儿节点标记 |
+| P2 | 🔴 阻塞 | `nextAliasId` 计数器不持久化、代理重启后重号 | §6.2 计数器落 `proxy-config.json` + init 读取 + 启动扫 key 校正；§6.4 补 init/getView/persist 落点 |
+| P3 | 🔴 阻塞 | rewriteModel 与 rewriteEffort 串联的重复 parse + isMessagesMain 守卫错配 | §6.4 补"不受 isMessagesMain 守卫""可合并单次 parse""trace 补 resolvedModel""content-length 是 delete+重算" |
+| P4 | 🟡 缺口 | token 传递歧义：shell env 传 token 安全降级 | §6.6 表加"传递方式"列；明确别名走 shell env、BASE_URL/token 走 settings.env；删"可省"表述；§5.9 对齐 |
+| P5 | 🟡 缺口 | 串味只给建议无拦截 | §6.9 补"独立是有限独立"+ launchDerived 上游一致性警告 + 树标记 |
+| P6 | 🟡 缺口 | 删派生节点后活终端报 model not found | §6.8 补 deleteDerivedConfig 关联活终端处理 |
+| P7 | 🟡 缺口 | setAlias 不刷树/不同步本地缓存 | §6.7 补 setAlias 同步 localStore + refresh；补跨窗口 cache 限制说明 |
+| P8 | 🟡 缺口 | rewriteModel 受 isMessagesMain 守卫会漏 count_tokens | 并入 P3，§6.4 已修 |
+| P9 | 🟢 细化 | 全局模型清单来源空白 | §6.7 补聚合来源 + 手输 |
+| P10 | 🟢 细化 | launchDerived 与 launchWorkspaceClaude 关系未明 | §6.8 补两命令并存 + 公共方法分流 |
+| P11 | 🟢 细化 | 派生节点 content textarea 改后继承是否成立 | §6.7 标注 derived scope 下 content 只读 + ASCII 图更新 |
+
+自洽性修订：§3.2 加框标注"§6 落地后废弃"；§5.5 映射表生命周期改为"不回收"；§5.6 重写三套机制关系（§6 = §5.5 落地、§3 仅原理）；§5.9 对齐传递方式。
 
 
 
