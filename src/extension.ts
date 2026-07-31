@@ -87,6 +87,9 @@ export function activate(context: vscode.ExtensionContext): void {
         switchLocalConfig: (cfg) => doLocalSwitch(cfg),
         getLocalStore: () => localStore,
         loadGlobalConfigs: () => store.load(),
+        launchDerived: (cfg) => launcher.launchDerived(cfg),
+        getProxyHost: () => proxyHost,
+        refresh: () => { void refresh(); },
     });
 
     // --- Status bar indicator ---
@@ -276,6 +279,57 @@ export function activate(context: vscode.ExtensionContext): void {
         return picked?.config;
     }
 
+    /**
+     * 删派生节点 + 清代理映射表三条 + 关联处理活终端（§6.8 P6）。
+     * - 清映射：调 removeModelAlias 删 ccp-{haiku,sonnet,opus}-N（缺则忽略）。
+     * - 活终端：按终端 name 含 `#N` 或 env CCP_DERIVED_ID=N 匹配，弹确认一并关闭。
+     *   匹配靠终端 name（createTerminal 的 name 含 #N），env 无法事后读，故以 name 为准。
+     */
+    async function deleteDerivedAndAliases(derivedCfg: LLMConfig): Promise<void> {
+        if (!localStore) {
+            return;
+        }
+        const idx = derivedCfg.derivedIndex;
+        // 关联活终端：按终端 name 含 `#N` 匹配。
+        // 用 `#N` 后非数字断言（?!\\d）避免 #2 误匹配 #20/#21 等（终端 name 形如 `Claude Code #2 (xxx)`）。
+        if (idx != null) {
+            const idxRe = new RegExp(`#${idx}(?![0-9])`);
+            const liveTerminals = vscode.window.terminals.filter(t => idxRe.test(t.name));
+            if (liveTerminals.length > 0) {
+                const choice = await vscode.window.showWarningMessage(
+                    `派生节点 #${idx} 仍有 ${liveTerminals.length} 个终端在运行，是否一并关闭？（不关闭的终端映射被清后会请求失败）`,
+                    { modal: true },
+                    '一并关闭终端',
+                    '保留终端',
+                );
+                if (choice === '一并关闭终端') {
+                    for (const t of liveTerminals) {
+                        t.dispose();
+                    }
+                }
+            }
+        }
+        // 清代理映射表三条
+        if (idx != null && proxyHost) {
+            for (const tier of ['haiku', 'sonnet', 'opus'] as const) {
+                const alias = `ccp-${tier}-${idx}`;
+                try {
+                    await proxyHost.removeModelAlias(alias);
+                } catch (err) {
+                    // 代理未运行/别名不存在均忽略——删本地节点不应被代理状态阻断
+                    const msg = err instanceof Error ? err.message : String(err);
+                    output.appendLine(`[deleteDerived] 清除映射 ${alias} 失败（已忽略）: ${msg}`);
+                }
+            }
+        }
+        await localStore.remove(derivedCfg.id);
+    }
+
+    /** 取派生节点的父配置（用于 newDerivedConfig 选父）。 */
+    async function pickLocalParentConfig(action: string): Promise<LLMConfig | undefined> {
+        return pickLocalConfig(action);
+    }
+
     // --- Commands: global configs ---
     context.subscriptions.push(
         vscode.commands.registerCommand('claude-code-proxy.newConfig', () => {
@@ -337,12 +391,81 @@ export function activate(context: vscode.ExtensionContext): void {
             if (!cfg || !localStore) {
                 return;
             }
+            // 父删级联（§6.5 P1）：扫派生节点，弹确认一并删 + 清代理映射表三条
+            const derived = await localStore.getDerivedByParent(cfg.id);
+            if (derived.length > 0) {
+                const choice = await vscode.window.showWarningMessage(
+                    `'${cfg.name}' 下有 ${derived.length} 个派生节点。删除父配置会使它们成为孤儿。是否一并删除这些派生节点？`,
+                    { modal: true },
+                    '一并删除',
+                    '仅删父配置（派生留为孤儿）',
+                );
+                if (choice === '一并删除') {
+                    for (const d of derived) {
+                        await deleteDerivedAndAliases(d);
+                    }
+                }
+            }
             await localStore.remove(cfg.id);
             // 删的若正是 active，清掉标记
             const state = await localActiveState?.load();
             if (state && state.id === cfg.id) {
                 await localActiveState?.clear();
             }
+            await refresh();
+        }),
+
+        // --- Commands: derived (派生虚拟配置节点) ---
+        // 新建派生节点：选父 local 配置 → 向代理 nextAliasId 申请编号 N → 打开配置页
+        vscode.commands.registerCommand('claude-code-proxy.newDerivedConfig', async (arg?: LLMConfig | vscode.TreeItem) => {
+            if (!localStore) {
+                void vscode.window.showErrorMessage('请先打开一个 workspace 文件夹');
+                return;
+            }
+            const parent = resolveConfig(arg) ?? await pickLocalParentConfig('作为派生节点的父配置');
+            if (!parent) {
+                return;
+            }
+            if (!proxyHost) {
+                void vscode.window.showErrorMessage('代理尚未初始化，无法申请编号');
+                return;
+            }
+            let idx: number;
+            try {
+                idx = await proxyHost.nextAliasId();
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`向代理申请编号失败: ${msg}`);
+                return;
+            }
+            const name = `${parent.name} #${idx}`;
+            void editor.openNewDerived(parent, idx, name);
+        }),
+
+        vscode.commands.registerCommand('claude-code-proxy.editDerivedConfig', (arg?: LLMConfig | vscode.TreeItem) => {
+            const cfg = resolveConfig(arg);
+            if (!cfg) {
+                void vscode.window.showWarningMessage('请从树视图的派生节点上打开编辑');
+                return;
+            }
+            void editor.openEditDerived(cfg);
+        }),
+
+        vscode.commands.registerCommand('claude-code-proxy.launchDerivedClaude', (arg?: LLMConfig | vscode.TreeItem) => {
+            const cfg = resolveConfig(arg);
+            if (!cfg) {
+                void vscode.window.showWarningMessage('请从树视图的派生节点上启动');
+                return;
+            }
+            void launcher.launchDerived(cfg);
+        }),
+
+        vscode.commands.registerCommand('claude-code-proxy.deleteDerivedConfig', async (arg?: LLMConfig | vscode.TreeItem) => {
+            const cfg = resolveConfig(arg);
+            if (!cfg || !localStore) {
+                return;
+            }
+            await deleteDerivedAndAliases(cfg);
             await refresh();
         }),
 

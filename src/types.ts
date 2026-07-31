@@ -1,5 +1,20 @@
 export type ConfigMode = 'direct' | 'proxy';
 
+/** 派生节点三档别名 → 真实模型映射（§6.2）。本地缓存，权威在代理 modelAliases。 */
+export interface ModelAliasMapping {
+    haiku?: string;   // ccp-haiku-N → 真实模型名
+    sonnet?: string;  // ccp-sonnet-N → 真实模型名
+    opus?: string;    // ccp-opus-N → 真实模型名
+}
+
+/** 派生节点创建时存的父上游快照（防父删/改导致继承断链，§6.5 P1）。 */
+export interface DerivedSnapshot {
+    baseUrl: string;
+    token: string;
+    timeoutSec?: number;
+    mode: ConfigMode;
+}
+
 export interface LLMConfig {
     /** Stable unique id (uuid-ish). */
     id: string;
@@ -11,6 +26,15 @@ export interface LLMConfig {
     mode?: ConfigMode;
     /** ISO timestamp of last modification. */
     updatedAt: string;
+    // —— 派生节点字段（仅派生节点有，§6.2）——
+    /** 父 local 配置 id。有此字段即为派生节点。 */
+    derivedFrom?: string;
+    /** 专属编号 N（全局唯一，权威在代理 nextAliasId）。 */
+    derivedIndex?: number;
+    /** 三档别名 → 真实模型（本地缓存，权威在代理）。 */
+    modelAliases?: ModelAliasMapping;
+    /** 父上游快照（防父被删/改导致继承断链）。 */
+    derivedSnapshot?: DerivedSnapshot;
 }
 
 /** 激活态记录：当前激活了哪条配置、什么模式。 */

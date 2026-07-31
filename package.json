@@ -117,6 +117,26 @@
           "command": "claude-code-proxy.deleteLocalConfig",
           "when": "view == claude-code-proxy.configs && viewItem == local-config",
           "group": "inline@3"
+        },
+        {
+          "command": "claude-code-proxy.newDerivedConfig",
+          "when": "view == claude-code-proxy.configs && viewItem == local-config && workspaceFolderCount > 0",
+          "group": "inline@4"
+        },
+        {
+          "command": "claude-code-proxy.launchDerivedClaude",
+          "when": "view == claude-code-proxy.configs && viewItem == derived-config",
+          "group": "inline@1"
+        },
+        {
+          "command": "claude-code-proxy.editDerivedConfig",
+          "when": "view == claude-code-proxy.configs && viewItem == derived-config",
+          "group": "inline@2"
+        },
+        {
+          "command": "claude-code-proxy.deleteDerivedConfig",
+          "when": "view == claude-code-proxy.configs && viewItem == derived-config",
+          "group": "inline@3"
         }
       ]
     },
@@ -211,6 +231,26 @@
       {
         "command": "claude-code-proxy.deleteLocalConfig",
         "title": "Delete (Local)",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claude-code-proxy.newDerivedConfig",
+        "title": "New Derived Config (Alias Session)",
+        "icon": "$(symbol-runtime)"
+      },
+      {
+        "command": "claude-code-proxy.editDerivedConfig",
+        "title": "Edit (Derived)",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claude-code-proxy.launchDerivedClaude",
+        "title": "Launch Derived Claude Session",
+        "icon": "$(play)"
+      },
+      {
+        "command": "claude-code-proxy.deleteDerivedConfig",
+        "title": "Delete (Derived)",
         "icon": "$(trash)"
       },
       {

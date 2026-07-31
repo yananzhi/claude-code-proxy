@@ -238,6 +238,104 @@ export class ProxyHost {
         this.log(`已注入上游: ${env.baseUrl} model=${env.model ?? '(unset)'}`);
     }
 
+    /** 设置/更新一条别名映射（POST /api/model-alias）。照 setUpstream 模板。 */
+    async setModelAlias(alias: string, model: string): Promise<void> {
+        await this.postJson('/api/model-alias', { alias, model });
+        this.log(`已设置别名映射: ${alias} → ${model}`);
+    }
+
+    /** 删除一条别名映射（POST /api/model-alias/delete）。 */
+    async removeModelAlias(alias: string): Promise<void> {
+        await this.postJson('/api/model-alias/delete', { alias });
+        this.log(`已删除别名映射: ${alias}`);
+    }
+
+    /** 向代理申请下一个全局唯一编号 N（GET /api/model-alias/next-id）。 */
+    async nextAliasId(): Promise<number> {
+        const port = this.getPort();
+        return new Promise<number>((resolve, reject) => {
+            const req = http.get(
+                `http://127.0.0.1:${port}/api/model-alias/next-id`,
+                { timeout: 3000 },
+                (res) => {
+                    let raw = '';
+                    res.setEncoding('utf8');
+                    res.on('data', (chunk) => { raw += chunk; });
+                    res.on('end', () => {
+                        if (res.statusCode !== 200) {
+                            reject(new Error(`代理返回 ${res.statusCode}`));
+                            return;
+                        }
+                        try {
+                            const obj = JSON.parse(raw) as { id: number };
+                            if (typeof obj.id !== 'number' || !Number.isFinite(obj.id)) {
+                                reject(new Error(`代理返回的 id 非数字: ${raw}`));
+                                return;
+                            }
+                            resolve(obj.id);
+                        } catch (e) {
+                            reject(new Error(`解析 next-id 响应失败: ${(e as Error).message}`));
+                        }
+                    });
+                },
+            );
+            req.on('error', reject);
+            req.on('timeout', () => { req.destroy(); reject(new Error('申请编号超时（代理未运行？）')); });
+        });
+    }
+
+    /** 取代理当前别名映射全表（GET /api/config 的 modelAliases 字段）。供上游一致性比对等用。 */
+    async getModelAliases(): Promise<Record<string, string>> {
+        const port = this.getPort();
+        return new Promise<Record<string, string>>((resolve, reject) => {
+            const req = http.get(
+                `http://127.0.0.1:${port}/api/config`,
+                { timeout: 3000 },
+                (res) => {
+                    let raw = '';
+                    res.setEncoding('utf8');
+                    res.on('data', (chunk) => { raw += chunk; });
+                    res.on('end', () => {
+                        if (res.statusCode !== 200) {
+                            reject(new Error(`代理返回 ${res.statusCode}`));
+                            return;
+                        }
+                        try {
+                            const obj = JSON.parse(raw) as { modelAliases?: Record<string, string> };
+                            resolve(obj.modelAliases ?? {});
+                        } catch (e) {
+                            reject(new Error(`解析 /api/config 响应失败: ${(e as Error).message}`));
+                        }
+                    });
+                },
+            );
+            req.on('error', reject);
+            req.on('timeout', () => { req.destroy(); reject(new Error('拉取映射表超时（代理未运行？）')); });
+        });
+    }
+
+    /** POST JSON 到代理的通用封装（照 setUpstream 的 request 模板抽出）。 */
+    private postJson(path: string, bodyObj: unknown): Promise<void> {
+        const port = this.getPort();
+        const body = JSON.stringify(bodyObj);
+        return new Promise<void>((resolve, reject) => {
+            const req = http.request(
+                `http://127.0.0.1:${port}${path}`,
+                { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeout: 3000 },
+                (res) => {
+                    res.resume();
+                    res.on('end', () => {
+                        if (res.statusCode === 200) resolve();
+                        else reject(new Error(`代理返回 ${res.statusCode}`));
+                    });
+                },
+            );
+            req.on('error', reject);
+            req.on('timeout', () => { req.destroy(); reject(new Error(`${path} 请求超时（代理未运行？）`)); });
+            req.end(body);
+        });
+    }
+
     private async tryBecomeHost(): Promise<void> {
         if (!this.toggle.isEnabled()) return; // 开关关闭：本窗口不启动也不接管
         if (this.handle) return; // 已是宿主

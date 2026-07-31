@@ -1,8 +1,11 @@
 import * as vscode from 'vscode';
-import type { LLMConfig } from './types';
+import type { LLMConfig, ModelAliasMapping } from './types';
 import { ConfigStore, newId } from './configStore';
 import { LocalConfigStore } from './localConfigStore';
 import { detectPlatform, readSettings } from './claudeConfig';
+import { ProxyHost } from './proxyHost';
+import { extractUpstream } from './upstream';
+import { aggregateModelCatalog, aliasName } from './derivedLogic';
 
 interface EditorHandlers {
     onSaved: () => void;
@@ -14,9 +17,15 @@ interface EditorHandlers {
     getLocalStore: () => LocalConfigStore | null;
     /** global 配置列表，供 local 编辑器的"从 global 导入"下拉用。 */
     loadGlobalConfigs: () => Promise<LLMConfig[]>;
+    /** 派生节点：保存后立即启动（Save & 启动）。 */
+    launchDerived: (cfg: LLMConfig) => Promise<void>;
+    /** 代理 host（派生节点 setAlias 用，无代理时 null）。 */
+    getProxyHost: () => ProxyHost | null;
+    /** 刷新树（setAlias 后刷派生节点 description）。 */
+    refresh: () => void;
 }
 
-type Scope = 'global' | 'local';
+type Scope = 'global' | 'local' | 'derived';
 
 /**
  * Webview panel for creating/editing a single LLM config (name + a textarea
@@ -60,6 +69,64 @@ export class WebviewEditor {
             cfg.mode === 'proxy' ? 'proxy' : 'direct', 'local', globalConfigs);
     }
 
+    /** 新建派生节点：已有编号 N 与父配置，打开配置页让用户配三档映射。 */
+    async openNewDerived(parentCfg: LLMConfig, derivedIndex: number, name: string): Promise<void> {
+        const localStore = this.handlers.getLocalStore();
+        if (!localStore) {
+            void vscode.window.showErrorMessage('请先打开一个 workspace 文件夹');
+            return;
+        }
+        const catalog = await this.loadModelCatalog();
+        const snapshot = this.snapshotFromParent(parentCfg);
+        if (!snapshot) {
+            // 父 content 无效或缺 baseUrl/token：快照无法生成，派生节点将无法独立启动（父删/改后断链）。
+            // 提示用户但不阻断——用户可能只是想先建节点再修父配置。
+            void vscode.window.showWarningMessage(
+                `父配置 '${parentCfg.name}' 的 content 无法解析出 ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN，` +
+                `派生节点未存上游快照。若父配置后续被删或改坏，此派生节点将无法启动。`,
+            );
+        }
+        const cfg: LLMConfig = {
+            id: newId(),
+            name,
+            content: parentCfg.content, // 派生节点 content 只读展示用，启动时以父 content + 快照合成
+            mode: parentCfg.mode,
+            updatedAt: new Date().toISOString(),
+            derivedFrom: parentCfg.id,
+            derivedIndex,
+            modelAliases: {},
+            derivedSnapshot: snapshot,
+        };
+        await this.open(`new:derived:${cfg.id}`, undefined, `New Derived: ${name}`, name, parentCfg.content,
+            cfg.mode === 'proxy' ? 'proxy' : 'direct', 'derived', [], { cfg, catalog });
+    }
+
+    /** 编辑派生节点：打开配置页改三档映射（在线改即时生效，不关面板）。 */
+    async openEditDerived(cfg: LLMConfig): Promise<void> {
+        const catalog = await this.loadModelCatalog();
+        await this.open(`edit:derived:${cfg.id}`, cfg.id, `Edit: ${cfg.name}`, cfg.name, cfg.content,
+            cfg.mode === 'proxy' ? 'proxy' : 'direct', 'derived', [], { cfg, catalog });
+    }
+
+    /** 从父配置提取上游快照（§6.5 P1，防父删/改断链）。 */
+    private snapshotFromParent(parent: LLMConfig): { baseUrl: string; token: string; timeoutSec?: number; mode: 'direct' | 'proxy' } | undefined {
+        const parsed = extractUpstream(parent.content);
+        if (!parsed) return undefined;
+        const baseUrl = parsed.env.ANTHROPIC_BASE_URL;
+        const token = parsed.env.ANTHROPIC_AUTH_TOKEN;
+        if (!baseUrl || !token) return undefined;
+        const timeoutSec = parsed.env.API_TIMEOUT_MS ? Math.round(Number(parsed.env.API_TIMEOUT_MS) / 1000) : undefined;
+        return { baseUrl, token, timeoutSec, mode: parent.mode === 'proxy' ? 'proxy' : 'direct' };
+    }
+
+    /** 聚合全局模型清单（global + local + derived，§6.7 P9）。 */
+    private async loadModelCatalog(): Promise<string[]> {
+        const globalConfigs = await this.handlers.loadGlobalConfigs();
+        const localStore = this.handlers.getLocalStore();
+        const localConfigs = localStore ? await localStore.load() : [];
+        return aggregateModelCatalog([...globalConfigs, ...localConfigs]);
+    }
+
     private async open(
         key: string,
         existingId: string | undefined,
@@ -69,6 +136,7 @@ export class WebviewEditor {
         mode: 'direct' | 'proxy',
         scope: Scope,
         globalConfigs: LLMConfig[],
+        derivedExtra?: { cfg: LLMConfig; catalog: string[] },
     ): Promise<void> {
         const existing = this.panels.get(key);
         if (existing) {
@@ -85,10 +153,10 @@ export class WebviewEditor {
                 retainContextWhenHidden: true,
             },
         );
-        panel.webview.html = this.buildHtml(title, name, content, mode, scope, globalConfigs);
+        panel.webview.html = this.buildHtml(title, name, content, mode, scope, globalConfigs, derivedExtra);
 
         panel.webview.onDidReceiveMessage(
-            (msg: WebviewMessage) => this.onMessage(panel, key, existingId, scope, msg, globalConfigs),
+            (msg: WebviewMessage) => this.onMessage(panel, key, existingId, scope, msg, globalConfigs, derivedExtra),
             undefined,
             [],
         );
@@ -104,6 +172,7 @@ export class WebviewEditor {
         scope: Scope,
         msg: WebviewMessage,
         globalConfigs: LLMConfig[],
+        derivedExtra?: { cfg: LLMConfig; catalog: string[] },
     ): Promise<void> {
         if (msg.type === 'cancel') {
             panel.dispose();
@@ -119,6 +188,12 @@ export class WebviewEditor {
             return;
         }
 
+        // 派生节点：在线改单档别名映射（§6.7 P7），即时生效 + 同步本地缓存 + 刷树 + 不关面板
+        if (msg.type === 'setAlias' && scope === 'derived' && derivedExtra) {
+            await this.handleSetAlias(panel, derivedExtra.cfg, msg.tier, msg.model, existingId);
+            return;
+        }
+
         if (msg.type !== 'save' && msg.type !== 'saveAndSwitch') {
             return;
         }
@@ -130,43 +205,128 @@ export class WebviewEditor {
             panel.webview.postMessage({ type: 'error', message: 'Name is required.' });
             return;
         }
-        try {
-            JSON.parse(content); // validate JSON before persisting
-        } catch (e) {
-            panel.webview.postMessage({ type: 'error', message: `Invalid JSON: ${(e as Error).message}` });
+        // derived scope 的 content 只读，不校验/不保存用户编辑（继承自父）
+        if (scope !== 'derived') {
+            try {
+                JSON.parse(content); // validate JSON before persisting
+            } catch (e) {
+                panel.webview.postMessage({ type: 'error', message: `Invalid JSON: ${(e as Error).message}` });
+                return;
+            }
+        }
+
+        if (scope === 'global') {
+            const cfg: LLMConfig = {
+                id: existingId ?? newId(),
+                name,
+                content,
+                mode: msg.mode === 'proxy' ? 'proxy' : 'direct',
+                updatedAt: new Date().toISOString(),
+            };
+            await this.store.upsert(cfg);
+            this.handlers.onSaved();
+            panel.webview.postMessage({ type: 'saved' });
+            if (msg.type === 'saveAndSwitch') {
+                await this.handlers.switchConfig(cfg);
+            }
+            panel.dispose();
             return;
         }
 
-        const cfg: LLMConfig = {
-            id: existingId ?? newId(),
-            name,
-            content,
-            mode: msg.mode === 'proxy' ? 'proxy' : 'direct',
-            updatedAt: new Date().toISOString(),
-        };
-
-        if (scope === 'global') {
-            await this.store.upsert(cfg);
-        } else {
+        if (scope === 'local') {
             const localStore = this.handlers.getLocalStore();
             if (!localStore) {
                 panel.webview.postMessage({ type: 'error', message: 'workspace 不可用' });
                 return;
             }
+            const cfg: LLMConfig = {
+                id: existingId ?? newId(),
+                name,
+                content,
+                mode: msg.mode === 'proxy' ? 'proxy' : 'direct',
+                updatedAt: new Date().toISOString(),
+            };
             await localStore.upsert(cfg);
-        }
-        this.handlers.onSaved();
-
-        panel.webview.postMessage({ type: 'saved' });
-
-        if (msg.type === 'saveAndSwitch') {
-            if (scope === 'global') {
-                await this.handlers.switchConfig(cfg);
-            } else {
+            this.handlers.onSaved();
+            panel.webview.postMessage({ type: 'saved' });
+            if (msg.type === 'saveAndSwitch') {
                 await this.handlers.switchLocalConfig(cfg);
             }
+            panel.dispose();
+            return;
+        }
+
+        // scope === 'derived'
+        const localStore = this.handlers.getLocalStore();
+        if (!localStore) {
+            panel.webview.postMessage({ type: 'error', message: 'workspace 不可用' });
+            return;
+        }
+        const base = derivedExtra?.cfg;
+        if (!base) {
+            panel.webview.postMessage({ type: 'error', message: '派生节点数据缺失' });
+            return;
+        }
+        // 派生节点只存 name + modelAliases（content/mode/snapshot/derivedFrom/index 沿用 base）
+        const cfg: LLMConfig = {
+            ...base,
+            name,
+            updatedAt: new Date().toISOString(),
+        };
+        await localStore.upsert(cfg);
+        this.handlers.onSaved();
+        panel.webview.postMessage({ type: 'saved' });
+        if (msg.type === 'saveAndSwitch') {
+            // 派生节点的 "Save & 启动" = 保存后立即 launchDerived
+            await this.handlers.launchDerived(cfg);
         }
         panel.dispose();
+    }
+
+    /**
+     * 处理 setAlias：调 proxyHost.setModelAlias + 同步本地缓存 + 刷树 + 不关面板（§6.7 P7）。
+     * 权威在代理；本地 upsert 是为本窗口展示一致（重开编辑器显示新值、树 description 刷新）。
+     * 新建（未保存）派生节点：existingId===undefined，跳过本地 upsert（节点尚未持久化，
+     * 用户可能取消），但仍更新代理表 + 内存 cfg.modelAliases（供后续保存时带上）。
+     */
+    private async handleSetAlias(
+        panel: vscode.WebviewPanel,
+        cfg: LLMConfig,
+        tier: 'haiku' | 'sonnet' | 'opus',
+        model: string,
+        existingId: string | undefined,
+    ): Promise<void> {
+        if (cfg.derivedIndex == null) {
+            panel.webview.postMessage({ type: 'error', message: '派生节点缺少编号，无法设置别名' });
+            return;
+        }
+        const proxyHost = this.handlers.getProxyHost();
+        if (!proxyHost) {
+            panel.webview.postMessage({ type: 'error', message: '代理尚未初始化' });
+            return;
+        }
+        const alias = aliasName(tier, cfg.derivedIndex);
+        try {
+            await proxyHost.setModelAlias(alias, model);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            panel.webview.postMessage({ type: 'error', message: `设置别名失败: ${msg}` });
+            return;
+        }
+        // 同步本地缓存（仅已持久化的派生节点；新建未保存的跳过，避免取消后留孤儿节点）
+        const localStore = this.handlers.getLocalStore();
+        if (localStore && existingId !== undefined) {
+            const updated: LLMConfig = {
+                ...cfg,
+                modelAliases: { ...(cfg.modelAliases ?? {}), [tier]: model },
+                updatedAt: new Date().toISOString(),
+            };
+            await localStore.upsert(updated);
+        }
+        // 无论是否 upsert，都更新内存 cfg.modelAliases 供后续 setAlias 基于最新值（避免连续改多档时丢档）
+        cfg.modelAliases = { ...(cfg.modelAliases ?? {}), [tier]: model };
+        this.handlers.refresh();
+        panel.webview.postMessage({ type: 'aliasSaved', tier });
     }
 
     private buildHtml(
@@ -176,6 +336,7 @@ export class WebviewEditor {
         mode: 'direct' | 'proxy',
         scope: Scope,
         globalConfigs: LLMConfig[],
+        derivedExtra?: { cfg: LLMConfig; catalog: string[] },
     ): string {
         const nonce = getNonce();
         const escapedName = escapeHtml(name);
@@ -183,6 +344,7 @@ export class WebviewEditor {
         const directChecked = mode === 'direct' ? 'checked' : '';
         const proxyChecked = mode === 'proxy' ? 'checked' : '';
         const isLocal = scope === 'local';
+        const isDerived = scope === 'derived';
 
         // "从 global 导入"下拉（仅 local 模式渲染）
         const importOptions = globalConfigs
@@ -197,6 +359,43 @@ export class WebviewEditor {
     </select>
     <div class="hint">选中后把该 global 配置的 name/content 填入下方，可再编辑。仅用于初始化，不影响 global 配置本身。</div>
   </div>` : '';
+
+        // 派生节点：三档别名映射区域（§6.7）。左固定别名只读，右下拉选真实模型（候选来自全局清单，可手输）。
+        let derivedBlock = '';
+        let contentReadOnly = '';
+        let modeDisabled = '';
+        let saveSwitchLabel = 'Save &amp; Switch';
+        if (isDerived && derivedExtra) {
+            const idx = derivedExtra.cfg.derivedIndex ?? 0;
+            const aliases = derivedExtra.cfg.modelAliases ?? {};
+            const catalogOpts = (['', ...derivedExtra.catalog])
+                .map(m => `<option value="${escapeHtml(m)}">${m ? escapeHtml(m) : '— 不设置（原样透传） —'}</option>`)
+                .join('');
+            const tierRow = (tier: 'haiku' | 'sonnet' | 'opus', label: string) => {
+                const alias = aliasName(tier, idx);
+                const cur = aliases[tier] ?? '';
+                return /* html */ `
+    <div class="alias-row">
+      <span class="alias-label">${label} 档</span>
+      <code class="alias-name">${escapeHtml(alias)}</code>
+      <span class="alias-arrow">→</span>
+      <input type="text" list="model-catalog" class="alias-model" data-tier="${tier}" value="${escapeHtml(cur)}" placeholder="真实模型名" />
+    </div>`;
+            };
+            derivedBlock = /* html */ `
+  <div class="row">
+    <label>模型别名映射（在线可改，下个请求生效）</label>
+    <div class="hint">继承自: ${escapeHtml(derivedExtra.cfg.derivedFrom ?? '(未知)')} · 专属编号: #${idx} · 别名: ${escapeHtml(aliasName('haiku', idx))} / ${escapeHtml(aliasName('sonnet', idx))} / ${escapeHtml(aliasName('opus', idx))}</div>
+    <datalist id="model-catalog">${catalogOpts}</datalist>
+    ${tierRow('haiku', 'Haiku')}
+    ${tierRow('sonnet', 'Sonnet')}
+    ${tierRow('opus', 'Opus')}
+    <div class="hint">改下拉值会即时同步到代理映射表并刷新树，无需重启 CLI、无需关闭本面板。</div>
+  </div>`;
+            contentReadOnly = 'readonly';
+            modeDisabled = 'disabled';
+            saveSwitchLabel = 'Save &amp; 启动';
+        }
 
         return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -265,6 +464,24 @@ export class WebviewEditor {
     background: var(--vscode-button-secondaryBackground);
     color: var(--vscode-button-secondaryForeground);
   }
+  .alias-row {
+    display: grid;
+    grid-template-columns: 80px 160px 16px 1fr;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+  }
+  .alias-label { font-weight: 600; font-size: 13px; }
+  .alias-name {
+    font-family: var(--vscode-editor-font-family);
+    font-size: 12px;
+    background: var(--vscode-textBlockQuote-background);
+    padding: 4px 6px;
+    border-radius: 2px;
+  }
+  .alias-arrow { text-align: center; color: var(--vscode-descriptionForeground); }
+  .alias-model { width: 100%; box-sizing: border-box; padding: 6px 8px; background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); color: var(--vscode-input-foreground); border-radius: 2px; font-size: 13px; }
+  textarea[readonly] { opacity: 0.7; cursor: default; }
 </style>
 </head>
 <body>
@@ -274,19 +491,22 @@ export class WebviewEditor {
   </div>
   <div class="row">
     <label>连接模式</label>
-    <label style="font-weight:normal; margin-bottom:4px"><input type="radio" name="mode" value="direct" ${directChecked} /> 直连 — Claude Code 直接连此上游（默认）</label>
-    <label style="font-weight:normal; margin-bottom:0"><input type="radio" name="mode" value="proxy" ${proxyChecked} /> 通过代理连接 — 代理用此上游重试 503，Claude Code 经代理连接</label>
+    <label style="font-weight:normal; margin-bottom:4px"><input type="radio" name="mode" value="direct" ${directChecked} ${modeDisabled} /> 直连 — Claude Code 直接连此上游（默认）</label>
+    <label style="font-weight:normal; margin-bottom:0"><input type="radio" name="mode" value="proxy" ${proxyChecked} ${modeDisabled} /> 通过代理连接 — 代理用此上游重试 503，Claude Code 经代理连接</label>
   </div>
   ${importBlock}
+  ${derivedBlock}
   <div class="row">
-    <label for="content">settings.json content</label>
-    <textarea id="content" spellcheck="false">${escapedContent}</textarea>
-    <div class="hint">This is the full content written to Claude Code's settings.json when you switch (direct), or used as the proxy's upstream (proxy mode).</div>
+    <label for="content">settings.json content${isDerived ? ' (只读·继承自父)' : ''}</label>
+    <textarea id="content" spellcheck="false" ${contentReadOnly}>${escapedContent}</textarea>
+    <div class="hint">${isDerived
+        ? '派生节点继承父配置的上游，content 不可编辑。如需自定义 content，请另建普通 workspace-local 配置。'
+        : 'This is the full content written to Claude Code\'s settings.json when you switch (direct), or used as the proxy\'s upstream (proxy mode).'}</div>
   </div>
   <div id="error" aria-live="polite"></div>
   <div class="actions">
     <button id="save" type="button">Save</button>
-    <button id="saveSwitch" type="button">Save &amp; Switch</button>
+    <button id="saveSwitch" type="button">${saveSwitchLabel}</button>
     <button id="cancel" class="secondary" type="button">Cancel</button>
   </div>
 
@@ -298,10 +518,18 @@ export class WebviewEditor {
     const saveBtn = document.getElementById('save');
     const saveSwitchBtn = document.getElementById('saveSwitch');
     const importSel = document.getElementById('import');
+    const isDerived = ${isDerived ? 'true' : 'false'};
 
     function validate() {
+      const nameOk = nameEl.value.trim().length > 0;
+      // derived: content 只读继承自父，不校验 JSON；只要求 name 非空
+      if (isDerived) {
+        saveBtn.disabled = !nameOk;
+        saveSwitchBtn.disabled = !nameOk;
+        return;
+      }
       const text = contentEl.value.trim();
-      let ok = nameEl.value.trim().length > 0 && text.length > 0;
+      let ok = nameOk && text.length > 0;
       if (ok) {
         try { JSON.parse(text); errorEl.textContent = ''; }
         catch (e) { ok = false; errorEl.textContent = 'Invalid JSON: ' + e.message; }
@@ -313,7 +541,7 @@ export class WebviewEditor {
     }
 
     nameEl.addEventListener('input', validate);
-    contentEl.addEventListener('input', validate);
+    if (!isDerived) { contentEl.addEventListener('input', validate); }
 
     function selectedMode() {
       const checked = document.querySelector('input[name="mode"]:checked');
@@ -331,6 +559,16 @@ export class WebviewEditor {
         vscode.postMessage({ type: 'import', id });
       });
     }
+
+    // 派生节点：别名映射 input 改动 → setAlias 即时生效（不关面板）
+    document.querySelectorAll('.alias-model').forEach(el => {
+      el.addEventListener('change', () => {
+        const tier = el.getAttribute('data-tier');
+        const model = el.value.trim();
+        if (!tier) { return; }
+        vscode.postMessage({ type: 'setAlias', tier, model });
+      });
+    });
 
     saveBtn.addEventListener('click', () => {
       vscode.postMessage({ type: 'save', name: nameEl.value, content: contentEl.value, mode: selectedMode() });
@@ -352,6 +590,10 @@ export class WebviewEditor {
         setMode(msg.mode);
         validate();
       }
+      else if (msg.type === 'aliasSaved') {
+        // 轻量确认：不关面板，不清空 input（用户可能连改多档）
+        errorEl.textContent = msg.tier + ' 档已同步到代理（下个请求生效）';
+      }
       else if (msg.type === 'saved') { /* host will close panel */ }
     });
 
@@ -366,6 +608,7 @@ export class WebviewEditor {
 type WebviewMessage =
     | { type: 'save' | 'saveAndSwitch'; name: string; content: string; mode: 'direct' | 'proxy' }
     | { type: 'import'; id: string }
+    | { type: 'setAlias'; tier: 'haiku' | 'sonnet' | 'opus'; model: string }
     | { type: 'cancel' };
 
 const TEMPLATE = `{
