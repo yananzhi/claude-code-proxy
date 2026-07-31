@@ -98,14 +98,14 @@ export class WebviewEditor {
             derivedSnapshot: snapshot,
         };
         await this.open(`new:derived:${cfg.id}`, undefined, `New Derived: ${name}`, name, parentCfg.content,
-            cfg.mode === 'proxy' ? 'proxy' : 'direct', 'derived', [], { cfg, catalog });
+            'proxy', 'derived', [], { cfg, catalog });  // 派生节点强制 proxy 模式（V7）
     }
 
     /** 编辑派生节点：打开配置页改三档映射（在线改即时生效，不关面板）。 */
     async openEditDerived(cfg: LLMConfig): Promise<void> {
         const catalog = await this.loadModelCatalog();
         await this.open(`edit:derived:${cfg.id}`, cfg.id, `Edit: ${cfg.name}`, cfg.name, cfg.content,
-            cfg.mode === 'proxy' ? 'proxy' : 'direct', 'derived', [], { cfg, catalog });
+            'proxy', 'derived', [], { cfg, catalog });  // 派生节点强制 proxy 模式（V7）
     }
 
     /** 从父配置提取上游快照（§6.5 P1，防父删/改断链）。 */
@@ -491,8 +491,12 @@ export class WebviewEditor {
   </div>
   <div class="row">
     <label>连接模式</label>
+    ${isDerived ? /* html */ `
+    <label style="font-weight:normal; margin-bottom:0"><input type="radio" name="mode" value="proxy" checked disabled /> 通过代理连接（派生节点强制）— 别名经代理重写，直连模式不支持运行时切换</label>
+    ` : /* html */ `
     <label style="font-weight:normal; margin-bottom:4px"><input type="radio" name="mode" value="direct" ${directChecked} ${modeDisabled} /> 直连 — Claude Code 直接连此上游（默认）</label>
     <label style="font-weight:normal; margin-bottom:0"><input type="radio" name="mode" value="proxy" ${proxyChecked} ${modeDisabled} /> 通过代理连接 — 代理用此上游重试 503，Claude Code 经代理连接</label>
+    `}
   </div>
   ${importBlock}
   ${derivedBlock}

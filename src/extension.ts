@@ -17,6 +17,14 @@ import { LocalConfigStore, LocalActiveStateStore } from './localConfigStore';
 let proxyHost: ProxyHost | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
+    // VS Code 扩展宿主的 @vscode/proxy-agent 会劫持 http.get/request，把发往本地 127.0.0.1 的
+    // 请求也可能走系统代理 / 改成绝对路径请求行，导致代理路由失配（返回 200 空 body）。
+    // 显式声明 NO_PROXY 绕过本地回环，确保扩展调代理接口直连。
+    // 必须在任何 http 调用之前执行（activate 最顶部）。
+    const localBypass = '127.0.0.1,localhost';
+    process.env.NO_PROXY = process.env.NO_PROXY ? `${process.env.NO_PROXY},${localBypass}` : localBypass;
+    process.env.no_proxy = process.env.no_proxy ? `${process.env.no_proxy},${localBypass}` : localBypass;
+
     // 扩展改名 cc-switch → claude-code-proxy 后，旧 globalStorage 数据读不到。
     // 同步迁移：必须在 ConfigStore/ActiveStateStore 首次 load() 之前完成，否则 cache 读到空目录。
     const migrated = migrateFromLegacy(context.globalStorageUri);

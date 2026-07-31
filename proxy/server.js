@@ -564,7 +564,17 @@ function openInFileManager(dir) {
 
 // ── 请求处理（模块级，依赖 configStore/traceStore，由 startServer 先 init）──
 async function handleRequest(req, res) {
-  const urlPath = req.url.split('?')[0];
+  // 规范化 urlPath：用 URL 解析，丢弃可能的绝对路径前缀。
+  // VS Code 扩展宿主的 @vscode/proxy-agent 会劫持 http.get，把请求行改成绝对路径
+  // （GET http://127.0.0.1:11434/api/...），导致 req.url 是绝对路径、字面匹配失败、
+  // fall-through 到代理转发。用 new URL 规范化拿 pathname，免疫绝对路径。
+  let urlPath;
+  try {
+    const parsed = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+    urlPath = parsed.pathname;
+  } catch {
+    urlPath = req.url.split('?')[0];
+  }
 
   if (req.method === 'GET' && urlPath === '/healthz') {
     sendJson(res, 200, { ok: true, upstream: configStore.getEnv().upstreamBase, ts: nowIso() });

@@ -236,7 +236,7 @@
       {
         "command": "claude-code-proxy.newDerivedConfig",
         "title": "New Derived Config (Alias Session)",
-        "icon": "$(symbol-runtime)"
+        "icon": "$(git-branch)"
       },
       {
         "command": "claude-code-proxy.editDerivedConfig",

@@ -2,7 +2,23 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
+import * as net from 'net';
 import { ProxyToggleStore } from './proxyToggle';
+
+/** 解 HTTP chunked 编码：把 <size>\r\n<chunk>\r\n... 拼成连续 body。简单实现，够本地 API 用。 */
+function dechunk(raw: string): string {
+    let out = '';
+    let i = 0;
+    while (i < raw.length) {
+        const cr = raw.indexOf('\r\n', i);
+        if (cr < 0) break;
+        const size = parseInt(raw.slice(i, cr), 16);
+        if (!Number.isFinite(size) || size <= 0) break;
+        out += raw.slice(cr + 2, cr + 2 + size);
+        i = cr + 2 + size + 2; // 跳过 chunk + 尾 \r\n
+    }
+    return out;
+}
 
 const HEARTBEAT_MS = 2000;
 const HEALTH_TIMEOUT_MS = 500;
@@ -250,37 +266,54 @@ export class ProxyHost {
         this.log(`已删除别名映射: ${alias}`);
     }
 
-    /** 向代理申请下一个全局唯一编号 N（GET /api/model-alias/next-id）。 */
+    /** 向代理申请下一个全局唯一编号 N（GET /api/model-alias/next-id）。
+     *  用裸 net socket 而非 http.get/fetch，绕过 VS Code @vscode/proxy-agent 对 http 栈的劫持
+     *  （proxy-agent 把响应改写成 chunked 并丢弃 body，导致 rawLen=0）。裸 socket 不被 hook。 */
     async nextAliasId(): Promise<number> {
         const port = this.getPort();
         return new Promise<number>((resolve, reject) => {
-            const req = http.get(
-                `http://127.0.0.1:${port}/api/model-alias/next-id`,
-                { timeout: 3000 },
-                (res) => {
-                    let raw = '';
-                    res.setEncoding('utf8');
-                    res.on('data', (chunk) => { raw += chunk; });
-                    res.on('end', () => {
-                        if (res.statusCode !== 200) {
-                            reject(new Error(`代理返回 ${res.statusCode}`));
-                            return;
-                        }
-                        try {
-                            const obj = JSON.parse(raw) as { id: number };
-                            if (typeof obj.id !== 'number' || !Number.isFinite(obj.id)) {
-                                reject(new Error(`代理返回的 id 非数字: ${raw}`));
-                                return;
-                            }
-                            resolve(obj.id);
-                        } catch (e) {
-                            reject(new Error(`解析 next-id 响应失败: ${(e as Error).message}`));
-                        }
-                    });
-                },
-            );
-            req.on('error', reject);
-            req.on('timeout', () => { req.destroy(); reject(new Error('申请编号超时（代理未运行？）')); });
+            const sock = net.connect(port, '127.0.0.1', () => {
+                sock.write(`GET /api/model-alias/next-id HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
+            });
+            let buf = Buffer.alloc(0);
+            sock.on('data', (chunk) => { buf = Buffer.concat([buf, chunk]); });
+            sock.on('end', () => {
+                const text = buf.toString('utf8');
+                // 响应格式：HTTP/1.1 200 OK\r\n<headers>\r\n\r\n<body>
+                const sep = text.indexOf('\r\n\r\n');
+                if (sep < 0) {
+                    this.log(`nextAliasId: 无 header/body 分隔 port=${port} text=${text.slice(0, 300)}`);
+                    reject(new Error('响应无 header/body 分隔'));
+                    return;
+                }
+                const statusLine = text.slice(0, text.indexOf('\r\n'));
+                const status = Number(statusLine.split(' ')[1]);
+                const headerBlock = text.slice(0, sep);
+                const bodyRaw = text.slice(sep + 4);
+                if (status !== 200) {
+                    this.log(`nextAliasId: status=${status} port=${port} body=${bodyRaw.slice(0, 200)}`);
+                    reject(new Error(`代理返回 ${status}`));
+                    return;
+                }
+                // 处理 chunked（若 transfer-encoding: chunked）
+                let body = bodyRaw;
+                if (/transfer-encoding:\s*chunked/i.test(headerBlock)) {
+                    body = dechunk(bodyRaw);
+                }
+                try {
+                    const obj = JSON.parse(body) as { id: number };
+                    if (typeof obj.id !== 'number' || !Number.isFinite(obj.id)) {
+                        reject(new Error(`代理返回的 id 非数字: ${body}`));
+                        return;
+                    }
+                    resolve(obj.id);
+                } catch (e) {
+                    this.log(`nextAliasId: 解析失败 port=${port} body=${JSON.stringify(body.slice(0, 200))} err=${(e as Error).message}`);
+                    reject(new Error(`解析 next-id 响应失败: ${(e as Error).message}`));
+                }
+            });
+            sock.on('error', (e) => { this.log(`nextAliasId: socket 错误 port=${port} err=${e.message}`); reject(e); });
+            sock.setTimeout(3000, () => { sock.destroy(); reject(new Error('申请编号超时（代理未运行？）')); });
         });
     }
 
