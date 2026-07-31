@@ -106,11 +106,13 @@ CLI 内部按"档位"路由模型：子任务（子 agent / 后台轻量任务�
 
 ### 3.3 `ANTHROPIC_MODEL` 不入 alias 的理由
 
+> **机制澄清（官方文档 `code.claude.com/docs/en/model-config`）**：`ANTHROPIC_MODEL` 与 `/model` 是**两层不同机制**——`ANTHROPIC_MODEL` 是**启动配置输入源**（env，启动时读、session 初始化 resolve），`/model` 改的是 **`Session.model` 运行时状态**（不改 `ANTHROPIC_MODEL` env、不改 `ANTHROPIC_DEFAULT_*`、不写 settings，仅当前 session 生效）。模型优先级：`/model`（运行时）> `--model`（启动参数）> `ANTHROPIC_MODEL`（env）> `settings.model`。故 `/model` 切换主模型走 `Session.model`，与 `ANTHROPIC_MODEL` env 解耦。
+
 | 若 `ANTHROPIC_MODEL` 也配别名 | 后果 |
 |---|---|
-| 用户经 `/model` 切换主模型 | CLI 改写 `ANTHROPIC_MODEL` 为真实档位名，请求 `model` 字段不再等于别名，替换规则失配 |
+| 用户经 `/model` 切换主模型 | `/model` 改 `Session.model`（不改 `ANTHROPIC_MODEL` env），但请求 `model` 字段会变成 `/model` 指定的值，不再是别名 `ccp-main`，替换规则失配 |
 
-**结论**：`ANTHROPIC_MODEL` 配真实模型名（或留空用 CLI 默认），使 `/model` 正常工作；仅三档 `DEFAULT_*` 配别名走 alias。两套机制作用域分离，互不干扰。
+**结论**：`ANTHROPIC_MODEL` 配真实模型名（或留空用 CLI 默认），使 `/model` 正常工作；仅三档 `DEFAULT_*` 配别名走 alias。`/model` 管 `Session.model` 运行时状态，`ANTHROPIC_DEFAULT_*` 管 alias 解析，本方案 alias 管代理层替换——三套机制作用域分离，互不干扰。详见 §6.13 `/model` 机制详表。
 
 ### 3.4 热更新接口规格
 
@@ -730,6 +732,51 @@ mock 测试断言用精算值（579,000 / 179,000），注释标注「校准了�
 - mock-cli 接真代理（`POST /probe/simulate-request` → 代理 → 上游），验证 rewriteModel 别名替换、effort 串联、trace 按 session 过滤等端到端链路。
 
 > 这条顺序的核心思想：**先用 mock 把黑盒前提变成可验证/可回归的代码，确认前提无误，再投入主方案实现**。避免在错误假设上堆代码。
+
+### 6.13 `/model` 机制与模型配置分层（官方文档调研）
+
+> 来源：`code.claude.com/docs/en/model-config`（中英版）。与 §5.4 的"主模型 session 冻结"实测一致。
+
+**核心澄清：`/model` 与 `ANTHROPIC_MODEL` 是两层不同机制。**
+
+- **`ANTHROPIC_MODEL`**：启动配置**输入源**（env）。启动时读、session 初始化时 resolve。运行中改 settings.env 不换当前 session 主模型（§5.4 实测确认）。
+- **`/model <alias|name>`**：运行时 **session 级**模型切换。**立即影响当前 session**（下次 API 请求用新 model）。但**不改 `ANTHROPIC_MODEL` env、不改 `ANTHROPIC_DEFAULT_*`、不写 settings**（仅当前 session 生效）。
+- 即 `ANTHROPIC_MODEL` 是**输入配置**，`Session.model` 是**运行时状态**，`/model` 改后者。
+
+**模型选择优先级**（官方）：
+
+```
+/model（运行时） > claude --model（启动参数） > ANTHROPIC_MODEL（env） > settings.json.model
+```
+
+**`/model` 与三档 `ANTHROPIC_DEFAULT_*` 的关系**：
+
+- `/model sonnet` → 解析走 `ANTHROPIC_DEFAULT_SONNET_MODEL` 指向的真实模型。
+- `/model xopglm52`（直接指定真实模型名）→ `Session.model=xopglm52`，**不**改 `ANTHROPIC_DEFAULT_*`。
+- 三档 `ANTHROPIC_DEFAULT_*` 控制 alias 解析（`opus`/`sonnet`/`haiku` 各自指向哪个真实模型），`haiku` 还兼管后台功能（title 生成、摘要等）。
+
+**`/model` 写不写 settings**：
+
+- `/model xxx`（直接切）：仅当前 session，**不写 settings**。下次启动恢复原值。
+- `/model` 打开 picker → 选模型 → 按 `d` 保存默认：写 `settings.json` 的 **`model`** 字段（不是 `env.ANTHROPIC_MODEL`），影响下次启动。
+- 写 settings 的是 `model` 字段，**不是** `env.ANTHROPIC_MODEL`——两者存储位置不同。
+
+**操作 × 影响详表**：
+
+| 操作 | 当前 session | 改 `ANTHROPIC_MODEL` env | 改 `DEFAULT_*` | 影响下次启动 |
+|---|---|---|---|---|
+| 改 settings `env.ANTHROPIC_MODEL` | ❌ | ✅（仅下次启动读） | ❌ | ✅ |
+| `/model xxx`（直接切） | ✅ | ❌ | ❌ | ❌ |
+| `/model` + 保存默认（`d`） | ❌（下一次） | ❌ | ❌ | ✅（写 `settings.model`） |
+| 改 settings `model` 字段 | ❌ | ❌ | ❌ | ✅ |
+
+**对本方案的意义**：
+
+1. **主模型切换走 `/model`**——它是 CLI 提供的运行时 session 级切换，立即生效，不碰 env、不碰 alias。本方案不替代它。
+2. **`ANTHROPIC_MODEL` env 是启动输入源**，不是运行时热切换通道——这印证 §5.4"主模型 session 冻结"，别指望改 env 热换主模型。
+3. **三档 `ANTHROPIC_DEFAULT_*` 走本方案 alias**——它们是 alias 解析输入源，经 shell env 启动注入别名、代理层映射表热更新。`/model sonnet` 解析时会命中我们的别名，再由代理替换。
+4. 三套机制（`/model` 运行时切换 / `ANTHROPIC_MODEL` 启动源 / `DEFAULT_*` alias 源）作用域严格分离，本方案只动 `DEFAULT_*` 这一层，互不干扰。
+
 
 
 
