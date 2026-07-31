@@ -41,6 +41,19 @@ export function init(configPathArg) {
   if (p.backoffMs !== undefined && p.backoffSec === undefined) p.backoffSec = p.backoffMs / 1000;
   if (p.backoffMaxMs !== undefined && p.backoffMaxSec === undefined) p.backoffMaxSec = p.backoffMaxMs / 1000;
   proxy = { ...DEFAULTS, ...p };
+  // model aliasing：兜底老配置无 modelAliases / nextAliasId
+  // 注意 typeof [] === 'object'，须用 Array.isArray 排除数组（防手动编辑成数组被当字典）
+  if (!config.modelAliases || typeof config.modelAliases !== 'object' || Array.isArray(config.modelAliases)) config.modelAliases = {};
+  if (typeof config.nextAliasId !== 'number' || !Number.isFinite(config.nextAliasId)) config.nextAliasId = 0;
+  // 启动校正：扫已存别名 key 的 max 编号，若 > nextAliasId 抬到 max+1
+  // （防旧数据/手动编辑/代理重启后重号）。严格大于：空表 maxN=0 时若 nextAliasId=0 不抬。
+  // 语义：nextAliasId = 已发出的最大编号；nextAliasId() 返回 ++n（下一个新编号）。
+  let maxN = 0;
+  for (const alias of Object.keys(config.modelAliases)) {
+    const m = /-(\d+)$/.exec(alias);  // ccp-sonnet-N 形式
+    if (m) maxN = Math.max(maxN, Number(m[1]));
+  }
+  if (maxN > config.nextAliasId) config.nextAliasId = maxN;
   return { config, proxy };
 }
 
@@ -86,6 +99,82 @@ export function updateEffort(level) {
   return getEffortLevel();
 }
 
+// ── model aliasing：别名 → 真实模型映射表（热重载）────────────
+// config.modelAliases: { "ccp-sonnet-1": "claude-sonnet-5", ... }
+// config.nextAliasId: 全局递增编号计数器（持久化，跨重启不重号）
+// 启动校正见 init。照 updateEffort 模式：校验 → 改内存 → persist。
+export function getModelAliases() {
+  return { ...(config.modelAliases ?? {}) };
+}
+
+export function updateModelAlias(alias, model) {
+  if (typeof alias !== 'string' || !alias.trim()) throw new Error('alias 不能为空');
+  if (typeof model !== 'string' || !model.trim()) throw new Error('model 不能为空');
+  config.modelAliases = { ...(config.modelAliases ?? {}), [alias]: model };
+  persist();
+  return { alias, model };
+}
+
+export function removeModelAlias(alias) {
+  if (typeof alias !== 'string' || !alias.trim()) throw new Error('alias 不能为空');
+  const next = { ...(config.modelAliases ?? {}) };
+  delete next[alias];
+  config.modelAliases = next;
+  persist();
+  return { alias, removed: true };
+}
+
+// nextAliasId：全局递增编号，持久化（防重启重号）。
+export function nextAliasId() {
+  const n = config.nextAliasId ?? 0;
+  config.nextAliasId = n + 1;
+  persist();
+  return n + 1;
+}
+
+// rewriteModel：把请求体里的 model 字段（别名）替换为映射表里的真实模型名。
+// 照 server.js rewriteEffort 模式：parse → 命中则替换 → 重新序列化；任何异常原样返回 body。
+// 不受 isMessagesMain 守卫（区别于 rewriteEffort）——所有带 model 字段的 JSON 请求都替换
+// （含 /v1/messages/count_tokens 子路径）。
+// 别名可能带 [1m] 后缀（如 ccp-sonnet-1[1m]）：先剥离 [1m] 再查表，命中替换 base（不带后缀，
+// beta header 由 CLI 已带）；不命中原样透传。
+export function rewriteModel(body, reqId, contentType) {
+  const ct = String(contentType || '').toLowerCase();
+  if (!ct.includes('json')) return { body, rewritten: false, resolvedModel: undefined };
+  let parsed;
+  try {
+    parsed = JSON.parse(body.toString('utf8'));
+  } catch {
+    return { body, rewritten: false, resolvedModel: undefined };
+  }
+  if (!parsed || typeof parsed !== 'object') return { body, rewritten: false, resolvedModel: undefined };
+  const rawModel = parsed.model;
+  if (typeof rawModel !== 'string' || !rawModel) return { body, rewritten: false, resolvedModel: rawModel ?? undefined };
+  // 剥离 [1m] 后查表（CLI 唯一识别的长度标记是 [1m]，见设计文档 §6.9.1；
+  // [2m] 等不被 CLI 识别、是模型名字面量，代理也不剥，保持与 CLI 一致）
+  const base = rawModel.replace(/\[1m\]/gi, '');
+  const aliases = config.modelAliases ?? {};
+  if (!(base in aliases)) {
+    // 不命中：原样透传（保留原始 rawModel，含 [1m]）
+    return { body, rewritten: false, resolvedModel: rawModel };
+  }
+  const realModel = aliases[base];
+  if (rawModel === realModel) {
+    return { body, rewritten: false, resolvedModel: realModel };
+  }
+  parsed.model = realModel;
+  let rewritten;
+  try {
+    rewritten = Buffer.from(JSON.stringify(parsed), 'utf8');
+  } catch {
+    return { body, rewritten: false, resolvedModel: rawModel };
+  }
+  if (reqId) {
+    concise(`MODEL REWRITE #${reqId}: ${rawModel} → ${realModel} (${body.length} → ${rewritten.length} bytes)`);
+  }
+  return { body: rewritten, rewritten: true, resolvedModel: realModel };
+}
+
 // 监听配置（启动时用，之后不改）
 export function getListen() {
   return { listenHost: proxy.listenHost, listenPort: proxy.listenPort };
@@ -129,6 +218,9 @@ export function getView() {
     },
     // 监听信息只读展示（改了要重启）
     listen: { host: proxy.listenHost, port: proxy.listenPort },
+    // model alias 映射表 + 编号计数器（供前端展示/编辑）
+    modelAliases: { ...(config.modelAliases ?? {}) },
+    nextAliasId: config.nextAliasId ?? 0,
   };
 }
 

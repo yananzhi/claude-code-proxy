@@ -1,0 +1,55 @@
+# Milestone smoke — 代理层 model aliasing
+
+> 任务：代理层加 model 别名映射表 + rewriteModel 请求体改写 + 热更新接口 + nextAliasId 计数器。
+> 设计依据：docs/claude code cli运行时model切换方案.md §6.4 / §6.9.1 / §6.10。
+> 正交设计：plan/tmp/2026-07-31-proxy-model-aliasing.md。
+> 执行流程：dev-with-tdd-review skill 七步。
+
+## 执行时间
+- Step 1 baseline → Step 7 归档：2026-07-31
+- smoke 全量耗时：proxy 224ms + mock-cli 4361ms
+
+## per-suite pass/fail
+
+| suite | tests | pass | fail | skip |
+|---|---|---|---|---|
+| proxy/test/config-store-alias.test.mjs（新增） | 16 | 16 | 0 | 0 |
+| proxy/test/server-alias-e2e.test.mjs（新增） | 11 | 11 | 0 | 0 |
+| proxy/test/review-suspects.test.mjs（子 agent 新增） | 22 | 22 | 0 | 0 |
+| proxy/test/trace-store.test.mjs（既有） | 12 | 12 | 0 | 1 (pre-existing) |
+| proxy/test/code-review-ms3.test.mjs（既有） | 16 | 16 | 0 | 0 |
+| test/mock-cli/test/mock-cli.test.mjs（既有） | 11 | 11 | 0 | 0 |
+| **合计** | **88** | **88** | **0** | **1** |
+
+无 flaky。
+
+## 子 agent 代码审查（Step 5）
+
+子 agent 独立审查代理层改动，挑 6 类高风险怀疑点共 29 条，TDD 确认每条：
+
+### 真 bug 已修（2 个）
+| # | 严重度 | 问题 | 修法 |
+|---|---|---|---|
+| C1-1 | 🔴 | rewriteModel 剥 [2m] 与 CLI 不一致（CLI 唯一识 [1m]） | 正则 /\[(1\|2)m\]/gi → /\[1m\]/gi（config-store.js） |
+| C3-2 | 🔴 | init 兜底漏数组（typeof []==='object'，数组被当字典 spread） | 兜底条件加 Array.isArray（config-store.js） |
+
+### 非 bug 翻转成回归用例（27 条）
+覆盖：边界条件（[1m] 剥离/不命中透传/空 model/数字 model/空 body/rawModel==realModel 短路）、异常路径（contentType=undefined、原型污染、空格 trim 校验）、类型安全（nextAliasId 字符串兜底、JSON 数组 body）、状态转换（nextAliasId 语义、persist 一致性、严格大于校正）、并发（连续 next-id 唯一、rewriteModel 与 updateModelAlias 引用替换）、既有代码一致性（双层校验、返回结构差异）、trace 链路边界（无 model 字段、空 body）。
+
+全部 27 条非 bug，翻转成断言"边界安全"的回归用例，纳入 review-suspects.test.mjs。
+
+### 留 TODO 代码味道（2 个，非阻塞）
+- C2-2：updateModelAlias 用 trim() 校验但写入含空格原始值（CLI 不会带空格，永不命中，但两层校验不一致）。
+- C6-1：server 层 !alias 与 store 层 !alias.trim() 校验逻辑不统一（双层防御但风格不统一）。
+
+## 改动文件
+- proxy/config-store.js：init（modelAliases/nextAliasId 兜底 + 启动校正）、getModelAliases/updateModelAlias/removeModelAlias/nextAliasId/rewriteModel、getView 加 modelAliases/nextAliasId
+- proxy/server.js：outBody 链串联 rewriteModel、trace 加 resolvedModel、三个接口（POST /api/model-alias、/api/model-alias/delete、GET /api/model-alias/next-id）
+- proxy/trace-store.js：append 规范化 + summarize 加 resolvedModel
+- proxy/test/config-store-alias.test.mjs（新增 16 用例）
+- proxy/test/server-alias-e2e.test.mjs（新增 11 用例）
+- proxy/test/review-suspects.test.mjs（子 agent 新增 22 用例）
+- plan/tmp/2026-07-31-proxy-model-aliasing.md（正交设计）
+
+## 结论
+代理层 model aliasing 通过 TDD + 独立子 agent 审查验证，全量 88 tests 绿、2 个真 bug 已修、27 条边界回归用例守护。代理层就绪，可接扩展侧（派生节点 store/tree/launcher + webview 配置页）。
