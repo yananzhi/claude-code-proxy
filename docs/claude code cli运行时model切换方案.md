@@ -657,6 +657,13 @@ type WebviewMessage =
 
 **保留词避让**：别名不得撞 CLI 保留 alias `opus`/`sonnet`/`haiku`/`opusplan`/`best`（`parseUserSpecifiedModel` 对这些有特殊分支，会把 `[1m]` 拼到 default model 上，`model.ts:456-470`）。`ccp-*-N` 不撞，安全。
 
+**autocompact 阈值精算（校准前文估算）**：前文 §6.9.1 / mock 设计 §8 写的「无 `[1m]` + window=600000 → threshold≈187,000」是 reservedTokens=0 的粗估。照真 CLI 精算：`reservedTokens = min(maxOutputTokens, 20_000)`，自定义别名（`ccp-sonnet-N` 走不到已知档位）经 cap 后 maxOutputTokens=8,000（`context.ts:149-210` else 分支 + `CAPPED_DEFAULT_MAX_TOKENS=8_000`）。故：
+
+- `[1m]` + `AUTO_COMPACT_WINDOW=600000`：`min(1_000_000, 600_000) - 8_000 - 13_000` = **579,000**
+- 无 `[1m]` + `AUTO_COMPACT_WINDOW=600000`：`min(200_000, 600_000) - 8_000 - 13_000` = **179,000**
+
+mock 测试断言用精算值（579,000 / 179,000），注释标注「校准了前文估算」。这是 mock 作为第二道闸的产出——把文档估算换成真 CLI 精确值。
+
 ### 6.10 衍生目标：重试记录按 session 过滤
 
 **目标**：在代理的重试记录页面（`proxy/web/index.html`），能单独跟踪某一个 session 的所有请求记录——即按会话编号 N filter 出该会话的全部 trace。
