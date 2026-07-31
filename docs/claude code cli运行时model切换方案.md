@@ -197,11 +197,11 @@ outBody = rewriteModel(outBody, modelAliasMap, id, req.headers['content-type']);
 - `settingsCache.ts` 有三层缓存，文件变更触发 `fanOut()` → `resetSettingsCache()` 清空，下次读从磁盘重载。
 - 模型解析函数 `getDefaultSonnetModel()` 等（`utils/model/model.ts:105-134`）每次调用直接读 `process.env.ANTHROPIC_DEFAULT_*_MODEL`，不缓存。
 
-**结论 B：settings.json 的 env 字段优先级高于 shell 环境变量。**
+**结论 B：settings.json 的 env 字段优先级高于 shell 环境变量（启动时）。**
 
 - `applyConfigEnvironmentVariables()`（`utils/managedEnv.ts:187-190`）用 `Object.assign(process.env, filterSettingsEnv(settings.env))` 覆盖式写入，后写者赢。
 - 启动时序：shell env 先进 `process.env` → settings.env 后覆盖。
-- 优先级：`settings.json.env` > `shell 环境变量` > 内置默认。
+- 优先级（启动阶段）：`settings.json.env` > `shell 环境变量` > 内置默认。
 
 | 配置组合 | 最终读到 |
 |---|---|
@@ -209,6 +209,8 @@ outBody = rewriteModel(outBody, modelAliasMap, id, req.headers['content-type']);
 | 只有 settings.env | settings.env 值 |
 | 两者都有 | **settings.env 值** |
 | 都没设 | 内置默认 |
+
+> ⚠️ **修正（运行时实测 + 官方文档）**：结论 B 仅在 **session 启动阶段**成立。**运行中**改 settings.env 的 `ANTHROPIC_MODEL` **不会可靠地重新注入 process.env、不会换当前 session 的主模型**。官方文档（`code.claude.com/docs/en/env-vars`）明确 `env` 字段语义是 "before launching / apply to every session"——即启动时注入、每个 session 应用，**非运行时热注入**。主对话模型在 session 初始化时 resolve 后冻结，后续请求沿用。此条由"运行中改 settings.env 的 ANTHROPIC_MODEL → CLI 后续请求 model 字段不变"的实测 + 在线搜索官方文档共同确认（见 §5.4 修订）。`ANTHROPIC_DEFAULT_*_MODEL` 行为不同——影响 alias 解析、主要影响后续选择/新 session，不直接换当前 session 主模型。
 
 **结论 C：settings.env 的运行时变更是 additive-only（可加、可覆盖、不可删）。**
 
@@ -231,16 +233,11 @@ outBody = rewriteModel(outBody, modelAliasMap, id, req.headers['content-type']);
 
 - 别名进 `process.env` 是进程启动快照，CLI 运行中不主动重读 shell env。
 - settings.env 不含该 key → `Object.assign` 是 no-op → chokidar 重读 settings 也读不到同名 key → 别名**不受任何文件监听影响**，运行中冻结。
+- **更根本的保证（实测 + 官方文档）**：主模型 `ANTHROPIC_MODEL` 在 session 初始化时 resolve 后冻结，运行中改 settings.env 不会换当前 session 主模型（§5.3 结论 B 修订）。档位模型 `ANTHROPIC_DEFAULT_*_MODEL` 影响 alias 解析、主要影响后续选择/新 session。这意味着 CLI 侧模型决策本就偏向"session 内冻结"——对我们的方案是双重保险：别名走 shell env 启动冻结 + CLI session 内模型不热迁移。
 
-即"每会话专属别名"成立，但**别名侧须走 shell env、不可走 settings.env**——否则会被运行时重读 / additive 覆盖机制干扰。
+即"每会话专属别名"成立，且**别名侧须走 shell env、不可走 settings.env**——否则会被运行时重读 / additive 覆盖机制干扰。
 
-> ⚠️ **TODO 第 1 项（待用户协助验证）**：§5.3-5.4 的结论是源码静态调研推出的，但"shell env 别名运行中冻结"这个核心前提**未经运行时实证**。整个方案依赖它，若假设错误则后续全白搭。需用户协助跑下列验证用例（自动化做不了，要人启 CLI 会话观察）：
->
-> 1. **别名冻结验证**：用一个走代理的 CLI 会话，别名 `ANTHROPIC_DEFAULT_SONNET_MODEL=ccp-sonnet-test1` 经 shell env 注入（settings.json 的 env **不含**此 key）。会话起来后，经代理控制台改 `ccp-sonnet-test1` 指向的模型 → 观察后续请求是否走新模型（走新值=代理替换生效；若 CLI 报 model not found 则别名被某处改了）。
-> 2. **不被 settings 重读干扰验证**：同一会话运行中，**往 settings.json 的 env 里加** `ANTHROPIC_DEFAULT_SONNET_MODEL=别的值` → 观察 CLI 后续请求的 `model` 字段（经代理 trace 看）是否仍是 `ccp-sonnet-test1`（是=别名未被 settings 覆盖、冻结成立；变了=settings.env 覆盖了 shell env、冻结不成立、§5.4 推论错）。
-> 3. **删不掉验证**：运行中从 settings.env 删一个变量，确认 process.env 保留旧值（additive-only，结论 C）。
->
-> 这三项验证通过，§5.4 前提才成立，才可进入实现。列为实现前第一道闸。
+> ✅ **验证更新（已部分实证）**：场景 1 已实测确认——纯 shell env 传 `ANTHROPIC_MODEL=ccp-sonnet-1[1m]`，CLI 正常启动、请求 model=`ccp-sonnet-1`（`normalizeModelStringForAPI` 剥 `[1m]`）+ beta header 带 `context-1m-2025-08-07`。与 mock 用例 9 一致。场景 3 实测确认——运行中改 settings.env 的 `ANTHROPIC_MODEL`，CLI 后续请求 model **不变**（主模型 session 内冻结），与官方文档"env 启动时注入、非运行时热注入"一致。**此"主模型 session 冻结"结论对方案有利**（见 §6.9.1 强化）。档位模型 `ANTHROPIC_DEFAULT_*_MODEL` 的运行中覆盖行为尚未单独实测（受触发子 agent 需可用主模型所限），但其走 shell env 启动冻结的机制与主模型同源，且方案切换靠代理映射表热更新（非依赖 CLI 侧重读），故不阻塞。
 
 ### 5.5 定案：纯 shell env 每会话专属别名
 
@@ -646,6 +643,11 @@ type WebviewMessage =
 - **`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 是对 contextWindow 的 `min` 钳制上限**（`services/compact/autoCompact.ts:33-49`），非独立阈值。触发阈值 = `min(contextWindow, AUTO_COMPACT_WINDOW) - maxOutputTokens - 13000`。故 200K 模型配 `AUTO_COMPACT_WINDOW=600000` → `min(20万,60万)=20万`，600K 不生效、不会"永远压不到"。
 
 **关键坑（影响别名格式）**：CLI 的 `[1m]` 检测、contextWindow、beta header **全部读 CLI 本地的 model 字符串**，会话初始化时算好且 `getAllModelBetas` 被 memoize 缓存。**代理层在 HTTP 出口把 `ccp-sonnet-1` 替换成 `claude-sonnet-5[1m]`，影响不了 CLI 已缓存的本地决策**——CLI 仍按 200K autocompact、beta header 也不带 1M。代理改写发生在 CLI 之后，回溯不了。
+
+**但"CLI session 冻结"恰是本方案的有利条件（实测 + 官方文档确认，见 §5.4 修订）**：主模型 `ANTHROPIC_MODEL` 在 session 初始化后冻结、运行中改 settings.env 不换当前 session 主模型；档位模型 `ANTHROPIC_DEFAULT_*_MODEL` 同样偏向 session 内冻结。这意味着：
+- 别名经 shell env 启动注入后，**CLI 侧整个 session 内别名恒定**（不会因 settings 重读被偷换）——正是 §5.4 要的冻结保证，由 CLI 的 session 冻结语义双重兜底。
+- 切换模型**只发生在代理映射表层**（`POST /api/model-alias` 热更新），与 CLI 侧无关——代理是热更新的，不受 CLI session 冻结影响。
+- 即"CLI 别名侧冻结 + 代理映射侧热更新"的职责分离天然成立，无需对抗 CLI 的重读/additive 机制。
 
 **结论：长度标记必须放在 CLI 能看到的那一侧——别名侧。** 别名格式：
 
