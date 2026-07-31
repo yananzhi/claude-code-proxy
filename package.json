@@ -247,11 +247,13 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "test:mock-cli": "node --test test/mock-cli/test/"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.80.0",
+    "chokidar": "^5.0.0",
     "typescript": "^5.4.0"
   }
 }
