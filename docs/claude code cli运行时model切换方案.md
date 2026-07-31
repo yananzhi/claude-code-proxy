@@ -693,5 +693,34 @@ type WebviewMessage =
 
 自洽性修订：§3.2 加框标注"§6 落地后废弃"；§5.5 映射表生命周期改为"不回收"；§5.6 重写三套机制关系（§6 = §5.5 落地、§3 仅原理）；§5.9 对齐传递方式。
 
+### 6.12 执行顺序
+
+本方案的落地按下列阶段顺序推进，**每阶段闸住才进下一阶段**：
+
+**阶段 0：Mock CLI 基础套件**（当前）
+
+- 按 `docs/mock-cli-test-harness.md` 实现一个**基础 mock-cli**：只做"读 settings.json / 读 env / chokidar 重读 / applyConfigEnvironmentVariables / additive-only / `[1m]` 解析 / contextWindow / autocompact 阈值"的等价实现 + 探针 HTTP 端口。
+- 不做与代理交互、不做派生节点、不做 rewriteModel。先最小可用。
+
+**阶段 1：用 mock-cli 验证关键前提**
+
+- 跑 mock-cli 的探针用例（mock-cli 设计 §8），对照真 CLI 行为，验证主方案赖以成立的核心假设是否正确：
+  - shell env 别名运行中冻结（§5.4 TODO-1/2/3）
+  - settings.env 覆盖优先级、additive-only（§5.3 结论 B/C）
+  - `[1m]` 解析 + AUTO_COMPACT_WINDOW 钳制（§6.9.1）
+- **若假设与真 CLI 不符**：回头改主方案文档的假设（mock 不动，除非真 CLI 代码变了），重验。
+- **验证通过才进阶段 2**。这是整个方案的根基——前提假设错了，后面全白搭。
+
+**阶段 2：详细实现 model 切换方案**
+
+- 前提验证通过后，按 §6 落点实现派生节点 + 代理 rewriteModel + 别名映射表 + webview 配置页 + 命令。
+- mock-cli 此时可作为回归测试基座，持续守护"配置加载行为"假设不被破坏。
+
+**阶段 3（预留）：mock-cli 端到端**
+
+- mock-cli 接真代理（`POST /probe/simulate-request` → 代理 → 上游），验证 rewriteModel 别名替换、effort 串联、trace 按 session 过滤等端到端链路。
+
+> 这条顺序的核心思想：**先用 mock 把黑盒前提变成可验证/可回归的代码，确认前提无误，再投入主方案实现**。避免在错误假设上堆代码。
+
 
 
