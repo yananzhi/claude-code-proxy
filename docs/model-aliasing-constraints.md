@@ -73,17 +73,20 @@ CLI 用 chokidar 监听 settings.json，文件变更会清缓存重读。但：
 
 ---
 
-## 5. VS Code 扩展宿主 proxy-agent 劫持 http 栈
+## 5. 扩展宿主 http 客户端不解码 chunked（空 body 真因）
 
-VS Code 扩展宿主（Electron-based extension host）内置 `@vscode/proxy-agent`，**monkey-patch 了 Node 原生的 `http.get`/`http.request`/`fetch`**：
+扩展宿主（Electron）的 http 客户端**不解码 `Transfer-Encoding: chunked` 响应**——`data` 事件不投递，直接 `end`，客户端拿到 `status 200` + **空 body**（`rawLen=0`）。命令行 `node -e`/`curl` 的 http 客户端会透明解码 chunked，所以表现不一致、极难定位。
 
-- 把发往 127.0.0.1 的请求改写（请求行改绝对路径、响应重编码成 chunked 并丢 body）。
-- 现象：扩展侧 `http.get` 调本地代理拿到 `status 200` + **空 body**，`JSON.parse('')` 报 `Unexpected end of JSON input`。
-- 命令行 `node -e`/`curl` 不受影响（不加载 proxy-agent），所以只在扩展宿主内出现、极难定位。
+**真因（2026-08-01 诊断坐实，推翻早期 proxy-agent 假设）**：代理侧 `sendJson` 用 `res.end(JSON.stringify(obj))` 一次性写完，但 `writeHead` **没写 `Content-Length`** → Node http server 自动改 `Transfer-Encoding: chunked` 分块发送（HTTP/1.1：无 Content-Length 必须分块）→ 扩展宿主 http 客户端不解码 chunked → 空 body。
 
-**来源**：实测 + 联网调研 GitHub issues（microsoft/vscode）；CLAUDE.md 有详细记录。
+诊断证据（5 探针，系统 HTTP_PROXY/HTTPS_PROXY 全 unset）：
+- `http.get /api/config` → status=200, chunked, rawLen=0。
+- 裸 `net` socket GET 同路径 → isChunked=true, rawBytesLen=516, dechunk 后 decodedLen=508（**服务端 body 完整**，是客户端吞的）。
+- `http.request POST` 设映射 → 响应 rawLen=0（被吞），但裸 socket 读回含该映射（**POST 请求 body 没被吞**，"假成功"=请求送达但响应读不到）。
 
-**约束**：扩展侧调本地代理接口**一律用裸 `net` socket**（`net.connect` + 手写 HTTP 请求行 + 手动解析响应，含 chunked 解码 `dechunk`），不用 `http.get`/`fetch`。新增 wrapper 照 `src/proxyHost.ts nextAliasId` 的模式写。
+**来源**：实测（诊断命令 `claude-code-proxy.diagProxyHttp`）；CLAUDE.md 有详细记录。
+
+**约束**：代理侧任何 `res.end(string)` 出口**必须配 `Content-Length`**（`sendJson`、静态文件、502 错误响应，见 `proxy/server.js`）。这是治本——服务端发完整 body 不分块，扩展宿主 http 客户端正常收 `data` 事件，所有 http wrapper（`getModelAliases`/`setModelAlias`/`removeModelAlias`）恢复可用。`nextAliasId` 用裸 socket + `dechunk` 是历史方案（先于 Content-Length 修复落地，仍兼容）；新增 wrapper 用 http 栈 + 服务端 Content-Length 即可，不强制裸 socket。
 
 ---
 
@@ -122,6 +125,6 @@ VS Code 扩展宿主（Electron-based extension host）内置 `@vscode/proxy-age
 | 2 请求/决策层分离 | 代理换 model → CLI contextWindow 不变 | 同档位内切安全；跨档位弹警告 |
 | 3 `[1m]` 唯一档位信号 | 代理侧看不到档位（被剥） | 别名带不带 `[1m]` 用户选；代理 key 不带后缀；跨档位通用警告 |
 | 4 settings.env 不热切主模型 | 改 env 当前 session 不变 | 切换靠代理映射表，不靠 env 热重载 |
-| 5 proxy-agent 劫持 http | 扩展侧拿空 body | 裸 `net` socket 调代理 |
+| 5 客户端不解码 chunked | 扩展宿主 http 拿空 body | 代理侧 `res.end` 出口必配 `Content-Length`（治本）；`nextAliasId` 裸 socket 历史方案仍兼容 |
 | 6 `/model` 感知不到 | 运行时检测不到脱离 | 编辑页静态 hover 提示 |
 | 7 子 agent 别名稳定 | 可追踪 | 追踪靠三档别名 N |

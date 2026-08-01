@@ -198,6 +198,11 @@
         "enablement": "claude-code-proxy.proxyToggleEnabled"
       },
       {
+        "command": "claude-code-proxy.diagProxyHttp",
+        "title": "LLM 代理: 诊断 proxy-agent 劫持（http.get 探针）",
+        "category": "Claude Code Proxy"
+      },
+      {
         "command": "claude-code-proxy.exportConfigs",
         "title": "Export Configs",
         "icon": "$(export)"

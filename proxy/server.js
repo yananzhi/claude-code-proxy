@@ -327,8 +327,14 @@ async function readJsonBody(req) {
   }
 }
 function sendJson(res, status, obj) {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(obj));
+  // 必须显式写 Content-Length：不写时 Node http server 对 res.end(string) 会自动改用
+  // Transfer-Encoding: chunked 分块发送（HTTP/1.1 无 Content-Length 就得分块）。
+  // 扩展宿主（Electron）的 http 客户端不解码 chunked → data 事件不投递 → 客户端拿到 status 200 + 空 body
+  //（详见 CLAUDE.md「扩展宿主调本地 HTTP 服务的空 body 坑」，实测确认与 proxy-agent 无关，
+  //  真因是 chunked 未被客户端解码）。显式 Content-Length 让服务端发完整 body，客户端正常收。
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+  res.end(body);
 }
 
 const MIME = {
@@ -350,8 +356,10 @@ function serveStatic(req, res, urlPath) {
     return;
   }
   const mime = MIME[extname(abs).toLowerCase()] || 'application/octet-stream';
-  res.writeHead(200, { 'content-type': mime });
-  res.end(readFileSync(abs));
+  const data = readFileSync(abs);
+  // 显式 Content-Length（同 sendJson 理由：避免 chunked 被扩展宿主 http 客户端吞 body）
+  res.writeHead(200, { 'content-type': mime, 'content-length': data.length });
+  res.end(data);
 }
 
 async function handleApi(req, res, urlPath) {
@@ -666,7 +674,7 @@ async function handleRequest(req, res) {
     finalLastAttemptMs = attMs;
     if (r.status === 0) {
       const errBody = JSON.stringify({ type: 'error', error: { type: 'upstream_unreachable', message: `upstream ${upstreamBase ?? ''} unreachable (passthrough): ${r.networkError}` } });
-      res.writeHead(502, { 'content-type': 'application/json' });
+      res.writeHead(502, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(errBody) });
       res.end(errBody);
       finalDelivered = { status: 502, headers: { 'content-type': 'application/json' }, body: Buffer.from(errBody) };
       outcome = 'passed-to-client';
@@ -765,7 +773,7 @@ async function handleRequest(req, res) {
       finalLastAttemptMs = attMs;
       if (r.status === 0) {
         const errBody = JSON.stringify({ type: 'error', error: { type: 'upstream_unreachable', message: `upstream ${upstreamBase ?? ''} unreachable (${r.networkError})` } });
-        res.writeHead(502, { 'content-type': 'application/json' });
+        res.writeHead(502, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(errBody) });
         res.end(errBody);
         finalDelivered = { status: 502, headers: { 'content-type': 'application/json' }, body: Buffer.from(errBody) };
         outcome = 'passed-to-client';

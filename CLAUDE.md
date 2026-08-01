@@ -4,28 +4,35 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（重试 50
 
 ## 关键陷阱（必读，避免重复踩坑）
 
-### 扩展宿主调本地 HTTP 服务的空 body 坑（最难定位，曾耗时数小时）
+### 扩展宿主调本地 HTTP 服务的空 body 坑（曾耗时数小时定位）
 
-**现象**：扩展侧用 `http.get`/`http.request`/`fetch` 调本地代理（`127.0.0.1:<port>`），拿到 `status 200` 但 **body 为空**（`rawLen=0`），`JSON.parse('')` 报 `Unexpected end of JSON input`。同样的 URL 用 `curl` 或命令行 `node -e` 却能拿到正常 body。
+**现象**：扩展侧用 `http.get`/`http.request` 调本地代理（`127.0.0.1:<port>`），拿到 `status 200` 但 **body 为空**（`rawLen=0`），`JSON.parse('')` 报 `Unexpected end of JSON input`。同样的 URL 用 `curl` 或命令行 `node -e` 却能拿到正常 body。
 
-**根因**：VS Code 扩展宿主（Electron-based extension host）内置的 `@vscode/proxy-agent` **劫持（monkey-patch）了 Node 原生的 `http.get`/`http.request`/`fetch`**。当系统开了代理（HTTP_PROXY/HTTPS_PROXY）或 VS Code `http.proxySupport` 设置时，proxy-agent 会把发往本地 127.0.0.1 的请求也改写（请求行改成绝对路径、响应重编码成 chunked 并可能丢 body）。命令行 node 不加载 proxy-agent，所以表现不一致。
+**真因（2026-08-01 诊断坐实，推翻了早期 proxy-agent 假设）**：
 
-**已验证的诡异特征**：
-- 代理侧用 `res.end(string)` 一次性写完（本该是 Content-Length + 完整 body），扩展侧看到的却是 `transfer-encoding: chunked` + 空 body。
-- `content-type: application/json` header 仍在（说明请求到达了代理、走了 sendJson），但 data 事件没触发、end 触发了。
-- POST 接口可能"看起来成功"（只看 status 200 没解析 body），实际也没真到达——别被 POST 的假成功骗了。
+代理侧 `sendJson` 用 `res.end(JSON.stringify(obj))` 一次性写完，但 **`writeHead` 没写 `Content-Length`**。Node http server 对没 Content-Length 的 `res.end(string)` 会**自动改用 `Transfer-Encoding: chunked` 分块发送**（HTTP/1.1 规范：无 Content-Length 必须分块，否则客户端不知何时结束）。
 
-**修复方案（本工程已采用）**：
-1. **扩展侧调代理接口用裸 `net` socket**（见 `src/proxyHost.ts` 的 `nextAliasId`）：`net.connect` + 手写 HTTP 请求行 + 手动解析响应（含 chunked 解码 `dechunk`）。`@vscode/proxy-agent` hook 不到 `net` 模块，彻底绕过。
-2. **`src/extension.ts` activate 最早注入 `NO_PROXY=127.0.0.1,localhost`**（双保险）。
-3. **代理侧 `proxy/server.js handleRequest` 用 `new URL(req.url, ...)` 规范化 urlPath**，免疫 proxy-agent 发的绝对路径请求行（防路由失配 fall-through 到代理转发）。
+- **命令行 node / curl 的 http 客户端透明解码 chunked** → `data` 事件拿到明文 → 正常。
+- **VS Code 扩展宿主（Electron）的 http 客户端不解码 chunked** → `data` 事件不投递 → `end` 直接触发 → `rawLen=0`。这是扩展宿主 http 栈的特定行为。
+
+诊断证据（第二轮 5 探针，系统 HTTP_PROXY/HTTPS_PROXY 全 unset、NO_PROXY 生效）：
+- `http.get GET /api/config` → status=200, `transfer-encoding: chunked`, rawLen=0。
+- 裸 `net` socket GET 同一路径 → status=200, isChunked=true, rawBytesLen=516, **dechunk 后 decodedLen=508**（服务端 body 完整）。
+- `http.request POST` 设映射 → 响应 rawLen=0（被吞），但裸 socket 读回 `/api/config` 含该映射 → **POST 请求 body 没被吞，映射真写入了**（"假成功"=请求送达但响应读不到）。
+
+**这证明**：proxy-agent 不是元凶（系统没开代理、NO_PROXY 兜底无效、proxy-agent 无劫持条件）；真因是 **chunked 响应被扩展宿主 http 客户端吞 body**。
+
+**修复方案（本工程已采用，治本）**：
+1. **代理侧 `sendJson`（及所有 `res.end` 出口）显式写 `Content-Length`**（`proxy/server.js`）。这样服务端发完整 body 不分块，扩展宿主 http 客户端正常收 `data` 事件。**所有 http wrapper（含 `getModelAliases`/`setModelAlias`/`removeModelAlias`）恢复可用**。
+2. **`src/extension.ts` activate 最早注入 `NO_PROXY=127.0.0.1,localhost`**（双保险，防系统真开代理时 proxy-agent 干预）。
+3. **`proxy/server.js handleRequest` 用 `new URL(req.url, ...)` 规范化 urlPath**（防系统开代理时 proxy-agent 发绝对路径请求行致路由失配）。
+4. **`src/proxyHost.ts nextAliasId` 仍用裸 `net` socket + `dechunk`**（历史方案，先于方案 1 落地；方案 1 后裸 socket 仍兼容——非 chunked 走 `else` 原样返回）。**新增 wrapper 不强制裸 socket**，http.get/request 配合服务端 Content-Length 即可。
 
 **复现/定位手法**：
-- 在扩展侧 `res.on('end')` 打印 `res.headers` + raw。若看到 `transfer-encoding: chunked` 但代理侧用的是 `res.end(string)`（非 chunked），就是被 proxy-agent 改写了。
-- 在代理路由最顶加 `console.log(req.method, req.url)`，看扩展侧请求的 `req.url` 是不是绝对路径（`http://127.0.0.1:.../api/...` 而非 `/api/...`）。
-- 用裸 `net` socket 复刻请求，能正常拿到 body → 确证是 proxy-agent 的锅。
+- 在扩展侧 `res.on('end')` 打印 `res.headers` + rawLen。看到 `transfer-encoding: chunked` + rawLen=0 = chunked 被吞。
+- 裸 `net` socket GET 同路径 + `dechunk`：若 decodedLen>0 而扩展侧 http.get rawLen=0 → 确证服务端 body 完整、是客户端吞了（临时诊断命令 `claude-code-proxy.diagProxyHttp` 已验证）。
 
-**规则**：本工程里**扩展宿主侧调本地代理接口，一律用裸 socket**，不用 `http.get`/`fetch`。新增接口的 wrapper 照 `proxyHost.nextAliasId` 的模式写。
+**规则**：代理侧任何 `res.end(string)` 出口**必须配 `Content-Length`**，否则扩展宿主拿空 body。这是治本。裸 socket 是 nextAliasId 的历史实现，新 wrapper 用 http 栈 + 服务端 Content-Length 即可。
 
 ## 架构速览
 

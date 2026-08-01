@@ -700,6 +700,68 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('claude-code-proxy.toggleProxyBackupOff', () => {
             void vscode.commands.executeCommand('claude-code-proxy.toggleProxyBackup');
         }),
+
+        // 诊断：回归工具——怀疑代理接口拿空 body 时一键定位。
+        // 真因已查清（2026-08-01）：扩展宿主 http 栈对 127.0.0.1 响应 body 一律吞（chunked/Content-Length 均不投递 data）；
+        // 所有 wrapper 已改裸 socket（rawHttp），本命令验证 rawHttp 是否正常 + 对照 http 栈仍吞。
+        vscode.commands.registerCommand('claude-code-proxy.diagProxyHttp', async () => {
+            if (!proxyHost) {
+                void vscode.window.showErrorMessage('代理尚未初始化');
+                return;
+            }
+            try { await proxyHost.ensureRunning(); } catch (e) {
+                void vscode.window.showErrorMessage(`代理未运行: ${(e as Error).message}`);
+                return;
+            }
+            const port = proxyHost.getPort();
+            const lines: string[] = [`=== 代理接口诊断 port=${port} ${new Date().toISOString()} ===`];
+            const envSnapshot = {
+                HTTP_PROXY: process.env.HTTP_PROXY ?? '(unset)',
+                HTTPS_PROXY: process.env.HTTPS_PROXY ?? '(unset)',
+                NO_PROXY: process.env.NO_PROXY ?? '(unset)',
+            };
+            lines.push(`env: ${JSON.stringify(envSnapshot)}`);
+
+            // [1] getModelAliases wrapper（rawHttp，生产路径）—— 应拿到非空映射表
+            lines.push('[1] getModelAliases() wrapper（rawHttp，生产路径）');
+            try {
+                const map = await proxyHost.getModelAliases();
+                lines.push(`ok: ${Object.keys(map).length} 条映射, keys=${JSON.stringify(Object.keys(map).slice(0, 5))}`);
+            } catch (e) {
+                lines.push(`error: ${(e as Error).message}`);
+            }
+            // [2] nextAliasId wrapper（rawHttp）—— 应拿到数字
+            lines.push('[2] nextAliasId() wrapper（rawHttp）');
+            try {
+                const id = await proxyHost.nextAliasId();
+                lines.push(`ok: id=${id}`);
+            } catch (e) {
+                lines.push(`error: ${(e as Error).message}`);
+            }
+            // [3] http.get 对照（被测：扩展宿主 http 栈）—— 应 rawLen=0（吞 body），证明为何用裸 socket
+            lines.push('[3] http.get 对照（扩展宿主 http 栈，应 rawLen=0）');
+            lines.push(await proxyHost.diagHttpGet('/api/config', { withNoProxy: true }));
+            // [4] setModelAlias + 读回（rawHttp 全链路）—— 应写入并读回
+            const diagAlias = `ccp-diag-test-${port}`;
+            lines.push(`[4] setModelAlias(${diagAlias}) + getModelAliases 读回`);
+            try {
+                await proxyHost.setModelAlias(diagAlias, 'diag-model');
+                const map = await proxyHost.getModelAliases();
+                const hit = map[diagAlias];
+                lines.push(`ok: 写入=${hit === 'diag-model' ? '是' : '否'}（map[${diagAlias}]=${JSON.stringify(hit)}）`);
+            } catch (e) {
+                lines.push(`error: ${(e as Error).message}`);
+            }
+            // 清理测试映射
+            try { await proxyHost.removeModelAlias(diagAlias); } catch { /* 诊断清理，忽略 */ }
+
+            const report = lines.join('\n');
+            output.appendLine(report);
+            void vscode.window.showInformationMessage(
+                '代理接口诊断完成，详见 Claude Code Proxy output 面板。' +
+                ' 判读：[1][2][4]ok + [3]http.get rawLen=0 = 裸 socket 全链路正常、http 栈仍吞（预期）。',
+            );
+        }),
     );
 
     // 启动进程内代理（常驻 + 心跳 + 单例）。开关是纯内存态默认开，先同步设上下文键避免标题栏图标闪烁。
