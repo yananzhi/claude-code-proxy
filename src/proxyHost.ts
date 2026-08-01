@@ -1,3 +1,10 @@
+// ⚠️ 扩展宿主调本地代理接口务必用裸 net socket，不要用 http.get/fetch。
+// VS Code 扩展宿主的 @vscode/proxy-agent 会劫持 http.get/http.request/fetch，
+// 把发往 127.0.0.1 的请求改写（绝对路径请求行）+ 把响应改写成 chunked 并丢 body，
+// 导致拿到 status 200 + 空 body、JSON.parse('') 报 Unexpected end of JSON input。
+// 命令行 node/curl 不受影响（不加载 proxy-agent），所以这个问题只在扩展宿主里出现、极难定位。
+// 详见 CLAUDE.md「扩展宿主调本地 HTTP 服务的空 body 坑」。
+// 新增调代理接口的 wrapper 照 nextAliasId() 的裸 socket 模式写。
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';

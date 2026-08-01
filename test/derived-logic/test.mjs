@@ -14,6 +14,7 @@ import {
     aggregateModelCatalog,
     summarizeAliases,
     nextDerivedIndex,
+    filterParentConfigs,
 } from '../../out/derivedLogic.js';
 
 // ── D1: aliasName 基本格式 ──
@@ -534,4 +535,42 @@ test('S24. resolveDerivedUpstream 快照 token 为数字 + 父缺 → null', () 
     };
     assert.equal(resolveDerivedUpstream(derived, undefined), null);
     assert.equal(resolveDerivedUpstream(derived, null), null);
+});
+
+// ── filterParentConfigs: 派生节点不在 local 分组重复渲染（回归 bug 防护）──
+// bug 现象：local 分组遍历全部 configs（含派生）调 buildConfigNode，派生节点既在父下、
+//          又作为普通 local 项出现（如 "52-52 #14" 多出一项）。修：过滤掉 derivedFrom 非空者。
+test('filterParentConfigs: 排除派生节点，只留父 local 配置', () => {
+    const configs = [
+        { id: 'p1', name: 'parent1' },                              // 父
+        { id: 'd1', name: 'derived1', derivedFrom: 'p1' },          // 派生（该被排除）
+        { id: 'p2', name: 'parent2' },                              // 父
+        { id: 'd2', name: 'orphan', derivedFrom: 'gone' },          // 孤儿派生（也排除）
+    ];
+    const parents = filterParentConfigs(configs);
+    assert.equal(parents.length, 2);
+    assert.deepEqual(parents.map(c => c.id), ['p1', 'p2']);
+});
+
+test('filterParentConfigs: derivedFrom 为空串/undefined 都算父', () => {
+    const configs = [
+        { id: 'a', derivedFrom: undefined },
+        { id: 'b', derivedFrom: '' },
+        { id: 'c', derivedFrom: 'parent-x' },
+    ];
+    const parents = filterParentConfigs(configs);
+    assert.equal(parents.length, 2);
+    assert.deepEqual(parents.map(c => c.id), ['a', 'b']);
+});
+
+test('filterParentConfigs: 空数组返空', () => {
+    assert.deepEqual(filterParentConfigs([]), []);
+});
+
+test('filterParentConfigs: 全是派生节点返空（孤儿由 treeProvider 另挂）', () => {
+    const configs = [
+        { id: 'd1', derivedFrom: 'p1' },
+        { id: 'd2', derivedFrom: 'p2' },
+    ];
+    assert.deepEqual(filterParentConfigs(configs), []);
 });

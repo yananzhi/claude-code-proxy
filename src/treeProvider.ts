@@ -4,7 +4,7 @@ import { ConfigStore } from './configStore';
 import { ActiveStateStore } from './activeState';
 import { LocalConfigStore, LocalActiveStateStore } from './localConfigStore';
 import { detectPlatform, readSettings } from './claudeConfig';
-import { summarizeAliases, isOrphan } from './derivedLogic';
+import { summarizeAliases, isOrphan, filterParentConfigs } from './derivedLogic';
 
 /** A row in the sidebar tree — info, group header, or a config (global/local). */
 export type ConfigNode = vscode.TreeItem;
@@ -105,7 +105,7 @@ export class ConfigTreeProvider implements vscode.TreeDataProvider<ConfigNode> {
             const activeConfigId = (await this.localActiveState.load())?.id;
             // 派生节点（derivedFrom 非空）不作为普通 local 配置渲染——它们挂在父节点下或作孤儿。
             // 否则会在 local 分组下出现重复项（派生节点既在父下、又作为普通 local 项）。
-            const parentConfigs = configs.filter(c => !c.derivedFrom);
+            const parentConfigs = filterParentConfigs(configs);
             if (configs.length === 0) {
                 return [this.buildHintNode('no local configs — click + to create')];
             }

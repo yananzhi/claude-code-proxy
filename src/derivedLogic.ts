@@ -180,6 +180,18 @@ export function summarizeAliases(modelAliases: ModelAliasMapping | undefined): s
 }
 
 /**
+ * 过滤出"父 local 配置"——排除派生节点（derivedFrom 非空）。
+ *
+ * 派生节点存在 local-configs.json 同数组里（靠 derivedFrom 区分）。treeProvider 渲染
+ * local 分组时若不过滤，会把派生节点当普通 local 配置也渲染一遍，导致重复项
+ * （派生节点既在父节点下展开、又作为普通 local 项出现）。此函数集中过滤逻辑、
+ * 可单测防回归。
+ */
+export function filterParentConfigs<T extends Pick<LLMConfig, 'derivedFrom'>>(configs: T[]): T[] {
+    return configs.filter(c => !c.derivedFrom);
+}
+
+/**
  * 本地兜底编号：扫已存派生节点 derivedIndex 取 max+1（§6.2）。
  * 权威编号向代理 nextAliasId 申请；此函数仅用于无代理时本地预览/兜底。
  * 无派生节点 → 1。非派生节点（无 derivedIndex）忽略。
