@@ -849,8 +849,13 @@ const TRACE_COLUMNS = [
   },
   {
     key: 'model', title: 'Model', width: 9, visible: true, tdClass: 'id',
-    hover: '请求 body 里提取的 model 字段（已缩短）。',
+    hover: '请求 body 里提取的 model 字段（已缩短）。派生节点会话这里是别名（如 ccp-sonnet-15），代理会替换成右侧「真实模型」列的值。',
     render: (t) => `<span title="${escapeHtml(t.model || '')}" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom">${escapeHtml(shortenModel(t.model || ''))}</span>`,
+  },
+  {
+    key: 'resolvedModel', title: '真实模型', width: 9, visible: true, tdClass: 'id',
+    hover: '别名映射替换后实际发给上游的真实模型名。若与 Model 列相同表示未命中别名（原样透传，如主对话用的 ANTHROPIC_MODEL）。',
+    render: (t) => `<span title="${escapeHtml(t.resolvedModel || '')}" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom">${escapeHtml(shortenModel(t.resolvedModel || ''))}</span>`,
   },
   {
     key: 'status', title: '错误码', width: 5, visible: true,
@@ -1155,7 +1160,8 @@ async function openDetail(id) {
     document.getElementById('d-meta').innerHTML = `
       <span class="k">源 IP</span><span class="v">${t.sourceIp}</span>
       <span class="k">方法/路径</span><span class="v">${t.method} ${t.path}</span>
-      <span class="k">Model</span><span class="v">${t.model || '-'}</span>
+      <span class="k">Model</span><span class="v" title="请求 body 的 model 字段（别名/原始）">${t.model || '-'}</span>
+      <span class="k">真实模型</span><span class="v" title="别名映射替换后发给上游的真实模型名">${t.resolvedModel || '-'}</span>
       <span class="k">发出时间</span><span class="v">${fmtTime(t.startedAt)}</span>
       <span class="k">结束时间</span><span class="v">${fmtTime(t.endedAt)}</span>
       <span class="k">总耗时</span><span class="v" title="从客户端到达到最终交付，含失败重试+退避">${fmtMs(t.totalMs)}</span>
