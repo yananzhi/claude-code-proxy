@@ -1,12 +1,14 @@
-// ⚠️ 扩展宿主调本地代理曾出现"status 200 + 空 body"现象。
-// 真因（2026-08-01 诊断坐实，推翻早期 proxy-agent 假设）：代理侧 sendJson 用 res.end(string)
-// 但没写 Content-Length，Node http server 自动改 Transfer-Encoding: chunked 分块发送；
-// 扩展宿主（Electron）http 客户端不解码 chunked → data 事件不投递 → 客户端拿到空 body。
-// 治本：proxy/server.js 的 sendJson 等所有 res.end 出口显式写 Content-Length（已改），
-//       服务端发完整 body 不分块，http 客户端正常收 data 事件，所有 http wrapper 恢复可用。
-// nextAliasId 用裸 net socket + dechunk 是历史方案（先于 Content-Length 修复落地），
-// 仍兼容（非 chunked 走 else 原样返回）。新增 wrapper 用 http 栈 + 服务端 Content-Length 即可。
-// 详见 CLAUDE.md「扩展宿主调本地 HTTP 服务的空 body 坑」。
+// ⚠️ 扩展宿主（Electron）的 http 栈对 127.0.0.1 响应 body 单向吞没——http.get/http.request/fetch
+// 的 data 事件不投递，直接 end，客户端拿 status 200 + 空 body（rawLen=0）。
+// 是 http 栈本身在扩展宿主里的行为，与 proxy-agent / chunked / Content-Length 均无关（都已诊断排除）：
+//  - 不是 proxy-agent（系统 HTTP_PROXY 全 unset、NO_PROXY 兜底无效、proxy-agent 无劫持条件）
+//  - 不是 chunked（服务端加 Content-Length 改发完整 body，http 栈仍吞 body）
+//  - 不是服务端没发（裸 socket 拿到完整 body）
+// 请求 body 不吞（上行正常），只有响应 body 被吞（单向）。命令行 node/curl 正常，只在扩展宿主复现。
+// 治本：调代理的 wrapper 一律用裸 net socket（rawHttp 方法），绕过 http 栈，稳定拿 body。
+// 新增 wrapper 照 rawHttp 模式写，不用 http.get/http.request/fetch。
+// 代理侧 sendJson 等 res.end 出口仍显式写 Content-Length（对非扩展宿主如 web UI/命令行规范，
+// 对扩展宿主虽无效但无害）。详见 CLAUDE.md「扩展宿主调本地 HTTP 服务的空 body 坑」。
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';

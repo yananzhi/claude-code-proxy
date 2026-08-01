@@ -44,7 +44,9 @@ export function init(configPathArg) {
   // model aliasing：兜底老配置无 modelAliases / nextAliasId
   // 注意 typeof [] === 'object'，须用 Array.isArray 排除数组（防手动编辑成数组被当字典）
   if (!config.modelAliases || typeof config.modelAliases !== 'object' || Array.isArray(config.modelAliases)) config.modelAliases = {};
-  if (typeof config.nextAliasId !== 'number' || !Number.isFinite(config.nextAliasId)) config.nextAliasId = 0;
+  // 兜底：非数字 / NaN/Infinity / 小数 → 0。小数编号会产出 ccp-sonnet-1.5 之类非法别名，
+  // 且空表时校正（maxN=0 > 小数? false）救不了 0~1 之间的小数，故须 Number.isInteger 拦截。
+  if (typeof config.nextAliasId !== 'number' || !Number.isFinite(config.nextAliasId) || !Number.isInteger(config.nextAliasId)) config.nextAliasId = 0;
   // 启动校正：扫已存别名 key 的 max 编号，若 > nextAliasId 抬到 max+1
   // （防旧数据/手动编辑/代理重启后重号）。严格大于：空表 maxN=0 时若 nextAliasId=0 不抬。
   // 语义：nextAliasId = 已发出的最大编号；nextAliasId() 返回 ++n（下一个新编号）。
@@ -159,6 +161,11 @@ export function rewriteModel(body, reqId, contentType) {
     return { body, rewritten: false, resolvedModel: rawModel };
   }
   const realModel = aliases[base];
+  // 类型守卫：映射值若被手动编辑成非字符串/空串（数字/null/布尔/对象），视为未命中原样透传，
+  // 避免把数字/null/对象赋给 parsed.model 发往上游（上游必 400 或行为未定义）。
+  if (typeof realModel !== 'string' || !realModel) {
+    return { body, rewritten: false, resolvedModel: rawModel };
+  }
   if (rawModel === realModel) {
     return { body, rewritten: false, resolvedModel: realModel };
   }

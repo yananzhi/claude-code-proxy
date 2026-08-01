@@ -92,7 +92,11 @@ export function resolveDerivedUpstream(
     const snap = derived.derivedSnapshot;
     // 类型守卫：防快照数据损坏（非字符串 baseUrl/token）——与父 content 路径一致
     if (snap && typeof snap.baseUrl === 'string' && snap.baseUrl && typeof snap.token === 'string' && snap.token) {
-        return { baseUrl: snap.baseUrl, token: snap.token, timeoutSec: snap.timeoutSec, mode: snap.mode };
+        // timeoutSec 归一：快照存的是秒（snapshotFromParent 已除过 1000），这里只校验是 finite 正数，
+        // 防 NaN/字符串/非正数透传污染 settings.json（不再除 1000，否则把 300 秒当毫秒算成 0）。
+        const snapTimeout = typeof snap.timeoutSec === 'number' && Number.isFinite(snap.timeoutSec) && snap.timeoutSec > 0
+            ? snap.timeoutSec : undefined;
+        return { baseUrl: snap.baseUrl, token: snap.token, timeoutSec: snapTimeout, mode: snap.mode };
     }
     if (!parent) {
         return null;
@@ -108,10 +112,23 @@ export function resolveDerivedUpstream(
     if (typeof baseUrl !== 'string' || !baseUrl || typeof token !== 'string' || !token) {
         return null;
     }
-    const timeoutSec = parsed.env.API_TIMEOUT_MS
-        ? Math.round(Number(parsed.env.API_TIMEOUT_MS) / 1000)
-        : undefined;
+    // API_TIMEOUT_MS 归一：非数字/空串/0/负数/NaN → undefined。
+    // 原实现 Number("abc")=NaN、Number("")=0 会产生 NaN/0 写进 settings（NaN 脏值、0=立即超时）。
+    const timeoutSec = normalizeTimeoutSec(parsed.env.API_TIMEOUT_MS);
     return { baseUrl, token, timeoutSec, mode: parent.mode === 'proxy' ? 'proxy' : 'direct' };
+}
+
+/**
+ * 把 API_TIMEOUT_MS（ms，字符串/数字）归一为 timeoutSec（秒，正整数 finite）。
+ * 非数字/空串/0/负数/NaN/Infinity → undefined（视为缺失，不写进 settings.json）。
+ * 防 Number("abc")=NaN、Number("")=0 污染 settings（NaN→"NaN" 脏值；0→0ms 立即超时）。
+ */
+function normalizeTimeoutSec(raw: unknown): number | undefined {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) {
+        return undefined;
+    }
+    return Math.round(n / 1000);
 }
 
 /**

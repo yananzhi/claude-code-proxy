@@ -142,7 +142,10 @@ export class WebviewEditor {
         const baseUrl = parsed.env.ANTHROPIC_BASE_URL;
         const token = parsed.env.ANTHROPIC_AUTH_TOKEN;
         if (!baseUrl || !token) return undefined;
-        const timeoutSec = parsed.env.API_TIMEOUT_MS ? Math.round(Number(parsed.env.API_TIMEOUT_MS) / 1000) : undefined;
+        // timeoutSec 归一：非数字/空串/0/负数/NaN → undefined（防 NaN/0 写进快照再污染 settings.json）。
+        // 与 resolveDerivedUpstream 的 normalizeTimeoutSec 一致——快照存入的值会被启动时透传。
+        const tNum = Number(parsed.env.API_TIMEOUT_MS);
+        const timeoutSec = Number.isFinite(tNum) && tNum > 0 ? Math.round(tNum / 1000) : undefined;
         return { baseUrl, token, timeoutSec, mode: parent.mode === 'proxy' ? 'proxy' : 'direct' };
     }
 

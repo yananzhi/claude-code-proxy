@@ -1083,3 +1083,111 @@ test('R37. buildAliasEnv key 命名：main→ANTHROPIC_MODEL，三档→ANTHROPI
     // 不应有 ANTHROPIC_DEFAULT_MAIN_MODEL
     assert.equal(env.ANTHROPIC_DEFAULT_MAIN_MODEL, undefined);
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// RV (Review Verification) — 第二轮审查怀疑点 TDD 验证
+// ═══════════════════════════════════════════════════════════════════
+
+// ── RV1 (类别2 异常路径): resolveDerivedUpstream 父 content API_TIMEOUT_MS 非数字 → timeoutSec=NaN ──
+// 怀疑：API_TIMEOUT_MS: "abc"（非数字字符串），Number("abc")=NaN，Math.round(NaN/1000)=NaN。
+// resolveDerivedUpstream 返回 timeoutSec: NaN（而非 undefined）。
+// 后续 synthesizeDerivedSettings 用 NaN != null（true）→ env.API_TIMEOUT_MS = "NaN"（脏值写进 settings.json）。
+// 期望：非数字的 API_TIMEOUT_MS 应视为缺失 → timeoutSec: undefined（不应产生 NaN）。
+test('RV1. resolveDerivedUpstream 父 API_TIMEOUT_MS 非数字 → timeoutSec 应为 undefined（非 NaN）', () => {
+    const derived = { derivedFrom: 'p1' }; // 无快照
+    const parent = {
+        content: JSON.stringify({ env: {
+            ANTHROPIC_BASE_URL: 'http://p.example',
+            ANTHROPIC_AUTH_TOKEN: 'p-token',
+            API_TIMEOUT_MS: 'abc',  // 非数字
+        } }),
+        mode: 'direct',
+    };
+    const r = resolveDerivedUpstream(derived, parent);
+    assert.notEqual(r, null);
+    // 当前实现：timeoutSec = Math.round(Number('abc')/1000) = NaN
+    // 期望：NaN 应视为缺失 → undefined
+    assert.equal(r.timeoutSec, undefined, `timeoutSec 应为 undefined，实际=${r.timeoutSec}（NaN 会污染 settings.json）`);
+});
+
+// ── RV1b: API_TIMEOUT_MS 为空串 → Number('')=0 → timeoutSec=0（应 undefined）──
+// 怀疑：API_TIMEOUT_MS: ""（空串），Number("")=0，Math.round(0/1000)=0。
+// 0 是 falsy 但 !=null，synthesizeDerivedSettings 会写 API_TIMEOUT_MS="0"（0ms 超时 = 立即超时！）。
+// 期望：空串/0 应视为缺失 → undefined。
+test('RV1b. resolveDerivedUpstream 父 API_TIMEOUT_MS 空串 → timeoutSec 应为 undefined（非 0）', () => {
+    const derived = { derivedFrom: 'p1' };
+    const parent = {
+        content: JSON.stringify({ env: {
+            ANTHROPIC_BASE_URL: 'http://p.example',
+            ANTHROPIC_AUTH_TOKEN: 'p-token',
+            API_TIMEOUT_MS: '',  // 空串
+        } }),
+        mode: 'direct',
+    };
+    const r = resolveDerivedUpstream(derived, parent);
+    assert.notEqual(r, null);
+    // 当前实现：Number('')=0 → timeoutSec=0（0 秒超时会立即超时）
+    // 期望：空串应视为缺失 → undefined
+    assert.equal(r.timeoutSec, undefined, `timeoutSec 应为 undefined，实际=${r.timeoutSec}（0 会立即超时）`);
+});
+
+// ── RV2 (类别1 边界): resolveDerivedUpstream 快照 timeoutSec=NaN 透传 ──
+// 怀疑：快照里 timeoutSec=NaN（snapshotFromParent 对非数字 API_TIMEOUT_MS 算出 NaN 存入），
+// resolveDerivedUpstream 快照路径不检查 timeoutSec 类型，直接透传 NaN。
+// 期望：快照 timeoutSec 非 finite 数字应视为 undefined。
+test('RV2. resolveDerivedUpstream 快照 timeoutSec=NaN → 应视为 undefined（非透传 NaN）', () => {
+    const derived = {
+        derivedFrom: 'p1',
+        derivedSnapshot: { baseUrl: 'http://snap', token: 'tok', timeoutSec: NaN, mode: 'direct' },
+    };
+    const r = resolveDerivedUpstream(derived, null);
+    assert.notEqual(r, null);
+    // 当前实现：timeoutSec: snap.timeoutSec = NaN（透传）
+    // 期望：NaN 应归一为 undefined
+    assert.equal(r.timeoutSec, undefined, `timeoutSec 应为 undefined，实际=${r.timeoutSec}`);
+});
+
+// ── RV3 (类别1 边界): resolveDerivedUpstream 快照 timeoutSec 为字符串 ──
+// 怀疑：快照数据损坏（timeoutSec 是字符串 "300"），resolveDerivedUpstream 透传字符串。
+// synthesizeDerivedSettings 用 String(Math.round("300"*1000)) = "300000"（巧合正确），
+// 但若 timeoutSec 是 "abc" 字符串则 Math.round(NaN)="NaN"。
+// 期望：非数字 timeoutSec 应归一为 undefined 或数字。
+test('RV3. resolveDerivedUpstream 快照 timeoutSec 为字符串 "abc" → 应归一为 undefined', () => {
+    const derived = {
+        derivedFrom: 'p1',
+        derivedSnapshot: { baseUrl: 'http://snap', token: 'tok', timeoutSec: 'abc', mode: 'direct' },
+    };
+    const r = resolveDerivedUpstream(derived, null);
+    assert.notEqual(r, null);
+    // 当前实现：透传字符串 'abc'
+    // 期望：非 finite 数字归一为 undefined
+    assert.equal(r.timeoutSec, undefined, `timeoutSec 应为 undefined，实际=${r.timeoutSec}`);
+});
+
+// ── RV4 (类别1 边界): aggregateModelCatalog 父 ANTHROPIC_SMALL_FAST_MODEL 带尾空格 ──
+// 怀疑：aggregateModelCatalog 对 content 解出的模型名用 .trim() 判定+加入 set，
+// 但 ANTHROPIC_SMALL_FAST_MODEL 路径也应有 trim（现有代码已有）。验证不崩。
+test('RV4. aggregateModelCatalog ANTHROPIC_SMALL_FAST_MODEL 带尾空格 → trim', () => {
+    const configs = [
+        { content: JSON.stringify({ env: { ANTHROPIC_SMALL_FAST_MODEL: 'glm-flash  ' } }) },
+    ];
+    const catalog = aggregateModelCatalog(configs);
+    assert.ok(catalog.includes('glm-flash'));
+    assert.ok(!catalog.some(m => m !== m.trim()));
+});
+
+// ── RV5 (类别6 一致性): computeAliasSyncActions 代理表值带尾空格 → 视为不一致 ──
+// 怀疑：代理表 { 'ccp-sonnet-2': 'claude-sonnet-5 ' }（尾空格），派生节点配 'claude-sonnet-5'。
+// trim 后 model='claude-sonnet-5'，proxyAliases['ccp-sonnet-2']='claude-sonnet-5 '（未 trim）。
+// 'claude-sonnet-5' !== 'claude-sonnet-5 ' → toSet 一条（多余动作）。
+// 代理表值是否也应 trim 比较？当前不 trim 代理表值，只 trim 派生节点值。
+// 这是设计选择（代理表权威，不归一化），但会导致每次启动都多余 set。
+test('RV5. computeAliasSyncActions 代理表值带尾空格 → 多余 set（代理表值未 trim）', () => {
+    const derived = { derivedIndex: 2, modelAliases: { sonnet: 'claude-sonnet-5' } };
+    const proxyAliases = { 'ccp-sonnet-2': 'claude-sonnet-5 ' }; // 代理表值带尾空格
+    const r = computeAliasSyncActions(derived, proxyAliases);
+    // 当前实现：代理表值不 trim → 'claude-sonnet-5' !== 'claude-sonnet-5 ' → toSet 一条
+    // 这是已知行为（代理表权威不归一化），记录为"每次启动多余 set"的轻微低效
+    // 翻转为回归用例：确认代理表值不 trim 比较（设计选择）
+    assert.ok(r.toSet.length >= 1, '代理表值带尾空格时，派生节点 trim 后值不一致 → toSet 至少一条（设计选择：代理表权威不归一化）');
+});
