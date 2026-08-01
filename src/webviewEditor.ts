@@ -86,6 +86,8 @@ export class WebviewEditor {
                 `派生节点未存上游快照。若父配置后续被删或改坏，此派生节点将无法启动。`,
             );
         }
+        // 三档映射默认继承父配置 content 里的 ANTHROPIC_DEFAULT_*_MODEL（父有则预填，§6.7 P3）
+        const inheritedAliases = this.inheritAliasesFromParent(parentCfg.content);
         const cfg: LLMConfig = {
             id: newId(),
             name,
@@ -94,7 +96,7 @@ export class WebviewEditor {
             updatedAt: new Date().toISOString(),
             derivedFrom: parentCfg.id,
             derivedIndex,
-            modelAliases: {},
+            modelAliases: inheritedAliases,
             derivedSnapshot: snapshot,
         };
         await this.open(`new:derived:${cfg.id}`, undefined, `New Derived: ${name}`, name, parentCfg.content,
@@ -106,6 +108,22 @@ export class WebviewEditor {
         const catalog = await this.loadModelCatalog();
         await this.open(`edit:derived:${cfg.id}`, cfg.id, `Edit: ${cfg.name}`, cfg.name, cfg.content,
             'proxy', 'derived', [], { cfg, catalog });  // 派生节点强制 proxy 模式（V7）
+    }
+
+    /** 从父配置 content 解出三档默认映射（父有 ANTHROPIC_DEFAULT_*_MODEL 则预填）。
+     *  派生节点新建时继承父的三档配置，省得用户每档重新填（§6.7 P3）。 */
+    private inheritAliasesFromParent(parentContent: string): { haiku?: string; sonnet?: string; opus?: string } {
+        const parsed = extractUpstream(parentContent);
+        if (!parsed) return {};
+        const env = parsed.env ?? {};
+        const aliases: { haiku?: string; sonnet?: string; opus?: string } = {};
+        const h = env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+        const s = env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+        const o = env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+        if (typeof h === 'string' && h) aliases.haiku = h;
+        if (typeof s === 'string' && s) aliases.sonnet = s;
+        if (typeof o === 'string' && o) aliases.opus = o;
+        return aliases;
     }
 
     /** 从父配置提取上游快照（§6.5 P1，防父删/改断链）。 */
@@ -492,7 +510,8 @@ export class WebviewEditor {
   <div class="row">
     <label>连接模式</label>
     ${isDerived ? /* html */ `
-    <label style="font-weight:normal; margin-bottom:0"><input type="radio" name="mode" value="proxy" checked disabled /> 通过代理连接（派生节点强制）— 别名经代理重写，直连模式不支持运行时切换</label>
+    <div class="hint" style="font-weight:normal">派生节点只能通过代理连接 —— 别名经代理重写为真实模型，直连模式不支持运行时切换。主对话模型（ANTHROPIC_MODEL）走 <code>/model</code> 命令切换。</div>
+    <input type="hidden" name="mode" value="proxy" />
     ` : /* html */ `
     <label style="font-weight:normal; margin-bottom:4px"><input type="radio" name="mode" value="direct" ${directChecked} ${modeDisabled} /> 直连 — Claude Code 直接连此上游（默认）</label>
     <label style="font-weight:normal; margin-bottom:0"><input type="radio" name="mode" value="proxy" ${proxyChecked} ${modeDisabled} /> 通过代理连接 — 代理用此上游重试 503，Claude Code 经代理连接</label>
