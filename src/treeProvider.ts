@@ -103,13 +103,16 @@ export class ConfigTreeProvider implements vscode.TreeDataProvider<ConfigNode> {
             }
             const configs = await this.localStore.load();
             const activeConfigId = (await this.localActiveState.load())?.id;
+            // 派生节点（derivedFrom 非空）不作为普通 local 配置渲染——它们挂在父节点下或作孤儿。
+            // 否则会在 local 分组下出现重复项（派生节点既在父下、又作为普通 local 项）。
+            const parentConfigs = configs.filter(c => !c.derivedFrom);
             if (configs.length === 0) {
                 return [this.buildHintNode('no local configs — click + to create')];
             }
             const configIds = new Set(configs.map(c => c.id));
             // 并发查每条 local 配置的派生节点数，决定是否可展开
             const withDerived = await Promise.all(
-                configs.map(async cfg => {
+                parentConfigs.map(async cfg => {
                     const derived = await this.localStore!.getDerivedByParent(cfg.id);
                     return { cfg, derivedCount: derived.length };
                 }),
