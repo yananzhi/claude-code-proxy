@@ -777,6 +777,36 @@ mock 测试断言用精算值（579,000 / 179,000），注释标注「校准了�
 3. **三档 `ANTHROPIC_DEFAULT_*` 走本方案 alias**——它们是 alias 解析输入源，经 shell env 启动注入别名、代理层映射表热更新。`/model sonnet` 解析时会命中我们的别名，再由代理替换。
 4. 三套机制（`/model` 运行时切换 / `ANTHROPIC_MODEL` 启动源 / `DEFAULT_*` alias 源）作用域严格分离，本方案只动 `DEFAULT_*` 这一层，互不干扰。
 
+### 6.14 代理换 model 与 CLI contextWindow 决策脱节（源码调研，存档）
+
+> 调研 `D:\work_dir\Claude_Code-_Source_Code`。回答"代理侧换 model 字段后，CLI 本地 contextWindow 决策会不会脱节"。
+
+**核心结论：必然脱节，且无内置机制同步。**
+
+CLI 请求层与决策层是分离的两条链路：
+- **请求层**：`body.model = normalizeModelStringForAPI(mainLoopModel)`，发往上游。代理在这里换 model。
+- **决策层**（autocompact / contextWindow / token 计数）：直接用 `toolUseContext.options.mainLoopModel`（CLI 内部状态 = 别名），**完全不读请求 body 的 model 字段**。
+
+故代理换 model 只影响发往上游的请求，对 CLI 内部 contextWindow 计算**零影响**。CLI 永远拿别名算 contextWindow（`getContextWindowForModel` 无 memoize、每次现算，入参是别名）。
+
+**证据**：
+- autocompact 决策点 `services/compact/autoCompact.ts:267` 用 `toolUseContext.options.mainLoopModel`（别名）。
+- `getContextWindowForModel`（`utils/context.ts:51-98`）纯函数无缓存，入参是 CLI 内部 model 字符串。
+- 主请求 body.model 来源：`query.ts:572-578,670` → `services/api/claude.ts:1700`，= `normalizeModelStringForAPI(getRuntimeMainLoopModel(mainLoopModel))`。
+- `/model` 改 `AppState.mainLoopModel` → `onChangeAppState.ts:105-112` 同步 `STATE.mainLoopModelOverride` + 写 settings.json，不直接改 env。
+
+**脱节场景**：`ANTHROPIC_MODEL=ccp-main-1`，代理映射 `ccp-main-1 → 200K 模型`。CLI 按 `ccp-main-1`（200K）算、~179K compact。若代理改映射到 1M 模型，CLI 仍按 200K 算 → 过早 compact，浪费 1M 上下文。反之（200K→1M 别名）CLI 按 1M 算、上游 200K 模型爆 context。
+
+**唯一半同步手段：别名带 `[1m]` 后缀**。`getContextWindowForModel` 第一道判断 `has1mContext(model)`（看字符串 `[1m]` 字面量）→ 1M。配 `ANTHROPIC_MODEL=ccp-main-1[1m]`，CLI 按 1M 算；`normalizeModelStringForAPI` 发请求时剥 `[1m]` → 代理收到 `ccp-main-1` 能识别替换。但 `[1m]` 硬编码 1M、不能反映真实模型精确 contextWindow、不能运行时跨档位切。
+
+**对本方案运行时切模型的边界约束**：
+
+- ✅ **同 contextWindow 档位内切换**可行（200K↔200K、1M↔1M）：代理换映射、CLI 无感、决策不脱节。
+- ❌ **跨 contextWindow 档位切换**（200K↔1M）有风险：CLI 决策脱节。要靠别名带固定 `[1m]` 后缀、且不能运行时改档位（改了要重启 CLI）。
+
+**主模型别名（优化 2）的设计边界**：若做 `ccp-main-N` 主模型别名映射，须接受——运行时切主模型只能在同 contextWindow 档位内；跨档位切（200K↔1M）不可靠。或主模型不走别名、走 `/model`，追踪靠子 agent 三档别名的 N（子 agent 永远走档位别名、不认 `/model`，代理能稳定识别）。此条待定，见 §6.14.1 待决策。
+
+
 
 
 
