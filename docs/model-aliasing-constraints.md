@@ -73,20 +73,25 @@ CLI 用 chokidar 监听 settings.json，文件变更会清缓存重读。但：
 
 ---
 
-## 5. 扩展宿主 http 客户端不解码 chunked（空 body 真因）
+## 5. 扩展宿主 http 栈对本地响应 body 单向吞没（空 body 真因）
 
-扩展宿主（Electron）的 http 客户端**不解码 `Transfer-Encoding: chunked` 响应**——`data` 事件不投递，直接 `end`，客户端拿到 `status 200` + **空 body**（`rawLen=0`）。命令行 `node -e`/`curl` 的 http 客户端会透明解码 chunked，所以表现不一致、极难定位。
+**⚠ 是 http 栈本身在 VS Code 扩展宿主（Electron）里的行为**：`http.get`/`http.request`/`fetch` 对发往 `127.0.0.1` 的响应**不投递 `data` 事件**——直接 `end`，客户端拿 `status 200` + **空 body**（`rawLen=0`）。请求 body 不吞（上行正常），只有响应 body 被吞（单向）。命令行 `node -e`/`curl` 的 http 客户端正常，所以只在扩展宿主复现、极难定位。
 
-**真因（2026-08-01 诊断坐实，推翻早期 proxy-agent 假设）**：代理侧 `sendJson` 用 `res.end(JSON.stringify(obj))` 一次性写完，但 `writeHead` **没写 `Content-Length`** → Node http server 自动改 `Transfer-Encoding: chunked` 分块发送（HTTP/1.1：无 Content-Length 必须分块）→ 扩展宿主 http 客户端不解码 chunked → 空 body。
+**与以下均无关（均已诊断排除，别再往这些方向猜）**：
+- ❌ 不是 `@vscode/proxy-agent`（系统 HTTP_PROXY/HTTPS_PROXY 全 unset、NO_PROXY 兜底无效、proxy-agent 无劫持条件）。
+- ❌ 不是 `Transfer-Encoding: chunked`（服务端加 `Content-Length` 改发完整 body，扩展宿主 http 栈**仍吞 body**）。
+- ❌ 不是服务端没发 body（裸 socket 拿到完整 body）。
+- ❌ 不是某个接口特殊（GET / POST 响应都被吞）。
 
-诊断证据（5 探针，系统 HTTP_PROXY/HTTPS_PROXY 全 unset）：
-- `http.get /api/config` → status=200, chunked, rawLen=0。
-- 裸 `net` socket GET 同路径 → isChunked=true, rawBytesLen=516, dechunk 后 decodedLen=508（**服务端 body 完整**，是客户端吞的）。
-- `http.request POST` 设映射 → 响应 rawLen=0（被吞），但裸 socket 读回含该映射（**POST 请求 body 没被吞**，"假成功"=请求送达但响应读不到）。
+诊断证据（2026-08-01，多轮探针，系统 HTTP_PROXY/HTTPS_PROXY 全 unset）：
+- `http.get /api/config` → status=200, rawLen=0（被吞）。
+- 裸 `net` socket GET 同路径 → rawBytesLen=516, dechunk 后 decodedLen=508（服务端 body 完整，是客户端吞的）。
+- 服务端 `sendJson` 加 `Content-Length` 后（不再 chunked）→ `http.get` 仍 rawLen=0（chunked 不是元凶）。
+- `http.request POST` 设映射 → 响应 rawLen=0（被吞），但裸 socket 读回含该映射 → POST 请求 body 没被吞，"假成功"=请求送达但响应读不到。
 
-**来源**：实测（诊断命令 `claude-code-proxy.diagProxyHttp`）；CLAUDE.md 有详细记录。
+**来源**：实测（诊断命令 `claude-code-proxy.diagProxyHttp` 多轮探针）；CLAUDE.md 有详细记录。
 
-**约束**：代理侧任何 `res.end(string)` 出口**必须配 `Content-Length`**（`sendJson`、静态文件、502 错误响应，见 `proxy/server.js`）。这是治本——服务端发完整 body 不分块，扩展宿主 http 客户端正常收 `data` 事件，所有 http wrapper（`getModelAliases`/`setModelAlias`/`removeModelAlias`）恢复可用。`nextAliasId` 用裸 socket + `dechunk` 是历史方案（先于 Content-Length 修复落地，仍兼容）；新增 wrapper 用 http 栈 + 服务端 Content-Length 即可，不强制裸 socket。
+**约束**：扩展宿主侧调本地代理接口**一律用裸 `net` socket**（`src/proxyHost.ts rawHttp(method, path, body?)` 统一封装：`net.connect` + 手写 HTTP 请求行 + 手动解析响应，含 chunked 解码 `dechunk` 兼容）。绕过扩展宿主 http 栈，稳定拿 body。所有 wrapper（`getModelAliases`/`setModelAlias`/`removeModelAlias`/`setUpstream`/`kill`/`nextAliasId`/`healthz`）全走裸 socket。新增 wrapper 照 `rawHttp` 模式写，不用 `http.get`/`http.request`/`fetch`。代理侧 `res.end` 出口仍配 `Content-Length`（对非扩展宿主如 web UI 浏览器、命令行更规范，对扩展宿主虽无效但无害）。
 
 ---
 
@@ -125,6 +130,6 @@ CLI 用 chokidar 监听 settings.json，文件变更会清缓存重读。但：
 | 2 请求/决策层分离 | 代理换 model → CLI contextWindow 不变 | 同档位内切安全；跨档位弹警告 |
 | 3 `[1m]` 唯一档位信号 | 代理侧看不到档位（被剥） | 别名带不带 `[1m]` 用户选；代理 key 不带后缀；跨档位通用警告 |
 | 4 settings.env 不热切主模型 | 改 env 当前 session 不变 | 切换靠代理映射表，不靠 env 热重载 |
-| 5 客户端不解码 chunked | 扩展宿主 http 拿空 body | 代理侧 `res.end` 出口必配 `Content-Length`（治本）；`nextAliasId` 裸 socket 历史方案仍兼容 |
+| 5 扩展宿主 http 栈单向吞响应 body | 扩展宿主 http.get 拿空 body（与 proxy-agent/chunked/Content-Length 均无关） | 扩展侧调代理一律用裸 `net` socket（`rawHttp`）；代理侧 `res.end` 仍配 `Content-Length`（为非扩展宿主） |
 | 6 `/model` 感知不到 | 运行时检测不到脱离 | 编辑页静态 hover 提示 |
 | 7 子 agent 别名稳定 | 可追踪 | 追踪靠三档别名 N |
