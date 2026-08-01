@@ -413,8 +413,10 @@ export class ClaudeLauncher {
             //    终端 name 带 #N 供 deleteDerivedConfig 匹配活终端
             const isWin = process.platform === 'win32';
             const idx = derivedCfg.derivedIndex;
-            // 别名是否带 [1m]：派生节点未存此标志，默认不带（200K）；如需 1M 由配置页/未来字段决定
-            const aliasEnv = buildAliasEnv(idx, { with1m: false });
+            // 别名是否带 [1m]：派生节点存了 sessionContext1m 则用之，否则默认不带（200K，约束 3）。
+            // 该标志决定 CLI 按 1M 还是 200K 算 contextWindow（[1m] 是 CLI 识别档位的唯一信号）。
+            const with1m = derivedCfg.sessionContext1m === true;
+            const aliasEnv = buildAliasEnv(idx, { with1m });
             const terminalOptions: vscode.TerminalOptions = {
                 name: `Claude Code #${idx} (${derivedCfg.name})`,
                 cwd: workspaceRoot,
@@ -474,7 +476,11 @@ export class ClaudeLauncher {
         if (upstream.timeoutSec != null) {
             env.API_TIMEOUT_MS = String(Math.round(upstream.timeoutSec * 1000));
         }
-        // 显式删除可能残留的三档别名 key（防父 content 恰好带同名 key 破坏 §5.4 冻结前提）
+        // 显式删除可能残留的别名 key（防父 content 恰好带同名 key 破坏 §5.4 冻结前提）。
+        // 四档别名均走 shell env（buildAliasEnv），settings.env 不能含同名 key，否则 shell env 被覆盖、
+        // 别名失效。ANTHROPIC_MODEL 尤其要删：父 content 的真名若留在 settings.env，会覆盖 shell env 的
+        // ccp-main-N 别名，导致主对话模型不经代理重写（约束 4/§5.4）。
+        delete env.ANTHROPIC_MODEL;
         delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
         delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
         delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;

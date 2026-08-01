@@ -15,6 +15,7 @@ import {
     summarizeAliases,
     nextDerivedIndex,
     filterParentConfigs,
+    inheritSessionContext1m,
 } from '../../out/derivedLogic.js';
 
 // ── D1: aliasName 基本格式 ──
@@ -39,16 +40,18 @@ test('3. aliasName 非法 tier 抛错', () => {
     assert.throws(() => aliasName('sonnet', -1), /index/);
 });
 
-// ── D1×D6: buildAliasEnv 三档 shell env，不含 BASE_URL/token ──
-test('4. buildAliasEnv 三档注入 shell env，不含 BASE_URL/token', () => {
+// ── D1×D6: buildAliasEnv 四档 shell env，不含 BASE_URL/token ──
+// 优化 2：主模型也走别名（ccp-main-N[1m]?），buildAliasEnv 现含 ANTHROPIC_MODEL。
+test('4. buildAliasEnv 四档注入 shell env（含 ANTHROPIC_MODEL），不含 BASE_URL/token', () => {
     const env = buildAliasEnv(1, { with1m: true });
     assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-1[1m]');
     assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-1[1m]');
     assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'ccp-opus-1[1m]');
+    // 优化 2：主模型走 ANTHROPIC_MODEL 别名（覆盖父真名），带 [1m] 后缀
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-1[1m]');
     // 安全约束：别名走 shell env，BASE_URL/token 走 settings.env，不能混进这里
     assert.equal(env.ANTHROPIC_BASE_URL, undefined);
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
-    assert.equal(env.ANTHROPIC_MODEL, undefined); // 主模型走 /model，不纳入
 });
 
 // ── D6 幂等: buildAliasEnv 同输入同输出 ──
@@ -573,4 +576,510 @@ test('filterParentConfigs: 全是派生节点返空（孤儿由 treeProvider 另
         { id: 'd2', derivedFrom: 'p2' },
     ];
     assert.deepEqual(filterParentConfigs(configs), []);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 优化 2：主模型别名（ccp-main-N）+ 档位选项（[1m]）+ 继承
+// 维度见 plan/tmp/2026-08-01-main-alias.md（D1 main / D2 [1m] / D3 继承）
+// ═══════════════════════════════════════════════════════════════════
+
+// ── D1+D2: aliasName main 档 × [1m] 后缀 ──
+test('M1. aliasName main 档基本格式 + [1m] 后缀', () => {
+    assert.equal(aliasName('main', 1, false), 'ccp-main-1');
+    assert.equal(aliasName('main', 1, true), 'ccp-main-1[1m]');
+    assert.equal(aliasName('main', 7, true), 'ccp-main-7[1m]');
+    assert.equal(aliasName('main', 7, false), 'ccp-main-7');
+});
+
+// ── D1: aliasName main 档非法 N 抛错（与三档一致）──
+test('M2. aliasName main 档 N=0/负数/浮点 → 抛错', () => {
+    assert.throws(() => aliasName('main', 0), /index/);
+    assert.throws(() => aliasName('main', -1), /index/);
+    assert.throws(() => aliasName('main', 1.5), /index/);
+});
+
+// ── D2: buildAliasEnv with1m=false → 四档都不带后缀 ──
+test('M3. buildAliasEnv with1m=false → 四档别名都不带 [1m]', () => {
+    const env = buildAliasEnv(3, { with1m: false });
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-3');
+    assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-3');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-3');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'ccp-opus-3');
+    // 确认无一档带 [1m]
+    assert.ok(!Object.values(env).some(v => v.includes('[1m]')));
+});
+
+// ── D2: buildAliasEnv 默认 with1m=false（不传 opts）──
+test('M4. buildAliasEnv 不传 opts → 默认不带 [1m]', () => {
+    const env = buildAliasEnv(2);
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-2');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-2');
+});
+
+// ── D1+D5: computeAliasSyncActions 含 main 档（配了则补 ccp-main-N）──
+test('M5. computeAliasSyncActions main 档配了 → 补 ccp-main-N', () => {
+    const derived = {
+        derivedIndex: 2,
+        modelAliases: { main: 'glm-5.2', haiku: 'claude-haiku-4-5', sonnet: 'claude-sonnet-5', opus: 'claude-opus-5' },
+    };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 4);
+    assert.ok(r.toSet.find(a => a.alias === 'ccp-main-2' && a.model === 'glm-5.2'));
+    assert.ok(r.toSet.find(a => a.alias === 'ccp-haiku-2' && a.model === 'claude-haiku-4-5'));
+    assert.ok(r.toSet.find(a => a.alias === 'ccp-sonnet-2' && a.model === 'claude-sonnet-5'));
+    assert.ok(r.toSet.find(a => a.alias === 'ccp-opus-2' && a.model === 'claude-opus-5'));
+    // 映射 key 不带 [1m]（约束 3）
+    assert.ok(!r.toSet.some(a => a.alias.includes('[1m]')));
+});
+
+// ── D5: main 档未配 → 不补 main（其余三档照常）──
+test('M6. computeAliasSyncActions main 档未配 → 不补 main', () => {
+    const derived = {
+        derivedIndex: 2,
+        modelAliases: { sonnet: 'claude-sonnet-5' }, // 只配 sonnet，main/haiku/opus 未配
+    };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 1);
+    assert.equal(r.toSet[0].alias, 'ccp-sonnet-2');
+    assert.ok(!r.toSet.find(a => a.alias === 'ccp-main-2'));
+});
+
+// ── D5: main 档代理表已含且一致 → 无动作 ──
+test('M7. computeAliasSyncActions main 档一致 → 无动作', () => {
+    const derived = {
+        derivedIndex: 2,
+        modelAliases: { main: 'glm-5.2' },
+    };
+    const proxyAliases = { 'ccp-main-2': 'glm-5.2' };
+    const r = computeAliasSyncActions(derived, proxyAliases);
+    assert.equal(r.toSet.length, 0);
+});
+
+// ── D5: main 档代理表含但值不一致 → 覆盖 ──
+test('M8. computeAliasSyncActions main 档不一致 → 覆盖', () => {
+    const derived = {
+        derivedIndex: 2,
+        modelAliases: { main: 'glm-5.2' },
+    };
+    const proxyAliases = { 'ccp-main-2': 'old-model' };
+    const r = computeAliasSyncActions(derived, proxyAliases);
+    assert.equal(r.toSet.length, 1);
+    assert.equal(r.toSet[0].alias, 'ccp-main-2');
+    assert.equal(r.toSet[0].model, 'glm-5.2');
+});
+
+// ── D4+D5: main 档 + N=0 → 空动作（与三档一致，防 aliasName 抛错）──
+test('M9. computeAliasSyncActions main 档 + N=0 → 空动作不抛错', () => {
+    const derived = {
+        derivedIndex: 0,
+        modelAliases: { main: 'glm-5.2', sonnet: 'claude-sonnet-5' },
+    };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 0);
+    assert.equal(r.toRemove.length, 0);
+});
+
+// ── D5: main 档 model 带尾空格 → trim 后比较（与 S9 一致）──
+test('M10. computeAliasSyncActions main 档 model 带尾空格 → trim', () => {
+    const derived = { derivedIndex: 2, modelAliases: { main: 'glm-5.2 ' } };
+    const proxyAliases = { 'ccp-main-2': 'glm-5.2' };
+    const r = computeAliasSyncActions(derived, proxyAliases);
+    assert.equal(r.toSet.length, 0);
+});
+
+// ── D1+D7: summarizeAliases 含 main 档（M: 前缀）──
+test('M11. summarizeAliases 含 main 档 → M: 前缀', () => {
+    const s = summarizeAliases({ main: 'glm-5.2', sonnet: 'claude-sonnet-5', haiku: 'claude-haiku-4-5', opus: 'claude-opus-5' });
+    assert.ok(s.includes('M:glm-5.2'), s);
+    assert.ok(s.includes('S:claude-sonnet-5'), s);
+    assert.ok(s.includes('H:claude-haiku-4-5'), s);
+    assert.ok(s.includes('O:claude-opus-5'), s);
+});
+
+// ── D7: summarizeAliases 只配 main ──
+test('M12. summarizeAliases 只配 main → 只显 M', () => {
+    const s = summarizeAliases({ main: 'glm-5.2' });
+    assert.ok(s.includes('M:glm-5.2'), s);
+    assert.ok(!s.includes('S:'), s);
+    assert.ok(!s.includes('H:'), s);
+    assert.ok(!s.includes('O:'), s);
+});
+
+// ── D7 异常: summarizeAliases main 非字符串值 → 跳过不崩 ──
+test('M13. summarizeAliases main 非字符串值 → 跳过', () => {
+    const s = summarizeAliases({ main: 123, sonnet: 'claude-sonnet-5' });
+    assert.ok(s.includes('S:claude-sonnet-5'));
+    assert.ok(!s.includes('M:'));
+    assert.equal(summarizeAliases({ main: { x: 1 } }), '');
+});
+
+// ── D7 边界: summarizeAliases main 空串/纯空白 → 跳过 ──
+test('M14. summarizeAliases main 空串/纯空白 → 跳过', () => {
+    assert.equal(summarizeAliases({ main: '' }), '');
+    assert.equal(summarizeAliases({ main: '   ' }), '');
+});
+
+// ── D1+D8: aggregateModelCatalog 含 main 档真实模型名 ──
+test('M15. aggregateModelCatalog 含 derived modelAliases.main 真实模型名', () => {
+    const configs = [
+        { content: JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2' } }) },
+        { modelAliases: { main: 'qwen-max', haiku: 'claude-haiku-4-5' } },
+    ];
+    const catalog = aggregateModelCatalog(configs);
+    assert.ok(catalog.includes('glm-5.2'));
+    assert.ok(catalog.includes('qwen-max'));
+    assert.ok(catalog.includes('claude-haiku-4-5'));
+});
+
+// ── D8 异常: aggregateModelCatalog main 非字符串值 → 跳过 ──
+test('M16. aggregateModelCatalog main 非字符串值 → 跳过', () => {
+    const configs = [{ modelAliases: { main: 999, sonnet: 'claude-sonnet-5' } }];
+    const catalog = aggregateModelCatalog(configs);
+    assert.ok(catalog.includes('claude-sonnet-5'));
+    assert.ok(!catalog.includes('999'));
+});
+
+// ── D3: inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] → true ──
+test('M17. inheritSessionContext1m 父带 [1m] → true', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2[1m]' } });
+    assert.equal(inheritSessionContext1m(content), true);
+});
+
+// ── D3: inheritSessionContext1m 父不带 [1m] → false ──
+test('M18. inheritSessionContext1m 父不带 [1m] → false', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2' } });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── D3: inheritSessionContext1m 父无 ANTHROPIC_MODEL → false（保守 200K）──
+test('M19. inheritSessionContext1m 父无 ANTHROPIC_MODEL → false', () => {
+    assert.equal(inheritSessionContext1m(JSON.stringify({ env: {} })), false);
+    assert.equal(inheritSessionContext1m(JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x' } })), false);
+});
+
+// ── D3: inheritSessionContext1m 父 content 无效 JSON → false ──
+test('M20. inheritSessionContext1m 父 content 无效 JSON → false', () => {
+    assert.equal(inheritSessionContext1m('not-json'), false);
+    assert.equal(inheritSessionContext1m(''), false);
+});
+
+// ── D3 边界: inheritSessionContext1m 父 ANTHROPIC_MODEL 大写 [1M] → true（CLI /\[1m\]/i 识别）──
+test('M21. inheritSessionContext1m 父带大写 [1M] → true（大小写不敏感）', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2[1M]' } });
+    assert.equal(inheritSessionContext1m(content), true);
+});
+
+// ── D3 边界: inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → false ──
+test('M22. inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → false', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 123 } });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── D3 边界: inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [2m]（CLI 不识别）→ false ──
+test('M23. inheritSessionContext1m 父带 [2m]（CLI 不识别）→ false', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2[2m]' } });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 优化 2 代码审查 TDD 用例（R1..Rn，每点独立断言）
+// ═══════════════════════════════════════════════════════════════════
+
+// ── R1 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false ──
+test('R1. inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: '' } });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── R2 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false ──
+// 怀疑：纯空白串 '   ' 是 truthy？不，空串才是 falsy。'   ' 是 truthy → 通过 !m 检查，
+// 但 /\[1m\]/i.test('   ') = false → 返回 false。应安全。
+test('R2. inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: '   ' } });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── R3 (类别3 类型安全): inheritSessionContext1m 父 ANTHROPIC_MODEL 为 null ──
+// 怀疑：JSON 里 ANTHROPIC_MODEL: null，extractUpstream 把 env 强转 Record<string,string>，
+// 但 null 实际值是 null（typeof null === 'object'）。typeof m !== 'string' 守卫应捕获。
+test('R3. inheritSessionContext1m 父 ANTHROPIC_MODEL 为 null → false', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: null } });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── R4 (类别3 类型安全): inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 ──
+test('R4. inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 → false', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: true } });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── R5 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] 但中间穿插空格 ──
+// 怀疑：'glm-5.2 [1m]'（空格在 [1m] 前）→ /\[1m\]/i 仍匹配 → true。
+// CLI has1mContext 也是 /\[1m\]/i 子串匹配，行为一致。非 bug，回归保护。
+test('R5. inheritSessionContext1m 父 [1m] 前有空格 → true（子串匹配，与 CLI 一致）', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2 [1m]' } });
+    assert.equal(inheritSessionContext1m(content), true);
+});
+
+// ── R6 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] 多次出现 → true ──
+test('R6. inheritSessionContext1m 父 [1m] 多次出现 → true', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm[1m]-5.2[1m]' } });
+    assert.equal(inheritSessionContext1m(content), true);
+});
+
+// ── R7 (类别3 类型安全): computeAliasSyncActions modelAliases.main 为数字 → 跳过 ──
+test('R7. computeAliasSyncActions modelAliases.main 为数字 → 跳过不崩', () => {
+    const derived = { derivedIndex: 2, modelAliases: { main: 123, sonnet: 'claude-sonnet-5' } };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 1);
+    assert.equal(r.toSet[0].alias, 'ccp-sonnet-2');
+    assert.ok(!r.toSet.some(a => a.alias === 'ccp-main-2'));
+});
+
+// ── R8 (类别3 类型安全): computeAliasSyncActions modelAliases.main 为 null → 跳过 ──
+test('R8. computeAliasSyncActions modelAliases.main 为 null → 跳过', () => {
+    const derived = { derivedIndex: 2, modelAliases: { main: null, sonnet: 'claude-sonnet-5' } };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 1);
+    assert.ok(!r.toSet.some(a => a.alias === 'ccp-main-2'));
+});
+
+// ── R9 (类别3 类型安全): computeAliasSyncActions modelAliases.main 为对象 → 跳过 ──
+test('R9. computeAliasSyncActions modelAliases.main 为对象 → 跳过不崩', () => {
+    const derived = { derivedIndex: 2, modelAliases: { main: { x: 1 }, haiku: 'claude-haiku-4-5' } };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 1);
+    assert.equal(r.toSet[0].alias, 'ccp-haiku-2');
+});
+
+// ── R10 (类别3 类型安全): aggregateModelCatalog modelAliases.main 为数字 → 跳过 ──
+test('R10. aggregateModelCatalog modelAliases.main 为数字 → 跳过', () => {
+    const configs = [{ modelAliases: { main: 123, sonnet: 'claude-sonnet-5' } }];
+    const catalog = aggregateModelCatalog(configs);
+    assert.ok(catalog.includes('claude-sonnet-5'));
+    assert.ok(!catalog.includes('123'));
+});
+
+// ── R11 (类别3 类型安全): aggregateModelCatalog modelAliases.main 为 null → 跳过 ──
+test('R11. aggregateModelCatalog modelAliases.main 为 null → 跳过', () => {
+    const configs = [{ modelAliases: { main: null, haiku: 'claude-haiku-4-5' } }];
+    const catalog = aggregateModelCatalog(configs);
+    assert.ok(catalog.includes('claude-haiku-4-5'));
+    assert.equal(catalog.length, 1);
+});
+
+// ── R12 (类别1 边界): computeAliasSyncActions derivedIndex 为字符串数字 '2' → 空动作 ──
+// 怀疑：idx='2'（字符串），idx==null 为 false，Number.isFinite('2') 为 false（字符串非数字）
+// → 返回空动作。应安全。
+test('R12. computeAliasSyncActions derivedIndex 为字符串 "2" → 空动作', () => {
+    const derived = { derivedIndex: '2', modelAliases: { sonnet: 'claude-sonnet-5' } };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 0);
+    assert.equal(r.toRemove.length, 0);
+});
+
+// ── R13 (类别1 边界): computeAliasSyncActions derivedIndex 为 NaN → 空动作 ──
+test('R13. computeAliasSyncActions derivedIndex 为 NaN → 空动作', () => {
+    const derived = { derivedIndex: NaN, modelAliases: { sonnet: 'claude-sonnet-5' } };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 0);
+});
+
+// ── R14 (类别1 边界): computeAliasSyncActions derivedIndex 为 Infinity → 空动作 ──
+test('R14. computeAliasSyncActions derivedIndex 为 Infinity → 空动作', () => {
+    const derived = { derivedIndex: Infinity, modelAliases: { sonnet: 'claude-sonnet-5' } };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 0);
+});
+
+// ── R15 (类别1 边界): buildAliasEnv derivedIndex 为浮点 1.5 → 抛错（与 aliasName 一致）──
+test('R15. buildAliasEnv derivedIndex=1.5 → 抛错', () => {
+    assert.throws(() => buildAliasEnv(1.5), /index/);
+});
+
+// ── R16 (类别1 边界): summarizeAliases 四档全配顺序 M·S·H·O ──
+test('R16. summarizeAliases 四档全配 → 顺序 M · S · H · O', () => {
+    const s = summarizeAliases({ main: 'glm-5.2', sonnet: 's', haiku: 'h', opus: 'o' });
+    assert.equal(s, 'M:glm-5.2 · S:s · H:h · O:o');
+});
+
+// ── R17 (类别1 边界): inheritSessionContext1m 父 content 为 null（JSON null）──
+test('R17. inheritSessionContext1m 父 content 为 JSON null → false', () => {
+    assert.equal(inheritSessionContext1m('null'), false);
+});
+
+// ── R18 (类别1 边界): inheritSessionContext1m 父 content 为 JSON 数组 ──
+// 怀疑：JSON.parse('[1,2]') 成功，obj.env 是 undefined → (obj.env ?? {}) = {} → parsed 非 null
+// 但 parsed.env 是 {}，无 ANTHROPIC_MODEL → false。应安全。
+test('R18. inheritSessionContext1m 父 content 为 JSON 数组 → false', () => {
+    assert.equal(inheritSessionContext1m('[1,2,3]'), false);
+});
+
+// ── R19 (类别1 边界): inheritSessionContext1m 父 env 里 ANTHROPIC_MODEL 带混合大小写 [1M]/[1m] ──
+test('R19. inheritSessionContext1m 父带 [1M] 大写 → true（大小写不敏感）', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2[1M]' } });
+    assert.equal(inheritSessionContext1m(content), true);
+});
+
+// ── R20 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] 但值是别名 ccp-main-1[1m] ──
+// 场景：父本身就是派生节点（content 含别名）。extractUpstream 解出别名串，[1m] 匹配 → true。
+test('R20. inheritSessionContext1m 父 ANTHROPIC_MODEL 是别名 ccp-main-1[1m] → true', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'ccp-main-1[1m]' } });
+    assert.equal(inheritSessionContext1m(content), true);
+});
+
+// ── R21 (类别4 状态转换): computeAliasSyncActions main 档 model 带尾空格 + 代理表不一致 ──
+// 怀疑：main: 'glm-5.2 '（尾空格），代理表 { 'ccp-main-2': 'old' }。
+// trim 后 model='glm-5.2'，与 'old' 不一致 → toSet 一条 ccp-main-2: glm-5.2（trim 后）。
+test('R21. computeAliasSyncActions main 档 model 带尾空格 + 代理表不一致 → trim 后 set', () => {
+    const derived = { derivedIndex: 2, modelAliases: { main: 'glm-5.2 ' } };
+    const proxyAliases = { 'ccp-main-2': 'old' };
+    const r = computeAliasSyncActions(derived, proxyAliases);
+    assert.equal(r.toSet.length, 1);
+    assert.equal(r.toSet[0].alias, 'ccp-main-2');
+    assert.equal(r.toSet[0].model, 'glm-5.2');  // trim 后
+});
+
+// ── R22 (类别4 状态转换): computeAliasSyncActions 四档部分配部分一致 → 只补缺的 ──
+test('R22. computeAliasSyncActions 四档部分配部分一致 → 只补缺的', () => {
+    const derived = {
+        derivedIndex: 3,
+        modelAliases: { main: 'glm-5.2', sonnet: 'claude-sonnet-5' },
+    };
+    const proxyAliases = { 'ccp-main-3': 'glm-5.2' };  // main 一致，sonnet 缺
+    const r = computeAliasSyncActions(derived, proxyAliases);
+    assert.equal(r.toSet.length, 1);
+    assert.equal(r.toSet[0].alias, 'ccp-sonnet-3');
+});
+
+// ── R23 (类别5 时序): computeAliasSyncActions 四档全配 + 代理表全空 → 补四条 ──
+test('R23. computeAliasSyncActions 四档全配 + 代理表空 → 补四条', () => {
+    const derived = {
+        derivedIndex: 1,
+        modelAliases: { main: 'glm-5.2', haiku: 'h', sonnet: 's', opus: 'o' },
+    };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 4);
+    assert.ok(r.toSet.find(a => a.alias === 'ccp-main-1'));
+    assert.ok(r.toSet.find(a => a.alias === 'ccp-haiku-1'));
+    assert.ok(r.toSet.find(a => a.alias === 'ccp-sonnet-1'));
+    assert.ok(r.toSet.find(a => a.alias === 'ccp-opus-1'));
+});
+
+// ── R24 (类别6 一致性): computeAliasSyncActions 映射 key 不带 [1m]（约束 3）──
+// 怀疑：即使 derivedIndex 配了 sessionContext1m（但 computeAliasSyncActions 不读此字段），
+// alias 应不带 [1m]。computeAliasSyncActions 调 aliasName(tier, idx) 无第三参 → 默认 false。
+test('R24. computeAliasSyncActions 映射 key 永不带 [1m]（不读 sessionContext1m）', () => {
+    const derived = {
+        derivedIndex: 1,
+        modelAliases: { main: 'glm-5.2', sonnet: 's' },
+        sessionContext1m: true,  // 即使 true，映射 key 不带后缀
+    };
+    const r = computeAliasSyncActions(derived, {});
+    assert.ok(r.toSet.every(a => !a.alias.includes('[1m]')));
+});
+
+// ── R25 (类别1 边界): buildAliasEnv with1m=true → 四档都带 [1m]（含 main）──
+test('R25. buildAliasEnv with1m=true → 四档都带 [1m]', () => {
+    const env = buildAliasEnv(1, { with1m: true });
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-1[1m]');
+    assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-1[1m]');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-1[1m]');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'ccp-opus-1[1m]');
+});
+
+// ── R26 (类别1 边界): inheritSessionContext1m 父 env 为非对象（数字）──
+// 怀疑：JSON { "env": 123 }，extractUpstream 解析 obj.env=123，强转 Record<string,string>。
+// parsed.env 是 123（数字），但被 as 成 Record<string,string>。访问 parsed.env.ANTHROPIC_MODEL
+// → 123['ANTHROPIC_MODEL'] = undefined。typeof undefined !== 'string' → false。应安全。
+test('R26. inheritSessionContext1m 父 env 为数字 → false', () => {
+    const content = JSON.stringify({ env: 123 });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── R27 (类别1 边界): inheritSessionContext1m 父 env 为数组 ──
+test('R27. inheritSessionContext1m 父 env 为数组 → false', () => {
+    const content = JSON.stringify({ env: [1, 2] });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── R28 (类别1 边界): inheritSessionContext1m 父 env 为 null ──
+// 怀疑：JSON { "env": null }，obj.env = null，extractUpstream (obj.env ?? {}) = {}。
+// parsed.env.ANTHROPIC_MODEL = undefined → false。应安全。
+test('R28. inheritSessionContext1m 父 env 为 null → false', () => {
+    const content = JSON.stringify({ env: null });
+    assert.equal(inheritSessionContext1m(content), false);
+});
+
+// ── R29 (类别2 异常路径): inheritSessionContext1m 传入 undefined（JS 运行时）──
+// 怀疑：extractUpstream(undefined) → JSON.parse(undefined) → 抛 → catch → null → false。
+// 虽 TS 签名是 string，但运行时可能传 undefined（父 content 缺失）。应不崩。
+test('R29. inheritSessionContext1m 传入 undefined → false（不崩）', () => {
+    assert.equal(inheritSessionContext1m(undefined), false);
+});
+
+// ── R30 (类别2 异常路径): inheritSessionContext1m 传入 null ──
+test('R30. inheritSessionContext1m 传入 null → false（不崩）', () => {
+    assert.equal(inheritSessionContext1m(null), false);
+});
+
+// ── R31 (类别2 异常路径): inheritSessionContext1m 传入数字 ──
+test('R31. inheritSessionContext1m 传入数字 → false（不崩）', () => {
+    assert.equal(inheritSessionContext1m(123), false);
+});
+
+// ── R32 (类别2 异常路径): inheritSessionContext1m 传入对象 ──
+// 怀疑：JSON.parse(object) → JSON.parse("[object Object]") → 抛 → null → false。
+test('R32. inheritSessionContext1m 传入对象 → false（不崩）', () => {
+    assert.equal(inheritSessionContext1m({ env: { ANTHROPIC_MODEL: 'x[1m]' } }), false);
+});
+
+// ── R33 (类别1 边界): computeAliasSyncActions modelAliases 为 null ──
+// 怀疑：derived.modelAliases = null，mapping = null ?? {} = {}。遍历四档 raw=undefined → 跳过。
+test('R33. computeAliasSyncActions modelAliases=null → 空动作', () => {
+    const derived = { derivedIndex: 2, modelAliases: null };
+    const r = computeAliasSyncActions(derived, {});
+    assert.equal(r.toSet.length, 0);
+});
+
+// ── R34 (类别1 边界): aggregateModelCatalog modelAliases 为 null ──
+test('R34. aggregateModelCatalog modelAliases=null → 跳过不崩', () => {
+    const configs = [{ modelAliases: null, content: JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2' } }) }];
+    const catalog = aggregateModelCatalog(configs);
+    assert.ok(catalog.includes('glm-5.2'));
+    assert.equal(catalog.length, 1);
+});
+
+// ── R35 (类别1 边界): summarizeAliases main 带尾空格 → trim 前显示？──
+// 怀疑：summarizeAliases 对 main 调 .trim() 判定是否显示，但显示用 modelAliases.main（未 trim）。
+// 即 'glm-5.2 '（尾空格）→ trim() truthy → 显示 'M:glm-5.2 '（带尾空格）。
+// 这是显示层小瑕疵（尾空格进树 description），非功能 bug。回归保护。
+test('R35. summarizeAliases main 带尾空格 → 显示带空格（trim 只用于判定）', () => {
+    const s = summarizeAliases({ main: 'glm-5.2 ' });
+    assert.ok(s.includes('M:glm-5.2'));
+    // 注意：显示值未 trim，带尾空格——这是已知小瑕疵
+});
+
+// ── R36 (类别6 一致性): aliasName main 档错误消息含 main ──
+test('R36. aliasName 非法 tier 错误消息含全部四档', () => {
+    try {
+        aliasName('best', 1);
+        assert.fail('应抛错');
+    } catch (e) {
+        assert.ok(/main/.test(e.message), `错误消息应含 main: ${e.message}`);
+        assert.ok(/haiku/.test(e.message), `错误消息应含 haiku: ${e.message}`);
+    }
+});
+
+// ── R37 (类别1 边界): buildAliasEnv 四档 key 名称正确（ANTHROPIC_MODEL 非 DEFAULT）──
+// 怀疑：main 走 ANTHROPIC_MODEL（不带 DEFAULT_ 前缀），三档走 ANTHROPIC_DEFAULT_*_MODEL。
+// 验证 key 命名不串。
+test('R37. buildAliasEnv key 命名：main→ANTHROPIC_MODEL，三档→ANTHROPIC_DEFAULT_*_MODEL', () => {
+    const env = buildAliasEnv(1, { with1m: false });
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-1');
+    assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-1');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-1');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'ccp-opus-1');
+    // 不应有 ANTHROPIC_DEFAULT_MAIN_MODEL
+    assert.equal(env.ANTHROPIC_DEFAULT_MAIN_MODEL, undefined);
 });

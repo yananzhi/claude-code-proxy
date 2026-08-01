@@ -288,8 +288,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     /**
-     * 删派生节点 + 清代理映射表三条 + 关联处理活终端（§6.8 P6）。
-     * - 清映射：调 removeModelAlias 删 ccp-{haiku,sonnet,opus}-N（缺则忽略）。
+     * 删派生节点 + 清代理映射表四条（main + 三档）+ 关联处理活终端（§6.8 P6 + 优化 2）。
+     * - 清映射：调 removeModelAlias 删 ccp-{main,haiku,sonnet,opus}-N（缺则忽略）。
      * - 活终端：按终端 name 含 `#N` 或 env CCP_DERIVED_ID=N 匹配，弹确认一并关闭。
      *   匹配靠终端 name（createTerminal 的 name 含 #N），env 无法事后读，故以 name 为准。
      */
@@ -317,9 +317,9 @@ export function activate(context: vscode.ExtensionContext): void {
                 }
             }
         }
-        // 清代理映射表三条
+        // 清代理映射表四条（main + 三档，优化 2 main 档）
         if (idx != null && proxyHost) {
-            for (const tier of ['haiku', 'sonnet', 'opus'] as const) {
+            for (const tier of ['main', 'haiku', 'sonnet', 'opus'] as const) {
                 const alias = `ccp-${tier}-${idx}`;
                 try {
                     await proxyHost.removeModelAlias(alias);

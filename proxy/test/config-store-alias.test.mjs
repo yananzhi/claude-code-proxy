@@ -219,3 +219,44 @@ test('D2附加: rawModel 已等于真实模型 → 不改写（rewritten=false�
     assert.equal(r.rewritten, false);
     rmSync(dir, { recursive: true, force: true });
 });
+
+// ── 优化 2 回归：main 档别名 ccp-main-N 命中替换（代理侧无需改，验证同构）──
+test('优化2: ccp-main-1 命中 → 替换为真实模型', () => {
+    const dir = newTmpDir('opt2-main');
+    writeConfig(dir, { env: {}, proxy: {}, modelAliases: { 'ccp-main-1': 'glm-5.2' } });
+    cs.init(configPath(dir));
+    const body = Buffer.from(JSON.stringify({ model: 'ccp-main-1', messages: [] }), 'utf8');
+    const r = cs.rewriteModel(body, 'rid', 'application/json');
+    assert.equal(r.rewritten, true);
+    assert.equal(r.resolvedModel, 'glm-5.2');
+    assert.equal(JSON.parse(r.body.toString()).model, 'glm-5.2');
+    rmSync(dir, { recursive: true, force: true });
+});
+
+// ── 优化 2 回归：ccp-main-N[1m] 剥后缀查表命中 ──
+test('优化2: ccp-main-1[1m] 剥后缀查表命中 → 替换 base', () => {
+    const dir = newTmpDir('opt2-main-1m');
+    writeConfig(dir, { env: {}, proxy: {}, modelAliases: { 'ccp-main-1': 'glm-5.2' } });
+    cs.init(configPath(dir));
+    const body = Buffer.from(JSON.stringify({ model: 'ccp-main-1[1m]' }), 'utf8');
+    const r = cs.rewriteModel(body, 'rid', 'application/json');
+    assert.equal(r.rewritten, true);
+    assert.equal(r.resolvedModel, 'glm-5.2');
+    assert.equal(JSON.parse(r.body.toString()).model, 'glm-5.2');
+    rmSync(dir, { recursive: true, force: true });
+});
+
+// ── 优化 2 回归：main 档别名参与 nextAliasId 启动校正（/-(\d+)$/ 正则兼容 ccp-main-N）──
+test('优化2: ccp-main-7 残留 + nextAliasId=0 → 启动校正抬到 7', () => {
+    const dir = newTmpDir('opt2-main-corr');
+    writeConfig(dir, {
+        env: {}, proxy: {},
+        modelAliases: { 'ccp-main-7': 'glm-5.2', 'ccp-sonnet-3': 'a' },
+        nextAliasId: 0,
+    });
+    cs.init(configPath(dir));
+    // main 档 N=7 是最大，校正应抬到 7
+    assert.equal(cs.getView().nextAliasId, 7);
+    assert.equal(cs.nextAliasId(), 8);
+    rmSync(dir, { recursive: true, force: true });
+});

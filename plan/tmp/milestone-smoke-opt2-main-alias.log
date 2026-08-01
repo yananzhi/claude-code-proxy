@@ -1,0 +1,1135 @@
+TAP version 13
+# Subtest: S1. fromTs calculation uses non-integer intermediate product (1.1h)
+ok 1 - S1. fromTs calculation uses non-integer intermediate product (1.1h)
+  ---
+  duration_ms: 3.2466
+  ...
+# Subtest: S2. Dedup key Math.round(h*1000) incorrectly dedupes small different hours
+ok 2 - S2. Dedup key Math.round(h*1000) incorrectly dedupes small different hours
+  ---
+  duration_ms: 1.1956
+  ...
+# Subtest: S3. stats() clamps >168h windows to 168 instead of rejecting them
+ok 3 - S3. stats() clamps >168h windows to 168 instead of rejecting them
+  ---
+  duration_ms: 2.0306
+  ...
+# Subtest: S4. Dedup after clamp: windows=[168, 170] silently loses one window
+ok 4 - S4. Dedup after clamp: windows=[168, 170] silently loses one window
+  ---
+  duration_ms: 1.6242
+  ...
+# Subtest: S5. Server MAX_HOURS (168) vs trace-store MAX_HOURS (RETENTION_DAYS*24) — must match
+ok 5 - S5. Server MAX_HOURS (168) vs trace-store MAX_HOURS (RETENTION_DAYS*24) — must match
+  ---
+  duration_ms: 1.8328
+  ...
+# Subtest: S6. stats() now field is stale: captured before async scan, not updated after
+ok 6 - S6. stats() now field is stale: captured before async scan, not updated after
+  ---
+  duration_ms: 10.1828
+  ...
+# Subtest: S7. stats() silently skips traces with invalid/missing startedAt — count mismatch with list()
+ok 7 - S7. stats() silently skips traces with invalid/missing startedAt — count mismatch with list()
+  ---
+  duration_ms: 4.7166
+  ...
+# Subtest: S8. stats() inclusive bounds: fromTs is >= and nowMs is <=, verifying with interior trace
+ok 8 - S8. stats() inclusive bounds: fromTs is >= and nowMs is <=, verifying with interior trace
+  ---
+  duration_ms: 3.8824
+  ...
+# Subtest: S9. Server Number() accepts hex/sci-notation windows — unexpected values
+ok 9 - S9. Server Number() accepts hex/sci-notation windows — unexpected values
+  ---
+  duration_ms: 0.4504
+  ...
+# Subtest: S10. stats() day-boundary: +1 day buffer prevents under-scan at China-day boundary
+ok 10 - S10. stats() day-boundary: +1 day buffer prevents under-scan at China-day boundary
+  ---
+  duration_ms: 2.9275
+  ...
+# Subtest: S11. UI bug: clamped hours create unremovable stats windows
+ok 11 - S11. UI bug: clamped hours create unremovable stats windows
+  ---
+  duration_ms: 1.5866
+  ...
+# Subtest: S12. stats() counts non-integer finalStatus (e.g., 200.5) as success
+ok 12 - S12. stats() counts non-integer finalStatus (e.g., 200.5) as success
+  ---
+  duration_ms: 4.1454
+  ...
+# Subtest: S13. stats() returns empty windows array when all windows are invalid — no fallback
+ok 13 - S13. stats() returns empty windows array when all windows are invalid — no fallback
+  ---
+  duration_ms: 1.2463
+  ...
+# Subtest: S14. stats() near-duplicate hours create nearly-identical stat cards
+ok 14 - S14. stats() near-duplicate hours create nearly-identical stat cards
+  ---
+  duration_ms: 1.5191
+  ...
+# Subtest: S15. stats() timezone consistency: China-day shards cover UTC time window
+ok 15 - S15. stats() timezone consistency: China-day shards cover UTC time window
+  ---
+  duration_ms: 3.5917
+  ...
+# Subtest: BONUS. stats() cleanupOld() can race with concurrent scan — data loss
+ok 16 - BONUS. stats() cleanupOld() can race with concurrent scan — data loss
+  ---
+  duration_ms: 1.7082
+  ...
+# [2026-08-01 13:15:41.122 +08:00] MODEL REWRITE \#rid1: ccp-sonnet-1 → claude-sonnet-5 (38 → 41 bytes)
+# [2026-08-01 13:15:41.128 +08:00] MODEL REWRITE \#rid3: ccp-sonnet-1[1m] → claude-sonnet-5 (28 → 27 bytes)
+# [2026-08-01 13:15:41.146 +08:00] MODEL REWRITE \#rid: ccp-main-1 → glm-5.2 (36 → 33 bytes)
+# [2026-08-01 13:15:41.148 +08:00] MODEL REWRITE \#rid: ccp-main-1[1m] → glm-5.2 (26 → 19 bytes)
+# Subtest: D1a: 老配置无 modelAliases → getModelAliases 返 {}
+ok 17 - D1a: 老配置无 modelAliases → getModelAliases 返 {}
+  ---
+  duration_ms: 4.6614
+  ...
+# Subtest: D1b: updateModelAlias 加一条 → 表里多一项 + persist 落盘
+ok 18 - D1b: updateModelAlias 加一条 → 表里多一项 + persist 落盘
+  ---
+  duration_ms: 3.0111
+  ...
+# Subtest: D1c: updateModelAlias 同 alias 不同 model → 覆盖
+ok 19 - D1c: updateModelAlias 同 alias 不同 model → 覆盖
+  ---
+  duration_ms: 2.2295
+  ...
+# Subtest: D1d: removeModelAlias 删一条 → 表少一项 + persist
+ok 20 - D1d: removeModelAlias 删一条 → 表少一项 + persist
+  ---
+  duration_ms: 2.2362
+  ...
+# Subtest: D1e: removeModelAlias 删不存在 → 无害幂等
+ok 21 - D1e: removeModelAlias 删不存在 → 无害幂等
+  ---
+  duration_ms: 1.5986
+  ...
+# Subtest: D2a: model 命中别名 → 替换为真实模型
+ok 22 - D2a: model 命中别名 → 替换为真实模型
+  ---
+  duration_ms: 3.0545
+  ...
+# Subtest: D2b: model 不命中别名 → 原样透传
+ok 23 - D2b: model 不命中别名 → 原样透传
+  ---
+  duration_ms: 2.1155
+  ...
+# Subtest: D2c: model 带 [1m] 命中 → 剥离后查表替换 base（不带后缀）
+ok 24 - D2c: model 带 [1m] 命中 → 剥离后查表替换 base（不带后缀）
+  ---
+  duration_ms: 2.6258
+  ...
+# Subtest: D2d: model 带 [1m] 但 base 不命中 → 原样透传含 [1m]
+ok 25 - D2d: model 带 [1m] 但 base 不命中 → 原样透传含 [1m]
+  ---
+  duration_ms: 1.8089
+  ...
+# Subtest: D2e: 空 model → 不改
+ok 26 - D2e: 空 model → 不改
+  ---
+  duration_ms: 2.2628
+  ...
+# Subtest: D2f: model 字段缺失 → 不改
+ok 27 - D2f: model 字段缺失 → 不改
+  ---
+  duration_ms: 1.3287
+  ...
+# Subtest: D2g: 非 JSON body → 原样返回
+ok 28 - D2g: 非 JSON body → 原样返回
+  ---
+  duration_ms: 1.3903
+  ...
+# Subtest: D7a: 老配置无 nextAliasId → init 兜底 0
+ok 29 - D7a: 老配置无 nextAliasId → init 兜底 0
+  ---
+  duration_ms: 1.7699
+  ...
+# Subtest: D7b: nextAliasId 递增 + persist
+ok 30 - D7b: nextAliasId 递增 + persist
+  ---
+  duration_ms: 2.8486
+  ...
+# Subtest: D7c: 启动校正 — 已存 ccp-sonnet-5 但 nextAliasId=0 → 抬到 5，下个 id=6
+ok 31 - D7c: 启动校正 — 已存 ccp-sonnet-5 但 nextAliasId=0 → 抬到 5，下个 id=6
+  ---
+  duration_ms: 2.602
+  ...
+# Subtest: D2附加: rawModel 已等于真实模型 → 不改写（rewritten=false）
+ok 32 - D2附加: rawModel 已等于真实模型 → 不改写（rewritten=false）
+  ---
+  duration_ms: 1.9369
+  ...
+# Subtest: 优化2: ccp-main-1 命中 → 替换为真实模型
+ok 33 - 优化2: ccp-main-1 命中 → 替换为真实模型
+  ---
+  duration_ms: 1.5725
+  ...
+# Subtest: 优化2: ccp-main-1[1m] 剥后缀查表命中 → 替换 base
+ok 34 - 优化2: ccp-main-1[1m] 剥后缀查表命中 → 替换 base
+  ---
+  duration_ms: 2.1877
+  ...
+# Subtest: 优化2: ccp-main-7 残留 + nextAliasId=0 → 启动校正抬到 7
+ok 35 - 优化2: ccp-main-7 残留 + nextAliasId=0 → 启动校正抬到 7
+  ---
+  duration_ms: 2.5276
+  ...
+# [2026-08-01 13:15:41.128 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1[1m] → claude-sonnet-5 (28 → 27 bytes)
+# [2026-08-01 13:15:41.197 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1 → a (24 → 13 bytes)
+# [2026-08-01 13:15:41.198 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1 → b (24 → 13 bytes)
+# [2026-08-01 13:15:41.201 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1 → real (58 → 50 bytes)
+# Subtest: C1-1: rewriteModel 不剥离 [2m]（已修：只剥 [1m]，与 CLI 一致）[已修-回归]
+ok 36 - C1-1: rewriteModel 不剥离 [2m]（已修：只剥 [1m]，与 CLI 一致）[已修-回归]
+  ---
+  duration_ms: 4.5716
+  ...
+# Subtest: C1-1b: rewriteModel 仍剥离 [1m]（修 [2m] 未误伤 [1m]）[回归]
+ok 37 - C1-1b: rewriteModel 仍剥离 [1m]（修 [2m] 未误伤 [1m]）[回归]
+  ---
+  duration_ms: 3.2813
+  ...
+# Subtest: C1-2: 不命中时 resolvedModel=rawModel（含后缀）——语义正确（上游收到的就是 rawModel）[非BUG]
+ok 38 - C1-2: 不命中时 resolvedModel=rawModel（含后缀）——语义正确（上游收到的就是 rawModel）[非BUG]
+  ---
+  duration_ms: 4.0261
+  ...
+# Subtest: C1-3: init 校正正则不约束前缀 —— ccp-sonnet-foo-1 也被抬，但方向安全（跳号不重号）[非BUG]
+ok 39 - C1-3: init 校正正则不约束前缀 —— ccp-sonnet-foo-1 也被抬，但方向安全（跳号不重号）[非BUG]
+  ---
+  duration_ms: 2.6421
+  ...
+# Subtest: C1-4: parsed.model 为数字 0 时不命中（类型守卫）[非BUG]
+ok 40 - C1-4: parsed.model 为数字 0 时不命中（类型守卫）[非BUG]
+  ---
+  duration_ms: 1.7663
+  ...
+# Subtest: C2-1: updateModelAlias(alias="__proto__") 不污染原型（计算属性语法安全）[非BUG]
+ok 41 - C2-1: updateModelAlias(alias="__proto__") 不污染原型（计算属性语法安全）[非BUG]
+  ---
+  duration_ms: 2.4541
+  ...
+# Subtest: C2-2: updateModelAlias 写入含空格的 alias（trim 只校验不清洗）[味道]
+ok 42 - C2-2: updateModelAlias 写入含空格的 alias（trim 只校验不清洗）[味道]
+  ---
+  duration_ms: 3.0389
+  ...
+# Subtest: C2-3: contentType=undefined → 原样返回（非JSON处理）[非BUG]
+ok 43 - C2-3: contentType=undefined → 原样返回（非JSON处理）[非BUG]
+  ---
+  duration_ms: 2.0083
+  ...
+# Subtest: C3-1: nextAliasId 是字符串 "5" → 兜底 0（启动校正兜底）[非BUG]
+ok 44 - C3-1: nextAliasId 是字符串 "5" → 兜底 0（启动校正兜底）[非BUG]
+  ---
+  duration_ms: 2.0888
+  ...
+# Subtest: C3-2: modelAliases 是数组 → init 兜底为 {}（已修：加 Array.isArray）[已修-回归]
+ok 45 - C3-2: modelAliases 是数组 → init 兜底为 {}（已修：加 Array.isArray）[已修-回归]
+  ---
+  duration_ms: 2.4111
+  ...
+# Subtest: C3-3: body 是 JSON 数组 → 原样返回（无 model 字段）[非BUG]
+ok 46 - C3-3: body 是 JSON 数组 → 原样返回（无 model 字段）[非BUG]
+  ---
+  duration_ms: 1.7637
+  ...
+# Subtest: C4-1: 已存 ccp-sonnet-1 + nextAliasId=0 → 校正到1，下个id=2（1已占）[非BUG]
+ok 47 - C4-1: 已存 ccp-sonnet-1 + nextAliasId=0 → 校正到1，下个id=2（1已占）[非BUG]
+  ---
+  duration_ms: 2.0801
+  ...
+# Subtest: C4-2: nextAliasId 递增后 persist 写回 config.json [非BUG]
+ok 48 - C4-2: nextAliasId 递增后 persist 写回 config.json [非BUG]
+  ---
+  duration_ms: 1.6265
+  ...
+# Subtest: C4-3: removeModelAlias 后 persist 落盘（key 确实删除）[非BUG]
+ok 49 - C4-3: removeModelAlias 后 persist 落盘（key 确实删除）[非BUG]
+  ---
+  duration_ms: 2.7165
+  ...
+# Subtest: C4-4: nextAliasId=10 + maxN=1 → 不压回（安全方向：跳号不重号）[非BUG]
+ok 50 - C4-4: nextAliasId=10 + maxN=1 → 不压回（安全方向：跳号不重号）[非BUG]
+  ---
+  duration_ms: 3.231
+  ...
+# Subtest: C5-1: 连续 nextAliasId() 不重号 [非BUG]
+ok 51 - C5-1: 连续 nextAliasId() 不重号 [非BUG]
+  ---
+  duration_ms: 32.928
+  ...
+# Subtest: C5-2: rewriteModel 与 updateModelAlias 无竞态（单线程 + 引用替换）[非BUG]
+ok 52 - C5-2: rewriteModel 与 updateModelAlias 无竞态（单线程 + 引用替换）[非BUG]
+  ---
+  duration_ms: 1.9538
+  ...
+# Subtest: C6-1: POST /api/model-alias 纯空格 alias → store 层 trim 拦截抛错 [非BUG]
+ok 53 - C6-1: POST /api/model-alias 纯空格 alias → store 层 trim 拦截抛错 [非BUG]
+  ---
+  duration_ms: 1.6
+  ...
+# Subtest: C6-2: rewriteEffort 返 Buffer，rewriteModel 接 Buffer，串联正确 [非BUG]
+ok 54 - C6-2: rewriteEffort 返 Buffer，rewriteModel 接 Buffer，串联正确 [非BUG]
+  ---
+  duration_ms: 2.116
+  ...
+# Subtest: C-7: 请求无 model 字段 → resolvedModel=undefined → trace 落 "" [非BUG]
+ok 55 - C-7: 请求无 model 字段 → resolvedModel=undefined → trace 落 "" [非BUG]
+  ---
+  duration_ms: 2.0862
+  ...
+# Subtest: C-8: 空 body → JSON.parse 失败 → 原样返回 [非BUG]
+ok 56 - C-8: 空 body → JSON.parse 失败 → 原样返回 [非BUG]
+  ---
+  duration_ms: 2.3242
+  ...
+# Subtest: C-9: rawModel 已等于真实模型 → 不改写，resolvedModel=realModel [非BUG]
+ok 57 - C-9: rawModel 已等于真实模型 → 不改写，resolvedModel=realModel [非BUG]
+  ---
+  duration_ms: 2.2204
+  ...
+# [2026-08-01 13:15:41.150 +08:00] proxy listening on http://127.0.0.1:11499
+# [2026-08-01 13:15:41.151 +08:00]   web UI     : http://127.0.0.1:11499/
+# [2026-08-01 13:15:41.151 +08:00]   upstream   : http://127.0.0.1:11500 (http)
+# [2026-08-01 13:15:41.151 +08:00]   model      : (unset)
+# [2026-08-01 13:15:41.151 +08:00]   token      : ***
+# [2026-08-01 13:15:41.151 +08:00]   retry      : maxAttempts=5 backoffSec=1 backoffMaxSec=16 onStatus=[] onBodyErrorCode=[10310]
+# [2026-08-01 13:15:41.151 +08:00]   mode       : 透传（不重试，原样转发）
+# [2026-08-01 13:15:41.151 +08:00]   timeout    : 600000ms
+# [2026-08-01 13:15:41.151 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\e2e-e2e-15384-1785561341115\\logs  (时间均为中国时间 +08:00)
+# [2026-08-01 13:15:41.191 +08:00] MODEL-ALIAS updated → ccp-sonnet-1=claude-sonnet-5
+# Subtest: e2e: model aliasing 全链路
+    # Subtest: D6a: POST /api/model-alias 加映射 → 200
+    ok 1 - D6a: POST /api/model-alias 加映射 → 200
+      ---
+      duration_ms: 46.4235
+      ...
+    # Subtest: D6e: GET /api/config 含 modelAliases
+    ok 2 - D6e: GET /api/config 含 modelAliases
+      ---
+      duration_ms: 4.6658
+      ...
+# [2026-08-01 13:15:41.207 +08:00] MODEL REWRITE \#851D: ccp-sonnet-1 → claude-sonnet-5 (84 → 87 bytes)
+# [2026-08-01 13:15:41.207 +08:00] REQ  \#851D POST /v1/messages (body 84 bytes) from 127.0.0.1 [透传] [model→claude-sonnet-5]
+# [2026-08-01 13:15:41.215 +08:00]      \#851D attempt 1/1 → 200 (7ms) [透传，不重试，流式]
+# [2026-08-01 13:15:41.216 +08:00] REQ  \#851D delivered to client (passthrough), total 10ms, status 200
+# [2026-08-01 13:15:41.216 +08:00] REQ  \#851D delivered to client, total 10ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D2a/D5: /v1/messages 带 ccp-sonnet-1 → 上游收到真实模型 + trace 记别名
+    ok 3 - D2a/D5: /v1/messages 带 ccp-sonnet-1 → 上游收到真实模型 + trace 记别名
+      ---
+      duration_ms: 14.015
+      ...
+# [2026-08-01 13:15:41.220 +08:00] MODEL REWRITE \#1A5C: ccp-sonnet-1[1m] → claude-sonnet-5 (88 → 87 bytes)
+# [2026-08-01 13:15:41.220 +08:00] REQ  \#1A5C POST /v1/messages (body 88 bytes) from 127.0.0.1 [透传] [model→claude-sonnet-5]
+# [2026-08-01 13:15:41.224 +08:00]      \#1A5C attempt 1/1 → 200 (3ms) [透传，不重试，流式]
+# [2026-08-01 13:15:41.224 +08:00] REQ  \#1A5C delivered to client (passthrough), total 4ms, status 200
+# [2026-08-01 13:15:41.224 +08:00] REQ  \#1A5C delivered to client, total 4ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D2c: 带 [1m] 命中 → 上游收到不带后缀的真实模型
+    ok 4 - D2c: 带 [1m] 命中 → 上游收到不带后缀的真实模型
+      ---
+      duration_ms: 9.5069
+      ...
+# [2026-08-01 13:15:41.230 +08:00] REQ  \#5B7C POST /v1/messages (body 83 bytes) from 127.0.0.1 [透传]
+# [2026-08-01 13:15:41.233 +08:00]      \#5B7C attempt 1/1 → 200 (2ms) [透传，不重试，流式]
+# [2026-08-01 13:15:41.233 +08:00] REQ  \#5B7C delivered to client (passthrough), total 3ms, status 200
+# [2026-08-01 13:15:41.233 +08:00] REQ  \#5B7C delivered to client, total 3ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D2b: 不命中的 model → 上游原样收到
+    ok 5 - D2b: 不命中的 model → 上游原样收到
+      ---
+      duration_ms: 8.4071
+      ...
+# [2026-08-01 13:15:41.239 +08:00] MODEL REWRITE \#92F3: ccp-sonnet-1 → claude-sonnet-5 (68 → 71 bytes)
+# [2026-08-01 13:15:41.239 +08:00] REQ  \#92F3 POST /v1/messages/count_tokens (body 68 bytes) from 127.0.0.1 [透传] [model→claude-sonnet-5]
+# [2026-08-01 13:15:41.241 +08:00]      \#92F3 attempt 1/1 → 200 (2ms) [透传，不重试，流式]
+# [2026-08-01 13:15:41.242 +08:00] REQ  \#92F3 delivered to client (passthrough), total 4ms, status 200
+# [2026-08-01 13:15:41.242 +08:00] REQ  \#92F3 delivered to client, total 4ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D4b: /v1/messages/count_tokens 子路径也替换
+    ok 6 - D4b: /v1/messages/count_tokens 子路径也替换
+      ---
+      duration_ms: 6.9378
+      ...
+    # Subtest: D6c: GET /api/model-alias/next-id 递增
+    ok 7 - D6c: GET /api/model-alias/next-id 递增
+      ---
+      duration_ms: 4.8037
+      ...
+    # Subtest: D6d: POST /api/model-alias 缺字段 → 400
+    ok 8 - D6d: POST /api/model-alias 缺字段 → 400
+      ---
+      duration_ms: 2.4953
+      ...
+# [2026-08-01 13:15:41.252 +08:00] MODEL-ALIAS removed → ccp-sonnet-1
+# [2026-08-01 13:15:41.254 +08:00] REQ  \#683F POST /v1/messages (body 84 bytes) from 127.0.0.1 [透传]
+# [2026-08-01 13:15:41.256 +08:00]      \#683F attempt 1/1 → 200 (1ms) [透传，不重试，流式]
+# [2026-08-01 13:15:41.256 +08:00] REQ  \#683F delivered to client (passthrough), total 2ms, status 200
+# [2026-08-01 13:15:41.256 +08:00] REQ  \#683F delivered to client, total 2ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D6b: POST /api/model-alias/delete → 下个请求不替换
+    ok 9 - D6b: POST /api/model-alias/delete → 下个请求不替换
+      ---
+      duration_ms: 6.9422
+      ...
+# [2026-08-01 13:15:41.260 +08:00] MODEL-ALIAS updated → ccp-sonnet-1=claude-sonnet-5
+# [2026-08-01 13:15:41.262 +08:00] EFFORT updated → high
+# [2026-08-01 13:15:41.265 +08:00] MODEL REWRITE \#5D70: ccp-sonnet-1 → claude-sonnet-5 (118 → 121 bytes)
+# [2026-08-01 13:15:41.265 +08:00] REQ  \#5D70 POST /v1/messages (body 117 bytes) from 127.0.0.1 [透传] [effort→high] [model→claude-sonnet-5]
+# [2026-08-01 13:15:41.266 +08:00]      \#5D70 attempt 1/1 → 200 (1ms) [透传，不重试，流式]
+# [2026-08-01 13:15:41.266 +08:00] REQ  \#5D70 delivered to client (passthrough), total 2ms, status 200
+# [2026-08-01 13:15:41.266 +08:00] REQ  \#5D70 delivered to client, total 2ms, 1 attempt(s), outcome=passthrough
+# [2026-08-01 13:15:41.274 +08:00] EFFORT updated → (不改写，原样透传)
+    # Subtest: D3/D5: effort+model 串联 + trace 记 reqModel/resolvedModel
+    ok 10 - D3/D5: effort+model 串联 + trace 记 reqModel/resolvedModel
+      ---
+      duration_ms: 17.1065
+      ...
+    1..10
+ok 58 - e2e: model aliasing 全链路
+  ---
+  duration_ms: 164.0704
+  ...
+# Subtest: A. append 写出 idx + body 配对，idx 不含胖字段
+ok 59 - A. append 写出 idx + body 配对，idx 不含胖字段
+  ---
+  duration_ms: 18.0943
+  ...
+# Subtest: A2. model 缺失与空串落盘
+ok 60 - A2. model 缺失与空串落盘
+  ---
+  duration_ms: 12.0251
+  ...
+# Subtest: C. getById 用 offset 精确读回完整 trace
+ok 61 - C. getById 用 offset 精确读回完整 trace
+  ---
+  duration_ms: 5.8537
+  ...
+# Subtest: D1. 旧裸文件首次 list 补建 idx，二次 list 走 idx
+ok 62 - D1. 旧裸文件首次 list 补建 idx，二次 list 走 idx
+  ---
+  duration_ms: 5.2949
+  ...
+# Subtest: D2. getById 从旧裸文件按 offset 精确读
+ok 63 - D2. getById 从旧裸文件按 offset 精确读
+  ---
+  duration_ms: 6.0161
+  ...
+# Subtest: E. 四档过滤命中数
+ok 64 - E. 四档过滤命中数
+  ---
+  duration_ms: 16.7586
+  ...
+# Subtest: F. since 增量只返回新于 since 的
+ok 65 - F. since 增量只返回新于 since 的
+  ---
+  duration_ms: 9.5458
+  ...
+# Subtest: G. 序号三位补零 + idx/body 同序号配对
+ok 66 - G. 序号三位补零 + idx/body 同序号配对
+  ---
+  duration_ms: 2.7054
+  ...
+# Subtest: H. cleanupOld 删 7 天前的 idx + body + 旧裸文件
+ok 67 - H. cleanupOld 删 7 天前的 idx + body + 旧裸文件
+  ---
+  duration_ms: 5.2586
+  ...
+# Subtest: I. 真实旧裸日志补建 idx + 详情精确读 + 二次加速
+ok 68 - I. 真实旧裸日志补建 idx + 详情精确读 + 二次加速 # SKIP
+  ---
+  duration_ms: 0.3766
+  ...
+# Subtest: J1. stats 按 startedAt 窗口统计 2xx 成功数
+ok 69 - J1. stats 按 startedAt 窗口统计 2xx 成功数
+  ---
+  duration_ms: 11.1668
+  ...
+# Subtest: J2. stats 窗口按小时升序、空目录返回 0
+ok 70 - J2. stats 窗口按小时升序、空目录返回 0
+  ---
+  duration_ms: 1.2997
+  ...
+# Subtest: J3. stats 成功=2xx，3xx/4xx/5xx/0 都不算成功
+ok 71 - J3. stats 成功=2xx，3xx/4xx/5xx/0 都不算成功
+  ---
+  duration_ms: 5.7543
+  ...
+# Subtest: 1. aliasName 三档 × N=1 基本格式
+ok 72 - 1. aliasName 三档 × N=1 基本格式
+  ---
+  duration_ms: 1.2671
+  ...
+# Subtest: 2. aliasName [1m] 后缀统一小写
+ok 73 - 2. aliasName [1m] 后缀统一小写
+  ---
+  duration_ms: 0.1305
+  ...
+# Subtest: 3. aliasName 非法 tier 抛错
+ok 74 - 3. aliasName 非法 tier 抛错
+  ---
+  duration_ms: 0.4039
+  ...
+# Subtest: 4. buildAliasEnv 四档注入 shell env（含 ANTHROPIC_MODEL），不含 BASE_URL/token
+ok 75 - 4. buildAliasEnv 四档注入 shell env（含 ANTHROPIC_MODEL），不含 BASE_URL/token
+  ---
+  duration_ms: 0.1515
+  ...
+# Subtest: 5. buildAliasEnv 幂等
+ok 76 - 5. buildAliasEnv 幂等
+  ---
+  duration_ms: 0.5673
+  ...
+# Subtest: 6. resolveDerivedUpstream 快照优先，忽略父 content 新值
+ok 77 - 6. resolveDerivedUpstream 快照优先，忽略父 content 新值
+  ---
+  duration_ms: 0.1894
+  ...
+# Subtest: 7. resolveDerivedUpstream 快照缺 → 父 content 解出
+ok 78 - 7. resolveDerivedUpstream 快照缺 → 父 content 解出
+  ---
+  duration_ms: 0.219
+  ...
+# Subtest: 8. resolveDerivedUpstream 父缺 + 快照缺 → null
+ok 79 - 8. resolveDerivedUpstream 父缺 + 快照缺 → null
+  ---
+  duration_ms: 0.1032
+  ...
+# Subtest: 9. resolveDerivedUpstream 快照缺 + 父 content 无效 JSON → null
+ok 80 - 9. resolveDerivedUpstream 快照缺 + 父 content 无效 JSON → null
+  ---
+  duration_ms: 0.2085
+  ...
+# Subtest: 10. isOrphan 父存在/缺失
+ok 81 - 10. isOrphan 父存在/缺失
+  ---
+  duration_ms: 0.182
+  ...
+# Subtest: 11. computeAliasSyncActions 代理表缺 → 补三档
+ok 82 - 11. computeAliasSyncActions 代理表缺 → 补三档
+  ---
+  duration_ms: 0.2729
+  ...
+# Subtest: 12. computeAliasSyncActions 代理表含部分 → 只补缺的
+ok 83 - 12. computeAliasSyncActions 代理表含部分 → 只补缺的
+  ---
+  duration_ms: 0.1428
+  ...
+# Subtest: 13. computeAliasSyncActions 完全一致 → 无动作
+ok 84 - 13. computeAliasSyncActions 完全一致 → 无动作
+  ---
+  duration_ms: 0.1575
+  ...
+# Subtest: 14. computeAliasSyncActions 别的编号残留不清（编号不回收）
+ok 85 - 14. computeAliasSyncActions 别的编号残留不清（编号不回收）
+  ---
+  duration_ms: 0.2549
+  ...
+# Subtest: 15. computeAliasSyncActions 某档未配 → 不补该档
+ok 86 - 15. computeAliasSyncActions 某档未配 → 不补该档
+  ---
+  duration_ms: 0.2095
+  ...
+# Subtest: 16. computeAliasSyncActions 幂等
+ok 87 - 16. computeAliasSyncActions 幂等
+  ---
+  duration_ms: 0.297
+  ...
+# Subtest: 17. aggregateModelCatalog 空 configs → []
+ok 88 - 17. aggregateModelCatalog 空 configs → []
+  ---
+  duration_ms: 0.2548
+  ...
+# Subtest: 18. aggregateModelCatalog global+local 多源去重
+ok 89 - 18. aggregateModelCatalog global+local 多源去重
+  ---
+  duration_ms: 0.6012
+  ...
+# Subtest: 19. aggregateModelCatalog 含 derived modelAliases 真实模型名
+ok 90 - 19. aggregateModelCatalog 含 derived modelAliases 真实模型名
+  ---
+  duration_ms: 0.3371
+  ...
+# Subtest: 20. summarizeAliases 三档全配
+ok 91 - 20. summarizeAliases 三档全配
+  ---
+  duration_ms: 0.3607
+  ...
+# Subtest: 21. summarizeAliases undefined → 空串
+ok 92 - 21. summarizeAliases undefined → 空串
+  ---
+  duration_ms: 0.1943
+  ...
+# Subtest: 22. summarizeAliases 只配 sonnet → 只显 S
+ok 93 - 22. summarizeAliases 只配 sonnet → 只显 S
+  ---
+  duration_ms: 0.1857
+  ...
+# Subtest: 23. nextDerivedIndex 本地兜底 max+1 / 空→1
+ok 94 - 23. nextDerivedIndex 本地兜底 max+1 / 空→1
+  ---
+  duration_ms: 0.2876
+  ...
+# Subtest: S1. computeAliasSyncActions derivedIndex=0 不应抛错（应返回空动作）
+ok 95 - S1. computeAliasSyncActions derivedIndex=0 不应抛错（应返回空动作）
+  ---
+  duration_ms: 0.172
+  ...
+# Subtest: S1b. computeAliasSyncActions derivedIndex=-1 不应抛错
+ok 96 - S1b. computeAliasSyncActions derivedIndex=-1 不应抛错
+  ---
+  duration_ms: 0.1338
+  ...
+# Subtest: S2. aggregateModelCatalog 非字符串 env 值不崩溃（数字/布尔/对象跳过）
+ok 97 - S2. aggregateModelCatalog 非字符串 env 值不崩溃（数字/布尔/对象跳过）
+  ---
+  duration_ms: 0.2177
+  ...
+# Subtest: S3. summarizeAliases 非字符串值不崩溃（跳过）
+ok 98 - S3. summarizeAliases 非字符串值不崩溃（跳过）
+  ---
+  duration_ms: 0.2031
+  ...
+# Subtest: S4. aggregateModelCatalog modelAliases 非字符串值不崩溃
+ok 99 - S4. aggregateModelCatalog modelAliases 非字符串值不崩溃
+  ---
+  duration_ms: 0.1939
+  ...
+# Subtest: S5. resolveDerivedUpstream 快照 baseUrl 有 token 缺 → 回退父 content
+ok 100 - S5. resolveDerivedUpstream 快照 baseUrl 有 token 缺 → 回退父 content
+  ---
+  duration_ms: 0.7447
+  ...
+# Subtest: S6. resolveDerivedUpstream 快照 baseUrl 缺 → 回退父 content
+ok 101 - S6. resolveDerivedUpstream 快照 baseUrl 缺 → 回退父 content
+  ---
+  duration_ms: 0.3851
+  ...
+# Subtest: S7. resolveDerivedUpstream 快照部分缺 + 父缺 → null
+ok 102 - S7. resolveDerivedUpstream 快照部分缺 + 父缺 → null
+  ---
+  duration_ms: 0.2279
+  ...
+# Subtest: S8. resolveDerivedUpstream 父 content env 值为数字 → 视为缺失返回 null
+ok 103 - S8. resolveDerivedUpstream 父 content env 值为数字 → 视为缺失返回 null
+  ---
+  duration_ms: 0.3818
+  ...
+# Subtest: S9. computeAliasSyncActions model 带尾空格 → trim 后比较
+ok 104 - S9. computeAliasSyncActions model 带尾空格 → trim 后比较
+  ---
+  duration_ms: 0.3523
+  ...
+# Subtest: S10. aliasName N 大数正常构造
+ok 105 - S10. aliasName N 大数正常构造
+  ---
+  duration_ms: 0.2037
+  ...
+# Subtest: S11. aliasName N 浮点（非整数）→ 抛错
+ok 106 - S11. aliasName N 浮点（非整数）→ 抛错
+  ---
+  duration_ms: 0.2928
+  ...
+# Subtest: S11b. aliasName N=2.0（浮点但整数）→ 正常
+ok 107 - S11b. aliasName N=2.0（浮点但整数）→ 正常
+  ---
+  duration_ms: 0.2149
+  ...
+# Subtest: S12. aliasName tier 大写 → 抛错（大小写敏感）
+ok 108 - S12. aliasName tier 大写 → 抛错（大小写敏感）
+  ---
+  duration_ms: 0.4282
+  ...
+# Subtest: S13. buildAliasEnv derivedIndex=0 → 抛错（编号必须 >=1）
+ok 109 - S13. buildAliasEnv derivedIndex=0 → 抛错（编号必须 >=1）
+  ---
+  duration_ms: 0.4335
+  ...
+# Subtest: S14. nextDerivedIndex 含 NaN/Infinity/负数 → 忽略
+ok 110 - S14. nextDerivedIndex 含 NaN/Infinity/负数 → 忽略
+  ---
+  duration_ms: 0.2608
+  ...
+# Subtest: S15. nextDerivedIndex derivedIndex 为字符串 → 忽略（类型守卫正确）
+ok 111 - S15. nextDerivedIndex derivedIndex 为字符串 → 忽略（类型守卫正确）
+  ---
+  duration_ms: 1.1495
+  ...
+# Subtest: S16. computeAliasSyncActions 第一次补后第二次（代理表已含）→ 无动作
+ok 112 - S16. computeAliasSyncActions 第一次补后第二次（代理表已含）→ 无动作
+  ---
+  duration_ms: 0.2043
+  ...
+# Subtest: S17. computeAliasSyncActions toRemove 始终为空（编号不回收）
+ok 113 - S17. computeAliasSyncActions toRemove 始终为空（编号不回收）
+  ---
+  duration_ms: 0.1492
+  ...
+# Subtest: S18. aggregateModelCatalog content 空串/非 JSON → 跳过不崩
+ok 114 - S18. aggregateModelCatalog content 空串/非 JSON → 跳过不崩
+  ---
+  duration_ms: 0.1629
+  ...
+# Subtest: S19. aggregateModelCatalog content undefined → 跳过不崩
+ok 115 - S19. aggregateModelCatalog content undefined → 跳过不崩
+  ---
+  duration_ms: 0.1877
+  ...
+# Subtest: S20. summarizeAliases 空字符串值 → 跳过（不显示空档）
+ok 116 - S20. summarizeAliases 空字符串值 → 跳过（不显示空档）
+  ---
+  duration_ms: 0.1818
+  ...
+# Subtest: S21. isOrphan 只看 parent 有无（不看 derivedFrom）
+ok 117 - S21. isOrphan 只看 parent 有无（不看 derivedFrom）
+  ---
+  duration_ms: 0.1293
+  ...
+# Subtest: S22. 终端 name 匹配 \#2 不误匹配 \#20/\#21/\#200
+ok 118 - S22. 终端 name 匹配 \#2 不误匹配 \#20/\#21/\#200
+  ---
+  duration_ms: 0.4826
+  ...
+# Subtest: S22b. 终端 name 匹配 \#12 只匹配 \#12
+ok 119 - S22b. 终端 name 匹配 \#12 只匹配 \#12
+  ---
+  duration_ms: 0.6459
+  ...
+# Subtest: S23. resolveDerivedUpstream 快照 baseUrl 为数字 → 回退父 content
+ok 120 - S23. resolveDerivedUpstream 快照 baseUrl 为数字 → 回退父 content
+  ---
+  duration_ms: 0.2383
+  ...
+# Subtest: S24. resolveDerivedUpstream 快照 token 为数字 + 父缺 → null
+ok 121 - S24. resolveDerivedUpstream 快照 token 为数字 + 父缺 → null
+  ---
+  duration_ms: 0.1813
+  ...
+# Subtest: filterParentConfigs: 排除派生节点，只留父 local 配置
+ok 122 - filterParentConfigs: 排除派生节点，只留父 local 配置
+  ---
+  duration_ms: 0.2845
+  ...
+# Subtest: filterParentConfigs: derivedFrom 为空串/undefined 都算父
+ok 123 - filterParentConfigs: derivedFrom 为空串/undefined 都算父
+  ---
+  duration_ms: 0.2225
+  ...
+# Subtest: filterParentConfigs: 空数组返空
+ok 124 - filterParentConfigs: 空数组返空
+  ---
+  duration_ms: 0.1532
+  ...
+# Subtest: filterParentConfigs: 全是派生节点返空（孤儿由 treeProvider 另挂）
+ok 125 - filterParentConfigs: 全是派生节点返空（孤儿由 treeProvider 另挂）
+  ---
+  duration_ms: 0.2624
+  ...
+# Subtest: M1. aliasName main 档基本格式 + [1m] 后缀
+ok 126 - M1. aliasName main 档基本格式 + [1m] 后缀
+  ---
+  duration_ms: 0.2069
+  ...
+# Subtest: M2. aliasName main 档 N=0/负数/浮点 → 抛错
+ok 127 - M2. aliasName main 档 N=0/负数/浮点 → 抛错
+  ---
+  duration_ms: 0.3494
+  ...
+# Subtest: M3. buildAliasEnv with1m=false → 四档别名都不带 [1m]
+ok 128 - M3. buildAliasEnv with1m=false → 四档别名都不带 [1m]
+  ---
+  duration_ms: 0.2287
+  ...
+# Subtest: M4. buildAliasEnv 不传 opts → 默认不带 [1m]
+ok 129 - M4. buildAliasEnv 不传 opts → 默认不带 [1m]
+  ---
+  duration_ms: 0.1806
+  ...
+# Subtest: M5. computeAliasSyncActions main 档配了 → 补 ccp-main-N
+ok 130 - M5. computeAliasSyncActions main 档配了 → 补 ccp-main-N
+  ---
+  duration_ms: 0.4274
+  ...
+# Subtest: M6. computeAliasSyncActions main 档未配 → 不补 main
+ok 131 - M6. computeAliasSyncActions main 档未配 → 不补 main
+  ---
+  duration_ms: 0.2655
+  ...
+# Subtest: M7. computeAliasSyncActions main 档一致 → 无动作
+ok 132 - M7. computeAliasSyncActions main 档一致 → 无动作
+  ---
+  duration_ms: 0.1816
+  ...
+# Subtest: M8. computeAliasSyncActions main 档不一致 → 覆盖
+ok 133 - M8. computeAliasSyncActions main 档不一致 → 覆盖
+  ---
+  duration_ms: 0.1752
+  ...
+# Subtest: M9. computeAliasSyncActions main 档 + N=0 → 空动作不抛错
+ok 134 - M9. computeAliasSyncActions main 档 + N=0 → 空动作不抛错
+  ---
+  duration_ms: 0.265
+  ...
+# Subtest: M10. computeAliasSyncActions main 档 model 带尾空格 → trim
+ok 135 - M10. computeAliasSyncActions main 档 model 带尾空格 → trim
+  ---
+  duration_ms: 0.1789
+  ...
+# Subtest: M11. summarizeAliases 含 main 档 → M: 前缀
+ok 136 - M11. summarizeAliases 含 main 档 → M: 前缀
+  ---
+  duration_ms: 0.3173
+  ...
+# Subtest: M12. summarizeAliases 只配 main → 只显 M
+ok 137 - M12. summarizeAliases 只配 main → 只显 M
+  ---
+  duration_ms: 0.1779
+  ...
+# Subtest: M13. summarizeAliases main 非字符串值 → 跳过
+ok 138 - M13. summarizeAliases main 非字符串值 → 跳过
+  ---
+  duration_ms: 0.1764
+  ...
+# Subtest: M14. summarizeAliases main 空串/纯空白 → 跳过
+ok 139 - M14. summarizeAliases main 空串/纯空白 → 跳过
+  ---
+  duration_ms: 0.1465
+  ...
+# Subtest: M15. aggregateModelCatalog 含 derived modelAliases.main 真实模型名
+ok 140 - M15. aggregateModelCatalog 含 derived modelAliases.main 真实模型名
+  ---
+  duration_ms: 0.2681
+  ...
+# Subtest: M16. aggregateModelCatalog main 非字符串值 → 跳过
+ok 141 - M16. aggregateModelCatalog main 非字符串值 → 跳过
+  ---
+  duration_ms: 0.1646
+  ...
+# Subtest: M17. inheritSessionContext1m 父带 [1m] → true
+ok 142 - M17. inheritSessionContext1m 父带 [1m] → true
+  ---
+  duration_ms: 2.0317
+  ...
+# Subtest: M18. inheritSessionContext1m 父不带 [1m] → false
+ok 143 - M18. inheritSessionContext1m 父不带 [1m] → false
+  ---
+  duration_ms: 0.2364
+  ...
+# Subtest: M19. inheritSessionContext1m 父无 ANTHROPIC_MODEL → false
+ok 144 - M19. inheritSessionContext1m 父无 ANTHROPIC_MODEL → false
+  ---
+  duration_ms: 0.1973
+  ...
+# Subtest: M20. inheritSessionContext1m 父 content 无效 JSON → false
+ok 145 - M20. inheritSessionContext1m 父 content 无效 JSON → false
+  ---
+  duration_ms: 0.1894
+  ...
+# Subtest: M21. inheritSessionContext1m 父带大写 [1M] → true（大小写不敏感）
+ok 146 - M21. inheritSessionContext1m 父带大写 [1M] → true（大小写不敏感）
+  ---
+  duration_ms: 0.1367
+  ...
+# Subtest: M22. inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → false
+ok 147 - M22. inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → false
+  ---
+  duration_ms: 0.1312
+  ...
+# Subtest: M23. inheritSessionContext1m 父带 [2m]（CLI 不识别）→ false
+ok 148 - M23. inheritSessionContext1m 父带 [2m]（CLI 不识别）→ false
+  ---
+  duration_ms: 0.2025
+  ...
+# Subtest: R1. inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false
+ok 149 - R1. inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false
+  ---
+  duration_ms: 0.1019
+  ...
+# Subtest: R2. inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false
+ok 150 - R2. inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false
+  ---
+  duration_ms: 0.1096
+  ...
+# Subtest: R3. inheritSessionContext1m 父 ANTHROPIC_MODEL 为 null → false
+ok 151 - R3. inheritSessionContext1m 父 ANTHROPIC_MODEL 为 null → false
+  ---
+  duration_ms: 0.085
+  ...
+# Subtest: R4. inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 → false
+ok 152 - R4. inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 → false
+  ---
+  duration_ms: 0.0744
+  ...
+# Subtest: R5. inheritSessionContext1m 父 [1m] 前有空格 → true（子串匹配，与 CLI 一致）
+ok 153 - R5. inheritSessionContext1m 父 [1m] 前有空格 → true（子串匹配，与 CLI 一致）
+  ---
+  duration_ms: 0.0741
+  ...
+# Subtest: R6. inheritSessionContext1m 父 [1m] 多次出现 → true
+ok 154 - R6. inheritSessionContext1m 父 [1m] 多次出现 → true
+  ---
+  duration_ms: 0.1604
+  ...
+# Subtest: R7. computeAliasSyncActions modelAliases.main 为数字 → 跳过不崩
+ok 155 - R7. computeAliasSyncActions modelAliases.main 为数字 → 跳过不崩
+  ---
+  duration_ms: 0.1146
+  ...
+# Subtest: R8. computeAliasSyncActions modelAliases.main 为 null → 跳过
+ok 156 - R8. computeAliasSyncActions modelAliases.main 为 null → 跳过
+  ---
+  duration_ms: 0.0897
+  ...
+# Subtest: R9. computeAliasSyncActions modelAliases.main 为对象 → 跳过不崩
+ok 157 - R9. computeAliasSyncActions modelAliases.main 为对象 → 跳过不崩
+  ---
+  duration_ms: 0.0803
+  ...
+# Subtest: R10. aggregateModelCatalog modelAliases.main 为数字 → 跳过
+ok 158 - R10. aggregateModelCatalog modelAliases.main 为数字 → 跳过
+  ---
+  duration_ms: 0.0734
+  ...
+# Subtest: R11. aggregateModelCatalog modelAliases.main 为 null → 跳过
+ok 159 - R11. aggregateModelCatalog modelAliases.main 为 null → 跳过
+  ---
+  duration_ms: 0.067
+  ...
+# Subtest: R12. computeAliasSyncActions derivedIndex 为字符串 "2" → 空动作
+ok 160 - R12. computeAliasSyncActions derivedIndex 为字符串 "2" → 空动作
+  ---
+  duration_ms: 0.0636
+  ...
+# Subtest: R13. computeAliasSyncActions derivedIndex 为 NaN → 空动作
+ok 161 - R13. computeAliasSyncActions derivedIndex 为 NaN → 空动作
+  ---
+  duration_ms: 0.0645
+  ...
+# Subtest: R14. computeAliasSyncActions derivedIndex 为 Infinity → 空动作
+ok 162 - R14. computeAliasSyncActions derivedIndex 为 Infinity → 空动作
+  ---
+  duration_ms: 0.0626
+  ...
+# Subtest: R15. buildAliasEnv derivedIndex=1.5 → 抛错
+ok 163 - R15. buildAliasEnv derivedIndex=1.5 → 抛错
+  ---
+  duration_ms: 0.0957
+  ...
+# Subtest: R16. summarizeAliases 四档全配 → 顺序 M · S · H · O
+ok 164 - R16. summarizeAliases 四档全配 → 顺序 M · S · H · O
+  ---
+  duration_ms: 0.0759
+  ...
+# Subtest: R17. inheritSessionContext1m 父 content 为 JSON null → false
+ok 165 - R17. inheritSessionContext1m 父 content 为 JSON null → false
+  ---
+  duration_ms: 0.104
+  ...
+# Subtest: R18. inheritSessionContext1m 父 content 为 JSON 数组 → false
+ok 166 - R18. inheritSessionContext1m 父 content 为 JSON 数组 → false
+  ---
+  duration_ms: 0.0694
+  ...
+# Subtest: R19. inheritSessionContext1m 父带 [1M] 大写 → true（大小写不敏感）
+ok 167 - R19. inheritSessionContext1m 父带 [1M] 大写 → true（大小写不敏感）
+  ---
+  duration_ms: 0.0739
+  ...
+# Subtest: R20. inheritSessionContext1m 父 ANTHROPIC_MODEL 是别名 ccp-main-1[1m] → true
+ok 168 - R20. inheritSessionContext1m 父 ANTHROPIC_MODEL 是别名 ccp-main-1[1m] → true
+  ---
+  duration_ms: 0.0642
+  ...
+# Subtest: R21. computeAliasSyncActions main 档 model 带尾空格 + 代理表不一致 → trim 后 set
+ok 169 - R21. computeAliasSyncActions main 档 model 带尾空格 + 代理表不一致 → trim 后 set
+  ---
+  duration_ms: 0.0748
+  ...
+# Subtest: R22. computeAliasSyncActions 四档部分配部分一致 → 只补缺的
+ok 170 - R22. computeAliasSyncActions 四档部分配部分一致 → 只补缺的
+  ---
+  duration_ms: 0.0701
+  ...
+# Subtest: R23. computeAliasSyncActions 四档全配 + 代理表空 → 补四条
+ok 171 - R23. computeAliasSyncActions 四档全配 + 代理表空 → 补四条
+  ---
+  duration_ms: 0.1465
+  ...
+# Subtest: R24. computeAliasSyncActions 映射 key 永不带 [1m]（不读 sessionContext1m）
+ok 172 - R24. computeAliasSyncActions 映射 key 永不带 [1m]（不读 sessionContext1m）
+  ---
+  duration_ms: 0.1324
+  ...
+# Subtest: R25. buildAliasEnv with1m=true → 四档都带 [1m]
+ok 173 - R25. buildAliasEnv with1m=true → 四档都带 [1m]
+  ---
+  duration_ms: 0.0948
+  ...
+# Subtest: R26. inheritSessionContext1m 父 env 为数字 → false
+ok 174 - R26. inheritSessionContext1m 父 env 为数字 → false
+  ---
+  duration_ms: 0.0958
+  ...
+# Subtest: R27. inheritSessionContext1m 父 env 为数组 → false
+ok 175 - R27. inheritSessionContext1m 父 env 为数组 → false
+  ---
+  duration_ms: 0.1089
+  ...
+# Subtest: R28. inheritSessionContext1m 父 env 为 null → false
+ok 176 - R28. inheritSessionContext1m 父 env 为 null → false
+  ---
+  duration_ms: 0.0847
+  ...
+# Subtest: R29. inheritSessionContext1m 传入 undefined → false（不崩）
+ok 177 - R29. inheritSessionContext1m 传入 undefined → false（不崩）
+  ---
+  duration_ms: 0.0786
+  ...
+# Subtest: R30. inheritSessionContext1m 传入 null → false（不崩）
+ok 178 - R30. inheritSessionContext1m 传入 null → false（不崩）
+  ---
+  duration_ms: 0.0884
+  ...
+# Subtest: R31. inheritSessionContext1m 传入数字 → false（不崩）
+ok 179 - R31. inheritSessionContext1m 传入数字 → false（不崩）
+  ---
+  duration_ms: 0.0742
+  ...
+# Subtest: R32. inheritSessionContext1m 传入对象 → false（不崩）
+ok 180 - R32. inheritSessionContext1m 传入对象 → false（不崩）
+  ---
+  duration_ms: 0.0818
+  ...
+# Subtest: R33. computeAliasSyncActions modelAliases=null → 空动作
+ok 181 - R33. computeAliasSyncActions modelAliases=null → 空动作
+  ---
+  duration_ms: 0.0896
+  ...
+# Subtest: R34. aggregateModelCatalog modelAliases=null → 跳过不崩
+ok 182 - R34. aggregateModelCatalog modelAliases=null → 跳过不崩
+  ---
+  duration_ms: 0.1823
+  ...
+# Subtest: R35. summarizeAliases main 带尾空格 → 显示带空格（trim 只用于判定）
+ok 183 - R35. summarizeAliases main 带尾空格 → 显示带空格（trim 只用于判定）
+  ---
+  duration_ms: 0.0889
+  ...
+# Subtest: R36. aliasName 非法 tier 错误消息含全部四档
+ok 184 - R36. aliasName 非法 tier 错误消息含全部四档
+  ---
+  duration_ms: 0.0991
+  ...
+# Subtest: R37. buildAliasEnv key 命名：main→ANTHROPIC_MODEL，三档→ANTHROPIC_DEFAULT_*_MODEL
+ok 185 - R37. buildAliasEnv key 命名：main→ANTHROPIC_MODEL，三档→ANTHROPIC_DEFAULT_*_MODEL
+  ---
+  duration_ms: 0.0829
+  ...
+# Subtest: D:\\work_dir\\claude-code-proxy\\test\\mock-cli\\test\\helpers.mjs
+ok 7 - D:\\work_dir\\claude-code-proxy\\test\\mock-cli\\test\\helpers.mjs
+  ---
+  duration_ms: 68.1954
+  ...
+# Subtest: 1. shell env 别名运行中冻结
+ok 187 - 1. shell env 别名运行中冻结
+  ---
+  duration_ms: 151.2814
+  ...
+# Subtest: 2. settings.env 不含别名同名 key 则不覆盖；含则覆盖
+ok 188 - 2. settings.env 不含别名同名 key 则不覆盖；含则覆盖
+  ---
+  duration_ms: 1170.7895
+  ...
+# Subtest: 3. settings.env 删 key 不删 process.env（additive-only）
+ok 189 - 3. settings.env 删 key 不删 process.env（additive-only）
+  ---
+  duration_ms: 1182.3246
+  ...
+# Subtest: 4. [1m] 后缀 → contextWindow=1M + beta header + 透传拼回
+ok 190 - 4. [1m] 后缀 → contextWindow=1M + beta header + 透传拼回
+  ---
+  duration_ms: 76.3555
+  ...
+# Subtest: 5. 无 [1m] → contextWindow=200K + 不含 1M beta
+ok 191 - 5. 无 [1m] → contextWindow=200K + 不含 1M beta
+  ---
+  duration_ms: 80.6093
+  ...
+# Subtest: 6. AUTO_COMPACT_WINDOW min 钳制 + reservedTokens
+ok 192 - 6. AUTO_COMPACT_WINDOW min 钳制 + reservedTokens
+  ---
+  duration_ms: 157.2903
+  ...
+# Subtest: 7. alias 保留词 vs 自定义别名
+ok 193 - 7. alias 保留词 vs 自定义别名
+  ---
+  duration_ms: 225.6123
+  ...
+# Subtest: 8. 运行中改 settings.env → chokidar 重读后探针反映新值
+ok 194 - 8. 运行中改 settings.env → chokidar 重读后探针反映新值
+  ---
+  duration_ms: 1175.6296
+  ...
+# Subtest: 附加. /probe/force-reload 确定性兜底
+ok 195 - 附加. /probe/force-reload 确定性兜底
+  ---
+  duration_ms: 83.6113
+  ...
+# Subtest: 9. 无 settings.json，纯 shell env 传 model → CLI 正常 + model 来自 env
+ok 196 - 9. 无 settings.json，纯 shell env 传 model → CLI 正常 + model 来自 env
+  ---
+  duration_ms: 78.8493
+  ...
+1..196
+# tests 206
+# suites 0
+# pass 205
+# fail 0
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 4517.0388
+
+# ── 归档摘要：优化 2 主模型别名映射（ccp-main-N）+ [1m] 档位选项 + 警告 ──
+# 日期：2026-08-01
+# 分支：feat/ext-derived-node
+# TDD skill 7 步全程遵循。
+
+## 执行时间
+- 全量 smoke：~4.5s
+- 子代理审查：~20.9 分钟（36 tool uses）
+
+## 各套件 pass/fail
+- proxy/test/：含 config-store-alias（+3 main 档回归）、server-alias-e2e、review-suspects 等
+- test/derived-logic/test.mjs：原 23 + M1-M23（23 main 档用例）+ R1-R37（子代理回归用例）
+- test/mock-cli/test/：9 条假设验证 + 附加
+- 合计：206 tests，205 pass，1 skipped（mock-cli #6 长期 skip），0 fail
+
+## 子代理代码审查（Step 5）
+- 怀疑点数：37（纯逻辑）+ 5（交互层静态推理）
+- 纯逻辑 TDD 结论：37 个全部翻转为回归保护用例（非 bug，0 真 bug）
+- 交互层发现：
+  - 发现 1（真防护漏洞）：handleSetAlias 对 derivedIndex=0 未防护 → 已修复（守卫改为 ==null || <1 || !isInteger）
+  - 发现 2（真防护漏洞）：buildHtml 对 derivedIndex=undefined 回退 0 炸 aliasName → 已修复（idxValid 占位渲染 ccp-<tier>-?）
+  - 发现 3（非 bug）：handleSetCtx1m 不重渲染别名显示——有意取舍（约束 3），不改
+  - 发现 4（非 bug）：警告 ctxLabel 用内存值可能与运行中 CLI 不符——约束 2/3 固有局限，不改
+  - 发现 5（非 bug）：inheritAliasesFromParent 不剥 [2m]——与代理 rewriteModel 一致（[2m] 是字面量），不改
+
+## 约束符合性
+- 约束 3（映射 key 不带 [1m]）：✓ handleSetAlias/computeAliasSyncActions 用 with1m=false
+- 约束 4（settings.env 不含别名 key）：✓ synthesizeDerivedSettings delete ANTHROPIC_MODEL + 三档
+- 约束 2（跨档位通用警告）：✓ handleSetAlias 发通用警告
+- 约束 6（/model 静态 hover）：✓ main 档行 title hover
+
+## 改动文件
+- src/types.ts：ModelAliasMapping +main；LLMConfig +sessionContext1m
+- src/derivedLogic.ts：ALL_TIERS 含 main；aliasName/buildAliasEnv/computeAliasSyncActions/aggregateModelCatalog/summarizeAliases 含 main；新增 inheritSessionContext1m
+- src/claudeLauncher.ts：launchDerived 读 sessionContext1m；synthesizeDerivedSettings 删 ANTHROPIC_MODEL
+- src/extension.ts：deleteDerivedAndAliases 清四档
+- src/webviewEditor.ts：inheritAliasesFromParent 含 main；openNewDerived 继承 sessionContext1m；buildHtml 档位 radio + 四档行 + main hover + 警告；handleSetAlias 守卫加固 + 通用警告；新增 handleSetCtx1m；buildHtml idxValid 占位
+- test/derived-logic/test.mjs：+23 M 用例 +37 R 回归用例
+- proxy/test/config-store-alias.test.mjs：+3 main 档 proxy 回归
+- plan/tmp/2026-08-01-main-alias.md：正交设计文档
+
+## 代理侧
+- 无需改（rewriteModel 已剥 [1m] 查表，main 档别名同构走同一套，3 条 proxy 回归验证通过）

@@ -5,7 +5,7 @@ import { LocalConfigStore } from './localConfigStore';
 import { detectPlatform, readSettings } from './claudeConfig';
 import { ProxyHost } from './proxyHost';
 import { extractUpstream } from './upstream';
-import { aggregateModelCatalog, aliasName } from './derivedLogic';
+import { aggregateModelCatalog, aliasName, inheritSessionContext1m } from './derivedLogic';
 
 interface EditorHandlers {
     onSaved: () => void;
@@ -87,7 +87,10 @@ export class WebviewEditor {
             );
         }
         // 三档映射默认继承父配置 content 里的 ANTHROPIC_DEFAULT_*_MODEL（父有则预填，§6.7 P3）
+        // main 档从父 ANTHROPIC_MODEL 继承（剥 [1m]，优化 2）
         const inheritedAliases = this.inheritAliasesFromParent(parentCfg.content);
+        // 会话档位默认从父 ANTHROPIC_MODEL 是否带 [1m] 继承（优化 2，约束 3）
+        const inherited1m = inheritSessionContext1m(parentCfg.content);
         const cfg: LLMConfig = {
             id: newId(),
             name,
@@ -97,6 +100,7 @@ export class WebviewEditor {
             derivedFrom: parentCfg.id,
             derivedIndex,
             modelAliases: inheritedAliases,
+            sessionContext1m: inherited1m,
             derivedSnapshot: snapshot,
         };
         await this.open(`new:derived:${cfg.id}`, undefined, `New Derived: ${name}`, name, parentCfg.content,
@@ -110,16 +114,21 @@ export class WebviewEditor {
             'proxy', 'derived', [], { cfg, catalog });  // 派生节点强制 proxy 模式（V7）
     }
 
-    /** 从父配置 content 解出三档默认映射（父有 ANTHROPIC_DEFAULT_*_MODEL 则预填）。
-     *  派生节点新建时继承父的三档配置，省得用户每档重新填（§6.7 P3）。 */
-    private inheritAliasesFromParent(parentContent: string): { haiku?: string; sonnet?: string; opus?: string } {
+    /** 从父配置 content 解出四档默认映射（父有对应 env 则预填）。
+     *  派生节点新建时继承父的四档配置，省得用户每档重新填（§6.7 P3 + 优化 2 main 档）。
+     *  - main：从父 ANTHROPIC_MODEL 继承，剥掉 [1m] 后缀（映射 key 不带后缀，约束 3）。
+     *  - 三档：从父 ANTHROPIC_DEFAULT_*_MODEL 继承。 */
+    private inheritAliasesFromParent(parentContent: string): { main?: string; haiku?: string; sonnet?: string; opus?: string } {
         const parsed = extractUpstream(parentContent);
         if (!parsed) return {};
         const env = parsed.env ?? {};
-        const aliases: { haiku?: string; sonnet?: string; opus?: string } = {};
+        const aliases: { main?: string; haiku?: string; sonnet?: string; opus?: string } = {};
+        const m = env.ANTHROPIC_MODEL;
         const h = env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
         const s = env.ANTHROPIC_DEFAULT_SONNET_MODEL;
         const o = env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+        // main 剥 [1m] 后缀：映射 key 不带后缀（约束 3，rewriteModel 剥后缀查表）
+        if (typeof m === 'string' && m) aliases.main = m.replace(/\[1m\]/gi, '').trim();
         if (typeof h === 'string' && h) aliases.haiku = h;
         if (typeof s === 'string' && s) aliases.sonnet = s;
         if (typeof o === 'string' && o) aliases.opus = o;
@@ -206,9 +215,16 @@ export class WebviewEditor {
             return;
         }
 
-        // 派生节点：在线改单档别名映射（§6.7 P7），即时生效 + 同步本地缓存 + 刷树 + 不关面板
+        // 派生节点：在线改单档别名映射（§6.7 P7 + 优化 2 main 档），即时生效 + 同步本地缓存 + 刷树 + 不关面板
         if (msg.type === 'setAlias' && scope === 'derived' && derivedExtra) {
             await this.handleSetAlias(panel, derivedExtra.cfg, msg.tier, msg.model, existingId);
+            return;
+        }
+
+        // 派生节点：改会话档位（[1m] 后缀）。档位变更需重启 CLI 生效（别名后缀变了），
+        // 此处只更新本地缓存 + 内存 cfg.sessionContext1m + 提示重启，不重渲染别名（重渲染需重建 webview）。
+        if (msg.type === 'setCtx1m' && scope === 'derived' && derivedExtra) {
+            await this.handleSetCtx1m(panel, derivedExtra.cfg, msg.with1m, existingId);
             return;
         }
 
@@ -310,12 +326,14 @@ export class WebviewEditor {
     private async handleSetAlias(
         panel: vscode.WebviewPanel,
         cfg: LLMConfig,
-        tier: 'haiku' | 'sonnet' | 'opus',
+        tier: 'main' | 'haiku' | 'sonnet' | 'opus',
         model: string,
         existingId: string | undefined,
     ): Promise<void> {
-        if (cfg.derivedIndex == null) {
-            panel.webview.postMessage({ type: 'error', message: '派生节点缺少编号，无法设置别名' });
+        // 编号守卫：null/undefined/0/负数/非整数都拦（与 computeAliasSyncActions 一致）。
+        // aliasName 要求 N>=1，否则抛错；此处先拦，避免 aliasName 在 try 块外抛未捕获错。
+        if (cfg.derivedIndex == null || cfg.derivedIndex < 1 || !Number.isInteger(cfg.derivedIndex)) {
+            panel.webview.postMessage({ type: 'error', message: '派生节点编号无效（缺失或非法），无法设置别名' });
             return;
         }
         const proxyHost = this.handlers.getProxyHost();
@@ -323,7 +341,9 @@ export class WebviewEditor {
             panel.webview.postMessage({ type: 'error', message: '代理尚未初始化' });
             return;
         }
-        const alias = aliasName(tier, cfg.derivedIndex);
+        // 映射别名 key 不带 [1m]（约束 3：rewriteModel 剥后缀查表），故 aliasName 用 with1m=false。
+        // CLI 发请求时 normalizeModelStringForAPI 会剥掉 [1m]，代理收到的别名本就不带后缀。
+        const alias = aliasName(tier, cfg.derivedIndex, false);
         try {
             await proxyHost.setModelAlias(alias, model);
         } catch (err) {
@@ -344,7 +364,42 @@ export class WebviewEditor {
         // 无论是否 upsert，都更新内存 cfg.modelAliases 供后续 setAlias 基于最新值（避免连续改多档时丢档）
         cfg.modelAliases = { ...(cfg.modelAliases ?? {}), [tier]: model };
         this.handlers.refresh();
-        panel.webview.postMessage({ type: 'aliasSaved', tier });
+        // 通用跨档位警告（约束 2/3）：改映射后提示用户若新模型与当前会话档位不同 contextWindow 档位会脱节。
+        // 代理侧看不到档位（被 CLI 剥了），无法精确判断，只能通用提示让用户担责。
+        const tierLabel = tier === 'main' ? '主对话' : tier.charAt(0).toUpperCase() + tier.slice(1);
+        const ctxLabel = cfg.sessionContext1m === true ? '1M' : '200K';
+        panel.webview.postMessage({
+            type: 'aliasSaved',
+            tier,
+            message: `已更新「${tierLabel}」映射：${alias} → ${model}。若新模型与当前会话 contextWindow 档位（${ctxLabel}）不同，CLI 的 autocompact/上下文计数可能脱节，自行确认。`,
+        });
+    }
+
+    /**
+     * 处理 setCtx1m：改会话档位（[1m] 后缀，优化 2，约束 3）。
+     * 档位决定 CLI 按 200K 还是 1M 算 contextWindow，是别名后缀的一部分——改了需重启 CLI 生效
+     *（别名后缀变了，旧 CLI 进程仍按旧档位算）。此处只更新本地缓存 + 内存 cfg.sessionContext1m，
+     * 不重渲染别名显示（webview 已渲染的别名是旧后缀，重渲染需重建面板，代价大且非必要——
+     * 用户改完档位会重启 CLI，重开编辑器即显示新后缀）。
+     */
+    private async handleSetCtx1m(
+        panel: vscode.WebviewPanel,
+        cfg: LLMConfig,
+        with1m: boolean,
+        existingId: string | undefined,
+    ): Promise<void> {
+        cfg.sessionContext1m = with1m;
+        const localStore = this.handlers.getLocalStore();
+        if (localStore && existingId !== undefined) {
+            const updated: LLMConfig = { ...cfg, updatedAt: new Date().toISOString() };
+            await localStore.upsert(updated);
+        }
+        this.handlers.refresh();
+        panel.webview.postMessage({
+            type: 'ctx1mSaved',
+            with1m,
+            message: `会话档位已改为 ${with1m ? '1M（别名带 [1m]）' : '标准 200K'}。需重启 CLI 生效（别名后缀变更，旧进程仍按旧档位算 contextWindow）。`,
+        });
     }
 
     private buildHtml(
@@ -384,17 +439,31 @@ export class WebviewEditor {
         let modeDisabled = '';
         let saveSwitchLabel = 'Save &amp; Switch';
         if (isDerived && derivedExtra) {
-            const idx = derivedExtra.cfg.derivedIndex ?? 0;
+            const rawIdx = derivedExtra.cfg.derivedIndex;
+            // 编号守卫：派生节点本应必有 >=1 的编号（创建时由代理 nextAliasId 分配）。
+            // 防御数据损坏（手改 local-configs.json 删了 derivedIndex）：非法编号时不调 aliasName
+            //（aliasName 要求 N>=1 否则抛错会炸整个 buildHtml → webview 创建失败），用占位别名渲染。
+            const idxValid = typeof rawIdx === 'number' && Number.isInteger(rawIdx) && rawIdx >= 1;
+            const idx = idxValid ? rawIdx : 0;
+            const idxLabel = idxValid ? `#${idx}` : '#?';
+            const aliasFor = (tier: 'main' | 'haiku' | 'sonnet' | 'opus') =>
+                idxValid ? aliasName(tier, idx, with1m) : `ccp-${tier}-?`;
             const aliases = derivedExtra.cfg.modelAliases ?? {};
+            const with1m = derivedExtra.cfg.sessionContext1m === true;
             const catalogOpts = (['', ...derivedExtra.catalog])
                 .map(m => `<option value="${escapeHtml(m)}">${m ? escapeHtml(m) : '— 不设置（原样透传） —'}</option>`)
                 .join('');
-            const tierRow = (tier: 'haiku' | 'sonnet' | 'opus', label: string) => {
-                const alias = aliasName(tier, idx);
+            // main 档 hover 静态提示 /model 脱离风险（约束 6：感知不到 /model，只能静态提示）
+            const mainHover = '主对话模型别名。仅当 CLI 内未用 /model 切换时生效——' +
+                '/model 改的模型会脱离本别名，代理替换对主对话不再生效（子 agent 三档仍受控）。';
+            // tierRow：label/别名只读/箭头/真实模型输入。main 行带 title hover + data-tier=main。
+            const tierRow = (tier: 'main' | 'haiku' | 'sonnet' | 'opus', label: string, hover?: string) => {
+                const alias = aliasFor(tier);
                 const cur = aliases[tier] ?? '';
+                const titleAttr = hover ? ` title="${escapeHtml(hover)}"` : '';
                 return /* html */ `
-    <div class="alias-row">
-      <span class="alias-label">${label} 档</span>
+    <div class="alias-row"${titleAttr}>
+      <span class="alias-label">${label}</span>
       <code class="alias-name">${escapeHtml(alias)}</code>
       <span class="alias-arrow">→</span>
       <input type="text" list="model-catalog" class="alias-model" data-tier="${tier}" value="${escapeHtml(cur)}" placeholder="真实模型名" />
@@ -402,13 +471,20 @@ export class WebviewEditor {
             };
             derivedBlock = /* html */ `
   <div class="row">
+    <label>会话档位（contextWindow）</label>
+    <label style="font-weight:normal; margin-bottom:4px"><input type="radio" name="ctx1m" value="false" ${with1m ? '' : 'checked'} /> 标准 200K — 别名不带后缀</label>
+    <label style="font-weight:normal; margin-bottom:0"><input type="radio" name="ctx1m" value="true" ${with1m ? 'checked' : ''} /> 1M 上下文 — 别名带 [1m] 后缀（CLI 按此算 contextWindow）</label>
+    <div class="hint">决定 CLI 按 200K 还是 1M 算 contextWindow/autocompact。默认从父 ANTHROPIC_MODEL 是否带 [1m] 继承。改档位需重启 CLI 生效（别名后缀变了）。代理映射 key 不受影响（永远不带后缀）。</div>
+  </div>
+  <div class="row">
     <label>模型别名映射（在线可改，下个请求生效）</label>
-    <div class="hint">继承自: ${escapeHtml(derivedExtra.cfg.derivedFrom ?? '(未知)')} · 专属编号: #${idx} · 别名: ${escapeHtml(aliasName('haiku', idx))} / ${escapeHtml(aliasName('sonnet', idx))} / ${escapeHtml(aliasName('opus', idx))}</div>
+    <div class="hint">继承自: ${escapeHtml(derivedExtra.cfg.derivedFrom ?? '(未知)')} · 专属编号: ${idxLabel} · 别名: ${escapeHtml(aliasFor('main'))} / ${escapeHtml(aliasFor('haiku'))} / ${escapeHtml(aliasFor('sonnet'))} / ${escapeHtml(aliasFor('opus'))}</div>
     <datalist id="model-catalog">${catalogOpts}</datalist>
+    ${tierRow('main', 'Main', mainHover)}
     ${tierRow('haiku', 'Haiku')}
     ${tierRow('sonnet', 'Sonnet')}
     ${tierRow('opus', 'Opus')}
-    <div class="hint">改下拉值会即时同步到代理映射表并刷新树，无需重启 CLI、无需关闭本面板。</div>
+    <div class="hint">改下拉值会即时同步到代理映射表并刷新树，无需重启 CLI、无需关闭本面板。⚠ 若新模型与当前会话档位（${with1m ? '1M' : '200K'}）不同 contextWindow 档位，CLI 的 autocompact/上下文计数可能脱节，自行确认。</div>
   </div>`;
             contentReadOnly = 'readonly';
             modeDisabled = 'disabled';
@@ -593,6 +669,13 @@ export class WebviewEditor {
       });
     });
 
+    // 派生节点：会话档位 radio 改动 → setCtx1m（需重启生效）
+    document.querySelectorAll('input[name="ctx1m"]').forEach(el => {
+      el.addEventListener('change', () => {
+        vscode.postMessage({ type: 'setCtx1m', with1m: el.value === 'true' });
+      });
+    });
+
     saveBtn.addEventListener('click', () => {
       vscode.postMessage({ type: 'save', name: nameEl.value, content: contentEl.value, mode: selectedMode() });
     });
@@ -614,8 +697,11 @@ export class WebviewEditor {
         validate();
       }
       else if (msg.type === 'aliasSaved') {
-        // 轻量确认：不关面板，不清空 input（用户可能连改多档）
-        errorEl.textContent = msg.tier + ' 档已同步到代理（下个请求生效）';
+        // 轻量确认 + 通用跨档位警告：不关面板，不清空 input（用户可能连改多档）
+        errorEl.textContent = msg.message || (msg.tier + ' 档已同步到代理（下个请求生效）');
+      }
+      else if (msg.type === 'ctx1mSaved') {
+        errorEl.textContent = msg.message;
       }
       else if (msg.type === 'saved') { /* host will close panel */ }
     });
@@ -631,7 +717,8 @@ export class WebviewEditor {
 type WebviewMessage =
     | { type: 'save' | 'saveAndSwitch'; name: string; content: string; mode: 'direct' | 'proxy' }
     | { type: 'import'; id: string }
-    | { type: 'setAlias'; tier: 'haiku' | 'sonnet' | 'opus'; model: string }
+    | { type: 'setAlias'; tier: 'main' | 'haiku' | 'sonnet' | 'opus'; model: string }
+    | { type: 'setCtx1m'; with1m: boolean }
     | { type: 'cancel' };
 
 const TEMPLATE = `{

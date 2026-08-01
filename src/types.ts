@@ -1,7 +1,9 @@
 export type ConfigMode = 'direct' | 'proxy';
 
-/** 派生节点三档别名 → 真实模型映射（§6.2）。本地缓存，权威在代理 modelAliases。 */
+/** 派生节点四档别名 → 真实模型映射（§6.2 + 优化 2 main 档）。本地缓存，权威在代理 modelAliases。
+ *  main 走 ANTHROPIC_MODEL（主对话），三档走 ANTHROPIC_DEFAULT_*（子 agent alias 解析）。 */
 export interface ModelAliasMapping {
+    main?: string;    // ccp-main-N → 真实模型名（主对话模型，优化 2）
     haiku?: string;   // ccp-haiku-N → 真实模型名
     sonnet?: string;  // ccp-sonnet-N → 真实模型名
     opus?: string;    // ccp-opus-N → 真实模型名
@@ -33,6 +35,9 @@ export interface LLMConfig {
     derivedIndex?: number;
     /** 三档别名 → 真实模型（本地缓存，权威在代理）。 */
     modelAliases?: ModelAliasMapping;
+    /** 会话档位：true=别名带 [1m]、CLI 按 1M 算 contextWindow；false/undefined=标准 200K（优化 2，约束 3）。
+     *  默认从父 ANTHROPIC_MODEL 继承（inheritSessionContext1m）。 */
+    sessionContext1m?: boolean;
     /** 父上游快照（防父被删/改导致继承断链）。 */
     derivedSnapshot?: DerivedSnapshot;
 }
