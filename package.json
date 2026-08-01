@@ -1,8 +1,8 @@
 {
   "name": "claude-code-proxy",
   "displayName": "Claude Code Proxy",
-  "description": "管理 Claude Code 配置并切换；每条配置可选直连或通过本地代理（代理只重试 Claude Code 处理不了的 503+10310，其余透传交给 Claude Code）。",
-  "version": "1.1.0",
+  "description": "管理 Claude Code 配置切换 + 本地 LLM 代理（重试 503/10310）+ workspace 隔离 CLI 会话 + 运行时模型切换（派生节点别名，不重启 CLI 切模型）。",
+  "version": "1.2.0",
   "publisher": "zaczh",
   "repository": {
     "type": "git",
