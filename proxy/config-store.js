@@ -21,12 +21,18 @@ const DEFAULTS = {
   backoffSec: 1, // 秒
   backoffMaxSec: 16, // 秒
   passthrough: false, // 透传模式：true=不重试原样转发，false=拦截重试
-  // 只重试 Claude Code 处理不了的：503 + body error.code === 10310（讯飞 system busy）。
-  // 其他状态码（408/429/500/502/504 等）Claude Code 自己能处理，代理不插手——避免代理重试
-  // 拖慢、也避免和 Claude Code 自身重试叠加。故 retryOnStatus 为空。
+  // 可配置重试规则：每条 = { status, code }。
+  //   status: HTTP 状态码（100..599）| '*'（任意状态码通配）
+  //   code:   body error.code 数字 | 'all'（任意 body code，响应头即决断重试）
+  // 命中语义：响应 status 匹配规则 status，且 body code 满足规则 code 要求 → 缓冲重试。
+  // 默认等价原写死行为：503+10310（讯飞 system busy）、200+10310（假成功 200+10310）。
+  // 用户可自加如 429+11210（讯飞网关 authorization failed）或 503+all（所有 503 都重试）。
+  // 其余状态码（408/500/502/504 等）默认不在规则里 → 透传交给 Claude Code 自己处理。
   // 网络错误（status=0：超时、连接断、流中断）仍兜底重试，否则断网/抖动直接崩给用户。
-  retryOnStatus: [],
-  retryOnBodyErrorCode: [10310],
+  retryRules: [
+    { status: 503, code: 10310 },
+    { status: 200, code: 10310 },
+  ],
 };
 
 let configPath;
@@ -41,6 +47,29 @@ export function init(configPathArg) {
   if (p.backoffMs !== undefined && p.backoffSec === undefined) p.backoffSec = p.backoffMs / 1000;
   if (p.backoffMaxMs !== undefined && p.backoffMaxSec === undefined) p.backoffMaxSec = p.backoffMaxMs / 1000;
   proxy = { ...DEFAULTS, ...p };
+  // 向后兼容：老 config.json 用 retryOnStatus / retryOnBodyErrorCode 两个独立字段，
+  // 新模型统一成 retryRules（组合规则）。迁移规则：
+  //   retryOnStatus:[503]            → {status:503, code:'all'}（任意 body code 都重试）
+  //   retryOnBodyErrorCode:[10310]   → {status:'*', code:10310}（任意状态码 + 该 code）
+  // 判定看原始 p 是否有 retryRules：有则尊重（可能用户显式写了 []）；无且无旧字段则用默认。
+  if (!Object.prototype.hasOwnProperty.call(p, 'retryRules')) {
+    const migrated = [];
+    const oldStatuses = Array.isArray(p.retryOnStatus) ? p.retryOnStatus : [];
+    const oldBodyCodes = Array.isArray(p.retryOnBodyErrorCode) ? p.retryOnBodyErrorCode : [];
+    for (const s of oldStatuses) {
+      const n = Number(s);
+      if (Number.isFinite(n)) migrated.push({ status: n, code: 'all' });
+    }
+    for (const c of oldBodyCodes) {
+      const n = Number(c);
+      if (Number.isFinite(n)) migrated.push({ status: '*', code: n });
+    }
+    // 有旧字段就迁移（哪怕迁移后为空，也尊重"用户清空了"）；无任何旧字段才用默认
+    proxy.retryRules = (oldStatuses.length || oldBodyCodes.length) ? migrated : [...DEFAULTS.retryRules];
+  } else if (!Array.isArray(proxy.retryRules)) {
+    // 用户显式写了 retryRules 但不是数组（脏数据）→ 兜底默认
+    proxy.retryRules = [...DEFAULTS.retryRules];
+  }
   // model aliasing：兜底老配置无 modelAliases / nextAliasId
   // 注意 typeof [] === 'object'，须用 Array.isArray 排除数组（防手动编辑成数组被当字典）
   if (!config.modelAliases || typeof config.modelAliases !== 'object' || Array.isArray(config.modelAliases)) config.modelAliases = {};
@@ -212,8 +241,7 @@ export function getView() {
       backoffSec: proxy.backoffSec,
       backoffMaxSec: proxy.backoffMaxSec,
       passthrough: proxy.passthrough,
-      retryOnStatus: proxy.retryOnStatus,
-      retryOnBodyErrorCode: proxy.retryOnBodyErrorCode,
+      retryRules: proxy.retryRules,
     },
     upstream: {
       baseUrl: env.upstreamBase ?? '',
@@ -237,9 +265,33 @@ const PROXY_UPDATABLE = [
   'backoffSec',
   'backoffMaxSec',
   'passthrough',
-  'retryOnStatus',
-  'retryOnBodyErrorCode',
+  'retryRules',
 ];
+
+// 校验单条 retryRule：{ status: number(100..599) | '*', code: number | 'all' }。
+// 抛错带字段名，供前端定位。status='*' 通配任意状态码；code='all' 通配任意 body code。
+function validateRetryRule(rule) {
+  if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+    throw new Error('retryRules 每条必须是对象 {status, code}');
+  }
+  const { status, code } = rule;
+  if (status === '*') {
+    // 任意状态码通配，合法
+  } else {
+    const sn = Number(status);
+    if (!Number.isFinite(sn) || !Number.isInteger(sn) || sn < 100 || sn > 599) {
+      throw new Error('retryRules.status 必须是 100..599 的整数或 "*"');
+    }
+  }
+  if (code === 'all') {
+    // 任意 body code 通配，合法
+  } else {
+    const cn = Number(code);
+    if (!Number.isFinite(cn) || !Number.isInteger(cn)) {
+      throw new Error('retryRules.code 必须是整数或 "all"');
+    }
+  }
+}
 
 export function updateProxy(partial) {
   const next = { ...proxy };
@@ -248,9 +300,17 @@ export function updateProxy(partial) {
     const v = partial[k];
     if (k === 'passthrough') {
       next[k] = !!v; // 强制布尔
-    } else if (k === 'retryOnStatus' || k === 'retryOnBodyErrorCode') {
-      if (!Array.isArray(v)) throw new Error(`${k} 必须是数字数组`);
-      next[k] = v.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+    } else if (k === 'retryRules') {
+      if (!Array.isArray(v)) throw new Error('retryRules 必须是数组');
+      // 逐条校验 + 规范化（status 数字化、code 数字化或保留 'all'/'*'）
+      next[k] = v.map((rule) => {
+        validateRetryRule(rule);
+        const { status, code } = rule;
+        return {
+          status: status === '*' ? '*' : Number(status),
+          code: code === 'all' ? 'all' : Number(code),
+        };
+      });
     } else {
       const n = Number(v);
       if (!Number.isFinite(n)) throw new Error(`${k} 必须是数字`);
@@ -306,8 +366,7 @@ function persist() {
     backoffSec: proxy.backoffSec,
     backoffMaxSec: proxy.backoffMaxSec,
     passthrough: proxy.passthrough,
-    retryOnStatus: proxy.retryOnStatus,
-    retryOnBodyErrorCode: proxy.retryOnBodyErrorCode,
+    retryRules: proxy.retryRules,
   };
   try {
     writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');

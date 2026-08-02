@@ -203,9 +203,9 @@ export class ConfigTreeProvider implements vscode.TreeDataProvider<ConfigNode> {
         const icon = mode === 'proxy' ? 'cloud' : (active ? 'circle-filled' : 'circle-outline');
         item.iconPath = new vscode.ThemeIcon(icon);
         item.contextValue = isLocal ? CV_LOCAL_CONFIG : CV_CONFIG;
-        // local 配置有派生子节点时可展开；global 永不展开
+        // local 配置有派生子节点时默认展开（让派生节点一进来就可见，不必手动点开）；global 永不展开
         item.collapsibleState = isLocal && derivedCount > 0
-            ? vscode.TreeItemCollapsibleState.Collapsed
+            ? vscode.TreeItemCollapsibleState.Expanded
             : vscode.TreeItemCollapsibleState.None;
         itemToConfig.set(item, cfg);
         item.command = {

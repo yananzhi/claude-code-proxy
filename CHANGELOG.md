@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.3.0
+
+### 派生节点每档独立 1m 上下文（per-tier contextWindow）
+
+派生节点的"会话档位（200K/1M）"从**整个配置一个开关**改成**每个档位独立**——main、haiku、sonnet、opus 各自有自己的 200K/1M 选择，别名后缀按各档独立带 `[1m]`。
+
+- **每档独立 1M checkbox**：派生编辑器的模型映射区，每个档位那一行各有一个"1M"checkbox。勾选的档别名带 `[1m]` 后缀（CLI 按 1M 算 contextWindow），不勾的档标准 200K。原先的全局"会话档位"radio 移除。
+- **数据结构**：`sessionContext1m` 从单布尔改成 `{ main?, haiku?, sonnet?, opus? }`（`PerTier1m`）。
+- **向后兼容**：老派生节点的 `sessionContext1m: true/false`（布尔）自动迁移成四档同值（`normalizeSessionContext1m`）。
+- **默认继承**：新建派生节点时四档默认都从父 `ANTHROPIC_MODEL` 是否带 `[1m]` 继承。
+- **代理侧无改动**：别名 key 带不带 `[1m]` 由扩展侧决定，代理 `rewriteModel` 仍剥后缀查表（映射 key 永远不带后缀）。
+- 改某档 1m 需重启 CLI 生效（别名后缀变了）；改映射值即时生效。
+- **测试**：derived-logic 加 PT 系列 per-tier 单测 + normalizeSessionContext1m 用例；更新 M/R 系列（inherit 返对象）。
+
+## 1.2.1
+
+### 可配置重试规则（HTTP 状态码 + body code 组合）+ 修复 retryOnStatus 失效 bug
+
+把原先写死的"503 + 10310"重试规则提成**用户可配置的组合规则**，并修复一个 latent bug。
+
+- **组合规则模型**：每条规则 = `{ status, code }`。`status` 填 HTTP 状态码或 `*`（任意状态码通配）；`code` 填 body `error.code` 数字或 `all`（任意 body code，响应头一到即决断重试，不等 body）。默认 `503+10310` / `200+10310`（等价原写死行为）。用户可在 Web 控制台自加如 `429+11210`（讯飞网关 authorization failed）或 `503+all`（所有 503 都重试）。
+- **修复 retryOnStatus 被流式提前吞掉的 bug**：旧架构 `retryOnStatus`（看状态码）和 `retryOnBodyErrorCode`（看 body code）是两条互不感知的路径，且 body-code 判定在 `writeHead` 之前、status 判定在 `writeHead` 之后——导致带可解析 body 的非 2xx 响应在首段就被流式交付客户端、`retryOnStatus` 永远走不到。用户配了 429 重试但不生效，正是此 bug。新架构统一成 retryRules，状态码判定（含 `all` 通配）在 `writeHead` 之前完成，非 2xx 规则不再被流式吞掉。
+- **向后兼容**：老 config.json 的 `retryOnStatus` / `retryOnBodyErrorCode` 自动迁移成 retryRules（`retryOnStatus:[503]` → `{503, 'all'}`；`retryOnBodyErrorCode:[10310]` → `{'*', 10310}`）。
+- **Web 控制台**：原"重试状态码"+"body 错误码"两个 chips 区合并成一个规则表（每行 状态码 + body code + 删除），"+ 添加规则"按钮加行。
+- **mock 上游**：新增 `429-auth` 模式（429 + code 11210，复刻生产日志形态）。
+- **测试**：config-store retryRules 单测（18 条）+ server-retry-rules e2e（15 条，覆盖默认规则 / 自定义规则 / all 通配 / `*` 通配 / 透传模式 / 空规则表 / maxAttempts=1）。
+
 ## 1.2.0
 
 ### 派生节点 + 运行时模型切换（主模型别名 alias）

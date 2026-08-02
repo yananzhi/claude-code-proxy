@@ -413,10 +413,10 @@ export class ClaudeLauncher {
             //    终端 name 带 #N 供 deleteDerivedConfig 匹配活终端
             const isWin = process.platform === 'win32';
             const idx = derivedCfg.derivedIndex;
-            // 别名是否带 [1m]：派生节点存了 sessionContext1m 则用之，否则默认不带（200K，约束 3）。
-            // 该标志决定 CLI 按 1M 还是 200K 算 contextWindow（[1m] 是 CLI 识别档位的唯一信号）。
-            const with1m = derivedCfg.sessionContext1m === true;
-            const aliasEnv = buildAliasEnv(idx, { with1m });
+            // 别名是否带 [1m]：派生节点存了 sessionContext1m（per-tier 对象）则用之，
+            // 否则默认不带（200K，约束 3）。该标志决定 CLI 按 1M 还是 200K 算 contextWindow
+            //（[1m] 是 CLI 识别档位的唯一信号）。每档独立：main/haiku/sonnet/opus 各自决定后缀。
+            const aliasEnv = buildAliasEnv(idx, { sessionContext1m: derivedCfg.sessionContext1m });
             const terminalOptions: vscode.TerminalOptions = {
                 name: `Claude Code #${idx} (${derivedCfg.name})`,
                 cwd: workspaceRoot,

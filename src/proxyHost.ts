@@ -616,9 +616,12 @@ const DEFAULT_PROXY_CONFIG = {
         backoffSec: 3,
         backoffMaxSec: 16,
         passthrough: false,
-        // 只重试 Claude Code 处理不了的：503 + body error.code === 10310。
+        // 可配置组合重试规则：{status, code}。status 填状态码或 '*'；code 填数字或 'all'。
+        // 默认 503+10310 / 200+10310（讯飞 system busy，含假成功 200+10310）。
         // 其他状态码 Claude Code 自己能处理，代理不插手（避免拖慢 + 叠加重试）。
-        retryOnStatus: [],
-        retryOnBodyErrorCode: [10310],
+        retryRules: [
+            { status: 503, code: 10310 },
+            { status: 200, code: 10310 },
+        ],
     },
 };

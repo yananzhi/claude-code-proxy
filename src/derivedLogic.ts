@@ -6,7 +6,7 @@
  *
  * 设计依据：docs/claude code cli运行时model切换方案.md §6.2/§6.5/§6.6/§6.9.1。
  */
-import type { LLMConfig, ConfigMode, ModelAliasMapping, DerivedSnapshot } from './types';
+import type { LLMConfig, ConfigMode, ModelAliasMapping, DerivedSnapshot, PerTier1m } from './types';
 import { extractUpstream } from './upstream';
 
 /**
@@ -14,6 +14,12 @@ import { extractUpstream } from './upstream';
  * 但别名构造（`ccp-<tier>-N`）与映射同步逻辑同构，故遍历用此数组统一处理。
  */
 const ALL_TIERS = ['main', 'haiku', 'sonnet', 'opus'] as const;
+
+/**
+ * 四档默认 200K 的会话档位对象（per-tier 全 false）。
+ * inheritSessionContext1m 在父不带 [1m] / 无 model / content 无效时返回此值。
+ */
+const PER_TIER_200K: PerTier1m = { main: false, haiku: false, sonnet: false, opus: false };
 
 /**
  * 构造档位别名串：`ccp-<tier>-N`，可选 `[1m]` 后缀。
@@ -40,16 +46,28 @@ export function aliasName(tier: string, index: number, with1m = false): string {
  * - 三档 → `ANTHROPIC_DEFAULT_*_MODEL`（子 agent alias 解析输入源，§6.6）。
  * BASE_URL/token 走 settings.env（不进 shell，防进程列表可见），故返回对象绝不含这两类 key（测试 4 断言）。
  *
+ * per-tier 1m（每档独立选 200K/1M）：opts.sessionContext1m 是对象时，各档按自身 1m 决定别名是否带 [1m]。
+ * 向后兼容：opts.with1m（布尔）展开成四档同值；sessionContext1m 对象优先于 with1m。两者都缺 → 四档 200K。
+ *
  * @param derivedIndex 派生节点专属编号 N
- * @param opts.with1m 是否带 [1m] 后缀（1M 上下文会话；CLI 按此算 contextWindow，约束 3）
+ * @param opts.sessionContext1m per-tier 1m 对象（{main,haiku,sonnet,opus}）
+ * @param opts.with1m 兼容旧调用：布尔，四档同值
  */
-export function buildAliasEnv(derivedIndex: number, opts: { with1m?: boolean } = {}): Record<string, string> {
-    const with1m = opts.with1m ?? false;
+export function buildAliasEnv(derivedIndex: number, opts: { with1m?: boolean; sessionContext1m?: PerTier1m | boolean } = {}): Record<string, string> {
+    // sessionContext1m 优先（对象或布尔都接受——布尔是老数据，normalizeSessionContext1m 会迁移成四档同值）；
+    // 否则用 with1m 布尔展开四档同值；都缺 → 四档 false（200K）。
+    // 注意：sessionContext1m 若是布尔 true，typeof !== 'object' 会被旧逻辑误判落 with1m 分支（with1m 缺→200K），
+    // 静默丢失老数据的 1M 设置。故这里对"布尔或对象"都走 normalize（normalize 兼容两者）。
+    const normalized = opts.sessionContext1m !== undefined
+        ? normalizeSessionContext1m(opts.sessionContext1m)
+        : undefined;
+    const perTier: PerTier1m = normalized
+        ?? { main: !!opts.with1m, haiku: !!opts.with1m, sonnet: !!opts.with1m, opus: !!opts.with1m };
     return {
-        ANTHROPIC_MODEL: aliasName('main', derivedIndex, with1m),
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: aliasName('haiku', derivedIndex, with1m),
-        ANTHROPIC_DEFAULT_SONNET_MODEL: aliasName('sonnet', derivedIndex, with1m),
-        ANTHROPIC_DEFAULT_OPUS_MODEL: aliasName('opus', derivedIndex, with1m),
+        ANTHROPIC_MODEL: aliasName('main', derivedIndex, perTier.main === true),
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: aliasName('haiku', derivedIndex, perTier.haiku === true),
+        ANTHROPIC_DEFAULT_SONNET_MODEL: aliasName('sonnet', derivedIndex, perTier.sonnet === true),
+        ANTHROPIC_DEFAULT_OPUS_MODEL: aliasName('opus', derivedIndex, perTier.opus === true),
     };
 }
 
@@ -57,24 +75,55 @@ export function buildAliasEnv(derivedIndex: number, opts: { with1m?: boolean } =
  * 从父配置 content 解析派生节点的默认会话档位（优化 2，约束 3）。
  *
  * 规则：看父 `ANTHROPIC_MODEL` 是否带 `[1m]` 后缀（CLI `has1mContext` 用 `/\[1m\]/i` 识别，大小写不敏感）：
- * - 带 `[1m]` → true（派生节点别名带后缀，CLI 按 1M 算 contextWindow）。
- * - 不带 / 父无 ANTHROPIC_MODEL / content 无效 / 值非字符串 → false（保守 200K）。
- * - `[2m]`/`[500k]` 等 CLI 不识别的后缀 → false（只认 `[1m]`）。
+ * - 带 `[1m]` → 四档都 true（派生节点别名带后缀，CLI 按 1M 算 contextWindow）。
+ * - 不带 / 父无 ANTHROPIC_MODEL / content 无效 / 值非字符串 → 四档都 false（保守 200K）。
+ * - `[2m]`/`[500k]` 等 CLI 不识别的后缀 → 四档 false（只认 `[1m]`）。
  *
- * 派生节点可自行覆盖此默认（配置页选档位），此函数只提供继承初值。
+ * per-tier：四档默认都从父继承（同值）。用户可在编辑器里逐档覆盖。
+ * 返回 per-tier 对象（{main,haiku,sonnet,opus}），调用方直接用作派生节点 sessionContext1m 初值。
  */
-export function inheritSessionContext1m(parentContent: string): boolean {
+export function inheritSessionContext1m(parentContent: string): PerTier1m {
     const parsed = extractUpstream(parentContent);
     if (!parsed) {
-        return false;
+        return { ...PER_TIER_200K };
     }
     const m = parsed.env.ANTHROPIC_MODEL;
     // 类型守卫：env 值可能非字符串（extractUpstream 强转），非字符串视为无后缀
     if (typeof m !== 'string' || !m) {
-        return false;
+        return { ...PER_TIER_200K };
     }
     // 与 CLI has1mContext 一致：/\[1m\]/i，仅 [1m] 识别，[2m] 等不识别
-    return /\[1m\]/i.test(m);
+    const with1m = /\[1m\]/i.test(m);
+    return { main: with1m, haiku: with1m, sonnet: with1m, opus: with1m };
+}
+
+/**
+ * 归一化 sessionContext1m：把任意输入规整成合法 per-tier 对象（或 undefined）。
+ * - undefined → undefined（保持未填，调用方会用继承初值）。
+ * - 布尔 true → 四档 true；布尔 false → 四档 false（老派生节点数据迁移）。
+ * - 对象 → 各档 value 非 strict-true 转 false（防脏数据 string/number/null），缺档补 false。
+ * - 非对象非布尔脏数据（string/null/number/array）→ 四档 false。
+ *
+ * 用途：读取派生节点 sessionContext1m 时规整（防老数据/手动编辑脏数据）。
+ */
+export function normalizeSessionContext1m(raw: unknown): PerTier1m | undefined {
+    if (raw === undefined) {
+        return undefined;
+    }
+    if (typeof raw === 'boolean') {
+        return { main: raw, haiku: raw, sonnet: raw, opus: raw };
+    }
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const o = raw as Record<string, unknown>;
+        return {
+            main: o.main === true,
+            haiku: o.haiku === true,
+            sonnet: o.sonnet === true,
+            opus: o.opus === true,
+        };
+    }
+    // 非对象非布尔脏数据 → 四档 false
+    return { ...PER_TIER_200K };
 }
 
 
@@ -258,4 +307,4 @@ export function nextDerivedIndex(configs: Pick<LLMConfig, 'derivedIndex'>[]): nu
 }
 
 // 重新导出派生节点相关类型，供交互层统一 import
-export type { ModelAliasMapping, DerivedSnapshot, ConfigMode };
+export type { ModelAliasMapping, DerivedSnapshot, ConfigMode, PerTier1m };

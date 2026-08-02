@@ -1,6 +1,6 @@
 # CLAUDE.md — claude-code-proxy
 
-VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（重试 503/10310）+ workspace 隔离 CLI 会话 + 运行时模型切换（派生节点 alias）。
+VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置组合重试规则：HTTP 状态码 + body code）+ workspace 隔离 CLI 会话 + 运行时模型切换（派生节点 alias）。
 
 ## 关键陷阱（必读，避免重复踩坑）
 
@@ -43,11 +43,11 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（重试 50
 - `src/`：VS Code 扩展 TS（编译到 `out/`，CommonJS）。
   - `proxyHost.ts`：代理宿主（ESM import proxy/server.js 进扩展进程，非子进程）+ 调代理接口的 wrapper（裸 socket）。
   - `claudeLauncher.ts`：启动 workspace 隔离 CLI（`CLAUDE_CONFIG_DIR` + 别名走 shell env + token 走 settings.env）。
-  - `derivedLogic.ts`：派生节点纯逻辑（继承快照、别名 env 构造、映射表同步），抽出来好单测。
+  - `derivedLogic.ts`：派生节点纯逻辑（继承快照、别名 env 构造、映射表同步、per-档 1m 上下文 `sessionContext1m`/`normalizeSessionContext1m`/`inheritSessionContext1m`），抽出来好单测。
   - `treeProvider.ts` / `webviewEditor.ts` / `localConfigStore.ts`：配置树 / 编辑器 / 存储。
 - `proxy/`：本地 LLM 代理（ESM JS，不进 tsc）。
-  - `server.js`：转发主路径 + `rewriteModel`（别名替换）+ `rewriteEffort` + API 接口。
-  - `config-store.js`：配置读写 + 热重载 + modelAliases 映射表 + nextAliasId 计数器。
+  - `server.js`：转发主路径 + `rewriteModel`（别名替换）+ `rewriteEffort` + `inspectFirstBody`/`describeHitRule`（retryRules 命中判定，status+code 组合，`all`/`*` 通配）+ API 接口。
+  - `config-store.js`：配置读写 + 热重载 + modelAliases 映射表 + nextAliasId 计数器 + retryRules（含老 retryOnStatus/retryOnBodyErrorCode 向后兼容迁移）。
   - `trace-store.js`：trace 写时分流（model=原始别名、resolvedModel=映射后真实模型）。
 - `test/mock-cli/`：Claude Code CLI 配置加载层等价重实现（探针 + 假设验证）。
 - `test/derived-logic/`：派生节点纯逻辑单测。

@@ -3,9 +3,9 @@
 一个 VS Code 扩展，合四件事于一身：
 
 1. **管理 + 切换 Claude Code 配置**（原名 cc-switch，现 claude-code-proxy）：保存多条命名的 LLM 配置（每条是完整 `settings.json` 内容），点一下就切换；支持导入/导出。配置分两层——**global**（机器级，写 `~/.claude/settings.json`）和 **workspace-local**（workspace 级，只用于终端启动的隔离会话）。
-2. **本地 LLM 代理**（原 llmAutoRetry）：每条配置可选"直连"或"通过代理连接"。代理自动重试 Claude Code 处理不了的瞬时错误（如讯飞 503 system busy，code 10310），并提供 Web 控制台看重试参数 + trace 记录。
+2. **本地 LLM 代理**（原 llmAutoRetry）：每条配置可选"直连"或"通过代理连接"。代理按可配置组合规则（HTTP 状态码 + body 错误码）自动重试上游瞬时错误（如讯飞 503+10310 system busy、429+11210 authorization failed），并提供 Web 控制台看重试规则 + trace 记录。
 3. **Workspace 隔离的 Claude CLI 会话**：一个按钮 / 快捷键在终端打开 Claude Code CLI，用 `CLAUDE_CONFIG_DIR` 指向 `{workspace}/.claude_proxy/`，让该 workspace 的 Claude 状态独立于全局 `~/.claude/`。会话用当前 workspace-local active 配置。
-4. **运行时模型切换（派生节点 alias）**：从一条 local 配置派生出"虚拟配置节点"，给 CLI 配固定假模型名（别名 `ccp-main-N` / `ccp-haiku-N` / `ccp-sonnet-N` / `ccp-opus-N`），代理在请求层把别名实时替换成真实模型——不用重启 CLI 就能切模型。支持 `[1m]` 会话档位（1M contextWindow）、四档映射在线改、跨档位警告。
+4. **运行时模型切换（派生节点 alias）**：从一条 local 配置派生出"虚拟配置节点"，给 CLI 配固定假模型名（别名 `ccp-main-N` / `ccp-haiku-N` / `ccp-sonnet-N` / `ccp-opus-N`），代理在请求层把别名实时替换成真实模型——不用重启 CLI 就能切模型。支持每档独立 `[1m]` 会话档位（1M contextWindow）、四档映射在线改、跨档位警告。
 
 ---
 
@@ -55,10 +55,10 @@ Claude Code CLI 的模型配置有三套独立机制（`ANTHROPIC_MODEL` env / `
 ### 怎么用
 
 1. 在一条 local 配置上点 `$(git-branch)`（派生）按钮，向代理申请一个全局唯一编号 N。
-2. 派生编辑器里配四档映射 + 会话档位：
+2. 派生编辑器里配四档映射 + 每档 1m：
    - **Main 档**（主对话模型，走 `ANTHROPIC_MODEL`）：别名 `ccp-main-N` → 真实模型。
    - **Haiku / Sonnet / Opus 档**（子 agent alias，走 `ANTHROPIC_DEFAULT_*_MODEL`）：别名 `ccp-<tier>-N` → 真实模型。
-   - **会话档位**：标准 200K 或 1M（别名带 `[1m]` 后缀，CLI 据此算 contextWindow）。默认从父配置的 `ANTHROPIC_MODEL` 是否带 `[1m]` 继承。
+   - **每档 1m 上下文**：每个档位那一行各有"1M"checkbox，勾选的档别名带 `[1m]` 后缀（CLI 按 1M 算 contextWindow），不勾的标准 200K。四档各自独立。默认从父配置的 `ANTHROPIC_MODEL` 是否带 `[1m]` 继承。
 3. 四档映射默认从父配置继承；改任一档下拉值**即时同步到代理映射表**，刷新树，下个请求生效，无需重启 CLI、无需关闭编辑面板。
 4. 点 `Save & 启动` 启动该派生节点的隔离 CLI 会话（终端 name 带 `#N`）。
 
@@ -86,7 +86,7 @@ Claude Code CLI 的模型配置有三套独立机制（`ANTHROPIC_MODEL` env / `
 - **进程内常驻**：代理跑在 VS Code 扩展宿主进程里，跟着 VS Code 生命周期。
 - **单例**：开多个 VS Code 窗口只有一个实际跑代理（靠端口 bind），其他窗口只心跳监听。
 - **2s 心跳接管**：宿主窗口关了导致代理停，其他窗口 2s 内接管拉起。
-- **精确重试**：代理只重试 Claude Code 处理不了的——`HTTP 503` + body `error.code === 10310`（讯飞 system busy）。其余全部透传交给 Claude Code 自己处理：429/500/502/504（CC 当 5xx 重试）、网络错误/超时/断连/流中断（CC 当 APIConnectionError 重试，代理合成 502 回客户端）。可在控制台调 `retryOnStatus`/`retryOnBodyErrorCode`。
+- **可配置重试规则**：代理按用户自定义的组合规则重试——每条规则 = `HTTP 状态码 + body 错误码`，状态码填数字或 `*`（任意状态码），body code 填数字或 `all`（任意 body code，响应头一到即决断重试）。默认 `503+10310` / `200+10310`（讯飞 system busy，含假成功 200+10310）；用户可在 Web 控制台自加如 `429+11210`（讯飞网关 authorization failed）或 `503+all`（所有 503 都重试）。命中规则的响应在 `writeHead` 前就缓冲丢弃重试，不流式交付给客户端；未命中的状态码（如普通 429/500/502/504）透传交给 Claude Code 自己处理。可在控制台调 `retryRules`。
 - **流式增量转发**（1.0.3+）：代理对上游响应（含 SSE）边收边转发给客户端，token 逐个到达，不再整体延迟到上游 `end`。body-error 重试仍生效——错误 body（实测 ~132 字节、合法 JSON、必在首个 chunk）在 `writeHead` 前就判出并丢弃重试；成功 SSE 首 chunk 非 JSON → 不误判、立即流式转发。
 - **模型别名重写**（1.2.0+，派生节点用）：代理对请求 body 的 `model` 字段做热替换——CLI 配的是固定别名（`ccp-main-N` / `ccp-<tier>-N`，可能带 `[1m]`），代理剥掉 `[1m]` 后查映射表替换成真实模型名，下个请求生效。映射表可经扩展编辑页或 `/api/model-alias` 接口在线改、热重载，不重启代理。见 §1.5 派生节点。
 - **跨平台**：`extensionKind: workspace`，WSL 里代理和 Claude Code 同 localhost。
@@ -154,7 +154,7 @@ Claude Code CLI 的模型配置有三套独立机制（`ANTHROPIC_MODEL` env / `
 | 命令 | 作用 |
 |---|---|
 | `New Derived Config` | 从 local 配置派生（申请编号 N + 开配置页） |
-| `Edit (Derived)` | 编辑派生节点四档映射 + 会话档位 |
+| `Edit (Derived)` | 编辑派生节点四档映射 + 每档 1m 上下文 |
 | `Launch Derived Claude` | 启动派生节点的隔离 CLI 会话 |
 | `Delete (Derived)` | 删派生节点 + 清代理映射表四条 + 关联活终端 |
 

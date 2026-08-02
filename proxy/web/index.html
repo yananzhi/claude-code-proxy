@@ -332,14 +332,10 @@
         <span class="hint" id="backoff-preview" style="font-family:ui-monospace,monospace"></span>
       </div>
       <div class="row">
-        <label>重试状态码</label>
-        <div class="chips" id="cfg-retryOnStatus"></div>
-        <input class="add-input" id="add-status" placeholder="+ 添加" />
-      </div>
-      <div class="row">
-        <label>body 错误码重试</label>
-        <div class="chips" id="cfg-retryOnBodyErrorCode"></div>
-        <input class="add-input" id="add-bodycode" placeholder="+ 添加" />
+        <label>重试规则</label>
+        <span class="hint">每条 = HTTP 状态码 + body 错误码；状态码填数字或 <code>*</code>（任意），body code 填数字或 <code>all</code>（任意）</span>
+        <div id="cfg-retryRules" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
+        <button class="secondary" type="button" onclick="addRetryRuleRow()" style="align-self:flex-start">+ 添加规则</button>
       </div>
       <div class="actions">
         <button class="primary" onclick="saveConfig()">保存并热重载</button>
@@ -526,8 +522,7 @@ async function loadConfig() {
     document.getElementById('cfg-timeoutSec').value = r.upstream.timeoutSec;
     document.getElementById('cfg-token').value = r.upstream.tokenMasked || '***';
     document.getElementById('cfg-token-hint').textContent = r.upstream.baseUrl ? '' : '尚未激活任何"通过代理"配置';
-    renderChips('cfg-retryOnStatus', p.retryOnStatus);
-    renderChips('cfg-retryOnBodyErrorCode', p.retryOnBodyErrorCode);
+    renderRetryRules(p.retryRules || []);
     updateBackoffPreview();
     // 日志目录
     await loadLogsDir();
@@ -668,6 +663,61 @@ function readChips(containerId) {
   return JSON.parse(document.getElementById(containerId).dataset.values || '[]');
 }
 
+// ── 重试规则表（status + code 组合）──
+// 每行两个 input（status / code）+ 删除按钮。空 status 行在 readRetryRules 时跳过。
+function renderRetryRules(rules) {
+  const c = document.getElementById('cfg-retryRules');
+  c.innerHTML = '';
+  rules.forEach((r) => c.appendChild(makeRetryRuleRow(r.status, r.code)));
+}
+function makeRetryRuleRow(status, code) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.style.cssText = 'gap:6px;align-items:center;margin:0';
+  const statusInput = document.createElement('input');
+  statusInput.className = 'add-input';
+  statusInput.placeholder = '状态码 或 *';
+  statusInput.value = status === undefined ? '' : String(status);
+  statusInput.style.cssText = 'width:90px';
+  const sep = document.createElement('span');
+  sep.textContent = '+';
+  sep.style.cssText = 'color:var(--muted)';
+  const codeInput = document.createElement('input');
+  codeInput.className = 'add-input';
+  codeInput.placeholder = 'body code 或 all';
+  codeInput.value = code === undefined ? '' : String(code);
+  codeInput.style.cssText = 'width:120px';
+  const del = document.createElement('button');
+  del.className = 'secondary';
+  del.textContent = '删除';
+  del.style.cssText = 'padding:2px 8px';
+  del.onclick = () => { row.remove(); };
+  row.appendChild(statusInput);
+  row.appendChild(sep);
+  row.appendChild(codeInput);
+  row.appendChild(del);
+  return row;
+}
+function addRetryRuleRow() {
+  document.getElementById('cfg-retryRules').appendChild(makeRetryRuleRow('', ''));
+}
+function readRetryRules() {
+  const c = document.getElementById('cfg-retryRules');
+  const rules = [];
+  c.querySelectorAll(':scope > .row').forEach((row) => {
+    const inputs = row.querySelectorAll('input');
+    const statusRaw = inputs[0].value.trim();
+    const codeRaw = inputs[1].value.trim();
+    if (!statusRaw && !codeRaw) return; // 空行跳过
+    // status：'*' 保留，否则转数字
+    const status = statusRaw === '*' ? '*' : Number(statusRaw);
+    // code：'all' 保留，否则转数字
+    const code = codeRaw === 'all' ? 'all' : Number(codeRaw);
+    rules.push({ status, code });
+  });
+  return rules;
+}
+
 function updateBackoffPreview() {
   const sec = Number(document.getElementById('cfg-backoffSec').value) || 0;
   const max = Number(document.getElementById('cfg-backoffMaxSec').value) || 0;
@@ -693,24 +743,8 @@ function fmtSec(s) {
   });
 });
 
-// 添加状态码
+// 重试规则表初始化：默认给一条空行方便添加
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('add-status').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && e.target.value.trim()) {
-      const arr = readChips('cfg-retryOnStatus');
-      arr.push(Number(e.target.value));
-      renderChips('cfg-retryOnStatus', arr);
-      e.target.value = '';
-    }
-  });
-  document.getElementById('add-bodycode').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && e.target.value.trim()) {
-      const arr = readChips('cfg-retryOnBodyErrorCode');
-      arr.push(Number(e.target.value));
-      renderChips('cfg-retryOnBodyErrorCode', arr);
-      e.target.value = '';
-    }
-  });
   // 成功命令统计：添加自定义时间窗口
   document.getElementById('add-stats-window').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -732,8 +766,7 @@ async function saveConfig() {
     maxAttempts: Number(document.getElementById('cfg-maxAttempts').value),
     backoffSec: Number(document.getElementById('cfg-backoffSec').value),
     backoffMaxSec: Number(document.getElementById('cfg-backoffMaxSec').value),
-    retryOnStatus: readChips('cfg-retryOnStatus'),
-    retryOnBodyErrorCode: readChips('cfg-retryOnBodyErrorCode'),
+    retryRules: readRetryRules(),
   };
   try {
     const r = await fetch('/api/config', {

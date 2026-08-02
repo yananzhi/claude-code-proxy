@@ -258,6 +258,17 @@ const server = http.createServer(async (req, res) => {
       );
       return;
 
+    case '429-auth':
+      // 讯飞网关瞬时鉴权失败：HTTP 429 + body {error:{code:11210,message:"authorization failed"}}
+      // （生产日志观察到的真实形态：429 但不是限流，是网关 authorization failed，无 Retry-After 头）。
+      // Claude Code 透传后用户直接看到报错；代理配 {429,11210} 规则后应缓冲重试。
+      res.writeHead(429, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        error: { code: 11210, message: 'authorization failed', type: 'invalid_request_error' },
+        id: `cht_mock_${reqCount}`, type: 'error',
+      }));
+      return;
+
     case '429':
     case '500':
     case '502':

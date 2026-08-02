@@ -5,7 +5,7 @@ import { LocalConfigStore } from './localConfigStore';
 import { detectPlatform, readSettings } from './claudeConfig';
 import { ProxyHost } from './proxyHost';
 import { extractUpstream } from './upstream';
-import { aggregateModelCatalog, aliasName, inheritSessionContext1m } from './derivedLogic';
+import { aggregateModelCatalog, aliasName, inheritSessionContext1m, normalizeSessionContext1m } from './derivedLogic';
 
 interface EditorHandlers {
     onSaved: () => void;
@@ -224,10 +224,10 @@ export class WebviewEditor {
             return;
         }
 
-        // 派生节点：改会话档位（[1m] 后缀）。档位变更需重启 CLI 生效（别名后缀变了），
-        // 此处只更新本地缓存 + 内存 cfg.sessionContext1m + 提示重启，不重渲染别名（重渲染需重建 webview）。
+        // 派生节点：改某档会话档位（[1m] 后缀）。档位变更需重启 CLI 生效（别名后缀变了），
+        // 此处只更新本地缓存 + 内存 cfg.sessionContext1m 的对应档 + 提示重启，不重渲染别名（重渲染需重建 webview）。
         if (msg.type === 'setCtx1m' && scope === 'derived' && derivedExtra) {
-            await this.handleSetCtx1m(panel, derivedExtra.cfg, msg.with1m, existingId);
+            await this.handleSetCtx1m(panel, derivedExtra.cfg, msg.tier, msg.with1m, existingId);
             return;
         }
 
@@ -367,10 +367,11 @@ export class WebviewEditor {
         // 无论是否 upsert，都更新内存 cfg.modelAliases 供后续 setAlias 基于最新值（避免连续改多档时丢档）
         cfg.modelAliases = { ...(cfg.modelAliases ?? {}), [tier]: model };
         this.handlers.refresh();
-        // 通用跨档位警告（约束 2/3）：改映射后提示用户若新模型与当前会话档位不同 contextWindow 档位会脱节。
+        // 通用跨档位警告（约束 2/3）：改映射后提示用户若新模型与该档会话档位不同 contextWindow 档位会脱节。
         // 代理侧看不到档位（被 CLI 剥了），无法精确判断，只能通用提示让用户担责。
         const tierLabel = tier === 'main' ? '主对话' : tier.charAt(0).toUpperCase() + tier.slice(1);
-        const ctxLabel = cfg.sessionContext1m === true ? '1M' : '200K';
+        const perTier = normalizeSessionContext1m(cfg.sessionContext1m);
+        const ctxLabel = perTier && perTier[tier] === true ? '1M' : '200K';
         panel.webview.postMessage({
             type: 'aliasSaved',
             tier,
@@ -379,19 +380,22 @@ export class WebviewEditor {
     }
 
     /**
-     * 处理 setCtx1m：改会话档位（[1m] 后缀，优化 2，约束 3）。
-     * 档位决定 CLI 按 200K 还是 1M 算 contextWindow，是别名后缀的一部分——改了需重启 CLI 生效
-     *（别名后缀变了，旧 CLI 进程仍按旧档位算）。此处只更新本地缓存 + 内存 cfg.sessionContext1m，
-     * 不重渲染别名显示（webview 已渲染的别名是旧后缀，重渲染需重建面板，代价大且非必要——
-     * 用户改完档位会重启 CLI，重开编辑器即显示新后缀）。
+     * 处理 setCtx1m：改某档会话档位（[1m] 后缀，优化 2，约束 3，per-tier）。
+     * 每档独立决定别名是否带 [1m]。改了该档需重启 CLI 生效（别名后缀变了，旧 CLI 进程仍按旧档位算）。
+     * 此处只更新本地缓存 + 内存 cfg.sessionContext1m 的对应档，不重渲染别名显示（重渲染需重建面板，
+     * 代价大且非必要——用户改完档位会重启 CLI，重开编辑器即显示新后缀）。
      */
     private async handleSetCtx1m(
         panel: vscode.WebviewPanel,
         cfg: LLMConfig,
+        tier: 'main' | 'haiku' | 'sonnet' | 'opus',
         with1m: boolean,
         existingId: string | undefined,
     ): Promise<void> {
-        cfg.sessionContext1m = with1m;
+        // 归一化后只改该档（防老布尔数据结构破坏其他档）
+        const perTier = normalizeSessionContext1m(cfg.sessionContext1m) ?? { main: false, haiku: false, sonnet: false, opus: false };
+        perTier[tier] = with1m;
+        cfg.sessionContext1m = perTier;
         const localStore = this.handlers.getLocalStore();
         if (localStore && existingId !== undefined) {
             const updated: LLMConfig = { ...cfg, updatedAt: new Date().toISOString() };
@@ -400,8 +404,9 @@ export class WebviewEditor {
         this.handlers.refresh();
         panel.webview.postMessage({
             type: 'ctx1mSaved',
+            tier,
             with1m,
-            message: `会话档位已改为 ${with1m ? '1M（别名带 [1m]）' : '标准 200K'}。需重启 CLI 生效（别名后缀变更，旧进程仍按旧档位算 contextWindow）。`,
+            message: `「${tier}」档会话档位已改为 ${with1m ? '1M（别名带 [1m]）' : '标准 200K'}。需重启 CLI 生效（别名后缀变更，旧进程仍按旧档位算 contextWindow）。`,
         });
     }
 
@@ -449,36 +454,36 @@ export class WebviewEditor {
             const idxValid = typeof rawIdx === 'number' && Number.isInteger(rawIdx) && rawIdx >= 1;
             const idx = idxValid ? rawIdx : 0;
             const idxLabel = idxValid ? `#${idx}` : '#?';
+            // per-tier 1m：四档各自独立决定别名是否带 [1m]。normalize 兼容老布尔数据。
+            const perTier = normalizeSessionContext1m(derivedExtra.cfg.sessionContext1m) ?? { main: false, haiku: false, sonnet: false, opus: false };
             const aliasFor = (tier: 'main' | 'haiku' | 'sonnet' | 'opus') =>
-                idxValid ? aliasName(tier, idx, with1m) : `ccp-${tier}-?`;
+                idxValid ? aliasName(tier, idx, perTier[tier] === true) : `ccp-${tier}-?`;
             const aliases = derivedExtra.cfg.modelAliases ?? {};
-            const with1m = derivedExtra.cfg.sessionContext1m === true;
             const catalogOpts = (['', ...derivedExtra.catalog])
                 .map(m => `<option value="${escapeHtml(m)}">${m ? escapeHtml(m) : '— 不设置（原样透传） —'}</option>`)
                 .join('');
             // main 档 hover 静态提示 /model 脱离风险（约束 6：感知不到 /model，只能静态提示）
             const mainHover = '主对话模型别名。仅当 CLI 内未用 /model 切换时生效——' +
                 '/model 改的模型会脱离本别名，代理替换对主对话不再生效（子 agent 三档仍受控）。';
-            // tierRow：label/别名只读/箭头/真实模型输入。main 行带 title hover + data-tier=main。
+            // tierRow：label/别名只读/箭头/真实模型输入 + per-档 200K/1M checkbox。
+            // checkbox name=ctx1m-<tier> 区分各档；checked=该档 1M。
+            // alias-name 带 data-tier/data-idx：前端 ctx1mSaved 收到后据此重算别名文本（加/去 [1m]），
+            // 无需重建整个 webview。
             const tierRow = (tier: 'main' | 'haiku' | 'sonnet' | 'opus', label: string, hover?: string) => {
                 const alias = aliasFor(tier);
                 const cur = aliases[tier] ?? '';
                 const titleAttr = hover ? ` title="${escapeHtml(hover)}"` : '';
+                const is1m = perTier[tier] === true;
                 return /* html */ `
     <div class="alias-row"${titleAttr}>
       <span class="alias-label">${label}</span>
-      <code class="alias-name">${escapeHtml(alias)}</code>
+      <code class="alias-name" data-tier="${tier}" data-idx="${idx}" data-valid="${idxValid ? '1' : '0'}">${escapeHtml(alias)}</code>
       <span class="alias-arrow">→</span>
       <input type="text" list="model-catalog" class="alias-model" data-tier="${tier}" value="${escapeHtml(cur)}" placeholder="真实模型名" />
+      <label class="ctx1m-tier" title="勾选=1M 上下文（别名带 [1m]，CLI 按 1M 算 contextWindow）；不勾=标准 200K"><input type="checkbox" name="ctx1m-${tier}" ${is1m ? 'checked' : ''} /> 1M</label>
     </div>`;
             };
             derivedBlock = /* html */ `
-  <div class="row">
-    <label>会话档位（contextWindow）</label>
-    <label style="font-weight:normal; margin-bottom:4px"><input type="radio" name="ctx1m" value="false" ${with1m ? '' : 'checked'} /> 标准 200K — 别名不带后缀</label>
-    <label style="font-weight:normal; margin-bottom:0"><input type="radio" name="ctx1m" value="true" ${with1m ? 'checked' : ''} /> 1M 上下文 — 别名带 [1m] 后缀（CLI 按此算 contextWindow）</label>
-    <div class="hint">决定 CLI 按 200K 还是 1M 算 contextWindow/autocompact。默认从父 ANTHROPIC_MODEL 是否带 [1m] 继承。改档位需重启 CLI 生效（别名后缀变了）。代理映射 key 不受影响（永远不带后缀）。</div>
-  </div>
   <div class="row">
     <label>模型别名映射（在线可改，下个请求生效）</label>
     <div class="hint">继承自: ${escapeHtml(derivedExtra.cfg.derivedFrom ?? '(未知)')} · 专属编号: ${idxLabel} · 别名: ${escapeHtml(aliasFor('main'))} / ${escapeHtml(aliasFor('haiku'))} / ${escapeHtml(aliasFor('sonnet'))} / ${escapeHtml(aliasFor('opus'))}</div>
@@ -487,7 +492,7 @@ export class WebviewEditor {
     ${tierRow('haiku', 'Haiku')}
     ${tierRow('sonnet', 'Sonnet')}
     ${tierRow('opus', 'Opus')}
-    <div class="hint">改下拉值会即时同步到代理映射表并刷新树，无需重启 CLI、无需关闭本面板。⚠ 若新模型与当前会话档位（${with1m ? '1M' : '200K'}）不同 contextWindow 档位，CLI 的 autocompact/上下文计数可能脱节，自行确认。</div>
+    <div class="hint">每档独立选 200K/1M：勾选 1M 的档别名带 [1m] 后缀，CLI 按该档的 contextWindow 算；点 1M 后别名会即时显示新后缀。Claude Code CLI 发请求时会剥离 [1m] 后缀——如 ccp-main-22[1m] 传到代理代码那里仍叫 ccp-main-22（不带后缀），故代理映射 key 永远不带后缀。改 1m 需重启 CLI 生效（别名后缀变了）；改映射值即时生效无需重启。⚠ 若某档模型与该档 1m 选择不匹配，CLI 的 autocompact/上下文计数可能脱节，自行确认。</div>
   </div>`;
             contentReadOnly = 'readonly';
             modeDisabled = 'disabled';
@@ -563,7 +568,7 @@ export class WebviewEditor {
   }
   .alias-row {
     display: grid;
-    grid-template-columns: 80px 160px 16px 1fr;
+    grid-template-columns: 80px 160px 16px 1fr auto;
     align-items: center;
     gap: 8px;
     margin: 6px 0;
@@ -578,6 +583,8 @@ export class WebviewEditor {
   }
   .alias-arrow { text-align: center; color: var(--vscode-descriptionForeground); }
   .alias-model { width: 100%; box-sizing: border-box; padding: 6px 8px; background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); color: var(--vscode-input-foreground); border-radius: 2px; font-size: 13px; }
+  .ctx1m-tier { font-size: 12px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  .ctx1m-tier input { margin-right: 3px; vertical-align: middle; }
   textarea[readonly] { opacity: 0.7; cursor: default; }
 </style>
 </head>
@@ -672,10 +679,11 @@ export class WebviewEditor {
       });
     });
 
-    // 派生节点：会话档位 radio 改动 → setCtx1m（需重启生效）
-    document.querySelectorAll('input[name="ctx1m"]').forEach(el => {
+    // 派生节点：每档会话档位 checkbox 改动 → setCtx1m（带 tier，需重启生效）
+    document.querySelectorAll('input[type="checkbox"][name^="ctx1m-"]').forEach(el => {
       el.addEventListener('change', () => {
-        vscode.postMessage({ type: 'setCtx1m', with1m: el.value === 'true' });
+        const tier = el.name.replace(/^ctx1m-/, '');
+        vscode.postMessage({ type: 'setCtx1m', tier, with1m: el.checked });
       });
     });
 
@@ -705,6 +713,18 @@ export class WebviewEditor {
       }
       else if (msg.type === 'ctx1mSaved') {
         errorEl.textContent = msg.message;
+        // 即时刷新该行只读别名文本（加/去 [1m]），无需重建 webview。
+        // 别名 = idxValid ? ccp-<tier>-<idx>[1m]? : ccp-<tier>-?（与 buildHtml aliasFor 一致）
+        // 注意：此段 JS 在 TS 模板字符串里，不能用 \${tier} 这种 JS 运行时插值（TS 会当 TS 插值解析），
+        // 故用字符串拼接构造别名文本。
+        var code = document.querySelector('code.alias-name[data-tier="' + msg.tier + '"]');
+        if (code) {
+          var tier = code.getAttribute('data-tier');
+          var idx = code.getAttribute('data-idx');
+          var valid = code.getAttribute('data-valid') === '1';
+          var suffix = msg.with1m ? '[1m]' : '';
+          code.textContent = valid ? ('ccp-' + tier + '-' + idx + suffix) : ('ccp-' + tier + '-?');
+        }
       }
       else if (msg.type === 'saved') { /* host will close panel */ }
     });
@@ -721,7 +741,7 @@ type WebviewMessage =
     | { type: 'save' | 'saveAndSwitch'; name: string; content: string; mode: 'direct' | 'proxy' }
     | { type: 'import'; id: string }
     | { type: 'setAlias'; tier: 'main' | 'haiku' | 'sonnet' | 'opus'; model: string }
-    | { type: 'setCtx1m'; with1m: boolean }
+    | { type: 'setCtx1m'; tier: 'main' | 'haiku' | 'sonnet' | 'opus'; with1m: boolean }
     | { type: 'cancel' };
 
 const TEMPLATE = `{

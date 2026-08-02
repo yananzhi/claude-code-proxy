@@ -17,6 +17,16 @@ export interface DerivedSnapshot {
     mode: ConfigMode;
 }
 
+/** 派生节点每档会话档位（per-tier contextWindow）。
+ *  true=该档别名带 [1m]、CLI 按 1M 算 contextWindow；false/undefined=标准 200K（约束 3）。
+ *  四档各自独立，默认从父 ANTHROPIC_MODEL 是否带 [1m] 继承（inheritSessionContext1m 返四档同值）。 */
+export interface PerTier1m {
+    main?: boolean;
+    haiku?: boolean;
+    sonnet?: boolean;
+    opus?: boolean;
+}
+
 export interface LLMConfig {
     /** Stable unique id (uuid-ish). */
     id: string;
@@ -35,9 +45,10 @@ export interface LLMConfig {
     derivedIndex?: number;
     /** 三档别名 → 真实模型（本地缓存，权威在代理）。 */
     modelAliases?: ModelAliasMapping;
-    /** 会话档位：true=别名带 [1m]、CLI 按 1M 算 contextWindow；false/undefined=标准 200K（优化 2，约束 3）。
-     *  默认从父 ANTHROPIC_MODEL 继承（inheritSessionContext1m）。 */
-    sessionContext1m?: boolean;
+    /** 每档会话档位（per-tier contextWindow）：true=该档别名带 [1m]、CLI 按 1M 算 contextWindow；
+     *  false/undefined=标准 200K（约束 3）。四档各自独立，默认从父 ANTHROPIC_MODEL 继承。
+     *  老数据可能是布尔（整体一个档位）→ 读取时 normalizeSessionContext1m 迁移成四档同值。 */
+    sessionContext1m?: PerTier1m;
     /** 父上游快照（防父被删/改导致继承断链）。 */
     derivedSnapshot?: DerivedSnapshot;
 }

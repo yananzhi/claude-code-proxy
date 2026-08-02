@@ -16,7 +16,12 @@ import {
     nextDerivedIndex,
     filterParentConfigs,
     inheritSessionContext1m,
+    normalizeSessionContext1m,
 } from '../../out/derivedLogic.js';
+
+// per-tier 1m 期望对象常量（inheritSessionContext1m 现返回 per-tier 对象，非布尔）
+const TIER_1M_ALL = { main: true, haiku: true, sonnet: true, opus: true };
+const TIER_200K_ALL = { main: false, haiku: false, sonnet: false, opus: false };
 
 // ── D1: aliasName 基本格式 ──
 test('1. aliasName 三档 × N=1 基本格式', () => {
@@ -739,46 +744,46 @@ test('M16. aggregateModelCatalog main 非字符串值 → 跳过', () => {
     assert.ok(!catalog.includes('999'));
 });
 
-// ── D3: inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] → true ──
-test('M17. inheritSessionContext1m 父带 [1m] → true', () => {
+// ── D3: inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] → 四档 true（per-tier，对象）──
+test('M17. inheritSessionContext1m 父带 [1m] → 四档 true', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2[1m]' } });
-    assert.equal(inheritSessionContext1m(content), true);
+    assert.deepEqual(inheritSessionContext1m(content), { main: true, haiku: true, sonnet: true, opus: true });
 });
 
-// ── D3: inheritSessionContext1m 父不带 [1m] → false ──
-test('M18. inheritSessionContext1m 父不带 [1m] → false', () => {
+// ── D3: inheritSessionContext1m 父不带 [1m] → 四档 false ──
+test('M18. inheritSessionContext1m 父不带 [1m] → 四档 false', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2' } });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), { main: false, haiku: false, sonnet: false, opus: false });
 });
 
-// ── D3: inheritSessionContext1m 父无 ANTHROPIC_MODEL → false（保守 200K）──
-test('M19. inheritSessionContext1m 父无 ANTHROPIC_MODEL → false', () => {
-    assert.equal(inheritSessionContext1m(JSON.stringify({ env: {} })), false);
-    assert.equal(inheritSessionContext1m(JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x' } })), false);
+// ── D3: inheritSessionContext1m 父无 ANTHROPIC_MODEL → 四档 false（保守 200K）──
+test('M19. inheritSessionContext1m 父无 ANTHROPIC_MODEL → 四档 false', () => {
+    assert.deepEqual(inheritSessionContext1m(JSON.stringify({ env: {} })), { main: false, haiku: false, sonnet: false, opus: false });
+    assert.deepEqual(inheritSessionContext1m(JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x' } })), { main: false, haiku: false, sonnet: false, opus: false });
 });
 
-// ── D3: inheritSessionContext1m 父 content 无效 JSON → false ──
-test('M20. inheritSessionContext1m 父 content 无效 JSON → false', () => {
-    assert.equal(inheritSessionContext1m('not-json'), false);
-    assert.equal(inheritSessionContext1m(''), false);
+// ── D3: inheritSessionContext1m 父 content 无效 JSON → 四档 false ──
+test('M20. inheritSessionContext1m 父 content 无效 JSON → 四档 false', () => {
+    assert.deepEqual(inheritSessionContext1m('not-json'), { main: false, haiku: false, sonnet: false, opus: false });
+    assert.deepEqual(inheritSessionContext1m(''), { main: false, haiku: false, sonnet: false, opus: false });
 });
 
-// ── D3 边界: inheritSessionContext1m 父 ANTHROPIC_MODEL 大写 [1M] → true（CLI /\[1m\]/i 识别）──
-test('M21. inheritSessionContext1m 父带大写 [1M] → true（大小写不敏感）', () => {
+// ── D3 边界: inheritSessionContext1m 父 ANTHROPIC_MODEL 大写 [1M] → 四档 true（CLI /\[1m\]/i 识别）──
+test('M21. inheritSessionContext1m 父带大写 [1M] → 四档 true（大小写不敏感）', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2[1M]' } });
-    assert.equal(inheritSessionContext1m(content), true);
+    assert.deepEqual(inheritSessionContext1m(content), { main: true, haiku: true, sonnet: true, opus: true });
 });
 
-// ── D3 边界: inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → false ──
-test('M22. inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → false', () => {
+// ── D3 边界: inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → 四档 false ──
+test('M22. inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → 四档 false', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 123 } });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), { main: false, haiku: false, sonnet: false, opus: false });
 });
 
 // ── D3 边界: inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [2m]（CLI 不识别）→ false ──
 test('M23. inheritSessionContext1m 父带 [2m]（CLI 不识别）→ false', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2[2m]' } });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_200K_ALL);
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -788,7 +793,7 @@ test('M23. inheritSessionContext1m 父带 [2m]（CLI 不识别）→ false', () 
 // ── R1 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false ──
 test('R1. inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: '' } });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_200K_ALL);
 });
 
 // ── R2 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false ──
@@ -796,7 +801,7 @@ test('R1. inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false', () => {
 // 但 /\[1m\]/i.test('   ') = false → 返回 false。应安全。
 test('R2. inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: '   ' } });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_200K_ALL);
 });
 
 // ── R3 (类别3 类型安全): inheritSessionContext1m 父 ANTHROPIC_MODEL 为 null ──
@@ -804,13 +809,13 @@ test('R2. inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false', (
 // 但 null 实际值是 null（typeof null === 'object'）。typeof m !== 'string' 守卫应捕获。
 test('R3. inheritSessionContext1m 父 ANTHROPIC_MODEL 为 null → false', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: null } });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_200K_ALL);
 });
 
 // ── R4 (类别3 类型安全): inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 ──
 test('R4. inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 → false', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: true } });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_200K_ALL);
 });
 
 // ── R5 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] 但中间穿插空格 ──
@@ -818,13 +823,13 @@ test('R4. inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 → false', () =
 // CLI has1mContext 也是 /\[1m\]/i 子串匹配，行为一致。非 bug，回归保护。
 test('R5. inheritSessionContext1m 父 [1m] 前有空格 → true（子串匹配，与 CLI 一致）', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2 [1m]' } });
-    assert.equal(inheritSessionContext1m(content), true);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_1M_ALL);
 });
 
 // ── R6 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] 多次出现 → true ──
 test('R6. inheritSessionContext1m 父 [1m] 多次出现 → true', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm[1m]-5.2[1m]' } });
-    assert.equal(inheritSessionContext1m(content), true);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_1M_ALL);
 });
 
 // ── R7 (类别3 类型安全): computeAliasSyncActions modelAliases.main 为数字 → 跳过 ──
@@ -905,27 +910,27 @@ test('R16. summarizeAliases 四档全配 → 顺序 M · S · H · O', () => {
 
 // ── R17 (类别1 边界): inheritSessionContext1m 父 content 为 null（JSON null）──
 test('R17. inheritSessionContext1m 父 content 为 JSON null → false', () => {
-    assert.equal(inheritSessionContext1m('null'), false);
+    assert.deepEqual(inheritSessionContext1m('null'), TIER_200K_ALL);
 });
 
 // ── R18 (类别1 边界): inheritSessionContext1m 父 content 为 JSON 数组 ──
 // 怀疑：JSON.parse('[1,2]') 成功，obj.env 是 undefined → (obj.env ?? {}) = {} → parsed 非 null
 // 但 parsed.env 是 {}，无 ANTHROPIC_MODEL → false。应安全。
 test('R18. inheritSessionContext1m 父 content 为 JSON 数组 → false', () => {
-    assert.equal(inheritSessionContext1m('[1,2,3]'), false);
+    assert.deepEqual(inheritSessionContext1m('[1,2,3]'), TIER_200K_ALL);
 });
 
 // ── R19 (类别1 边界): inheritSessionContext1m 父 env 里 ANTHROPIC_MODEL 带混合大小写 [1M]/[1m] ──
 test('R19. inheritSessionContext1m 父带 [1M] 大写 → true（大小写不敏感）', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'glm-5.2[1M]' } });
-    assert.equal(inheritSessionContext1m(content), true);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_1M_ALL);
 });
 
 // ── R20 (类别1 边界): inheritSessionContext1m 父 ANTHROPIC_MODEL 带 [1m] 但值是别名 ccp-main-1[1m] ──
 // 场景：父本身就是派生节点（content 含别名）。extractUpstream 解出别名串，[1m] 匹配 → true。
 test('R20. inheritSessionContext1m 父 ANTHROPIC_MODEL 是别名 ccp-main-1[1m] → true', () => {
     const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'ccp-main-1[1m]' } });
-    assert.equal(inheritSessionContext1m(content), true);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_1M_ALL);
 });
 
 // ── R21 (类别4 状态转换): computeAliasSyncActions main 档 model 带尾空格 + 代理表不一致 ──
@@ -994,13 +999,13 @@ test('R25. buildAliasEnv with1m=true → 四档都带 [1m]', () => {
 // → 123['ANTHROPIC_MODEL'] = undefined。typeof undefined !== 'string' → false。应安全。
 test('R26. inheritSessionContext1m 父 env 为数字 → false', () => {
     const content = JSON.stringify({ env: 123 });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_200K_ALL);
 });
 
 // ── R27 (类别1 边界): inheritSessionContext1m 父 env 为数组 ──
 test('R27. inheritSessionContext1m 父 env 为数组 → false', () => {
     const content = JSON.stringify({ env: [1, 2] });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_200K_ALL);
 });
 
 // ── R28 (类别1 边界): inheritSessionContext1m 父 env 为 null ──
@@ -1008,30 +1013,30 @@ test('R27. inheritSessionContext1m 父 env 为数组 → false', () => {
 // parsed.env.ANTHROPIC_MODEL = undefined → false。应安全。
 test('R28. inheritSessionContext1m 父 env 为 null → false', () => {
     const content = JSON.stringify({ env: null });
-    assert.equal(inheritSessionContext1m(content), false);
+    assert.deepEqual(inheritSessionContext1m(content), TIER_200K_ALL);
 });
 
 // ── R29 (类别2 异常路径): inheritSessionContext1m 传入 undefined（JS 运行时）──
 // 怀疑：extractUpstream(undefined) → JSON.parse(undefined) → 抛 → catch → null → false。
 // 虽 TS 签名是 string，但运行时可能传 undefined（父 content 缺失）。应不崩。
 test('R29. inheritSessionContext1m 传入 undefined → false（不崩）', () => {
-    assert.equal(inheritSessionContext1m(undefined), false);
+    assert.deepEqual(inheritSessionContext1m(undefined), TIER_200K_ALL);
 });
 
 // ── R30 (类别2 异常路径): inheritSessionContext1m 传入 null ──
 test('R30. inheritSessionContext1m 传入 null → false（不崩）', () => {
-    assert.equal(inheritSessionContext1m(null), false);
+    assert.deepEqual(inheritSessionContext1m(null), TIER_200K_ALL);
 });
 
 // ── R31 (类别2 异常路径): inheritSessionContext1m 传入数字 ──
 test('R31. inheritSessionContext1m 传入数字 → false（不崩）', () => {
-    assert.equal(inheritSessionContext1m(123), false);
+    assert.deepEqual(inheritSessionContext1m(123), TIER_200K_ALL);
 });
 
 // ── R32 (类别2 异常路径): inheritSessionContext1m 传入对象 ──
 // 怀疑：JSON.parse(object) → JSON.parse("[object Object]") → 抛 → null → false。
 test('R32. inheritSessionContext1m 传入对象 → false（不崩）', () => {
-    assert.equal(inheritSessionContext1m({ env: { ANTHROPIC_MODEL: 'x[1m]' } }), false);
+    assert.deepEqual(inheritSessionContext1m({ env: { ANTHROPIC_MODEL: 'x[1m]' } }), TIER_200K_ALL);
 });
 
 // ── R33 (类别1 边界): computeAliasSyncActions modelAliases 为 null ──
@@ -1190,4 +1195,123 @@ test('RV5. computeAliasSyncActions 代理表值带尾空格 → 多余 set（代
     // 这是已知行为（代理表权威不归一化），记录为"每次启动多余 set"的轻微低效
     // 翻转为回归用例：确认代理表值不 trim 比较（设计选择）
     assert.ok(r.toSet.length >= 1, '代理表值带尾空格时，派生节点 trim 后值不一致 → toSet 至少一条（设计选择：代理表权威不归一化）');
+});
+
+// ══════════════════════════════════════════════════════════════════
+// PT 系列：per-tier 1m（每档独立选 200K/1M，sessionContext1m 从布尔改对象）
+// ══════════════════════════════════════════════════════════════════
+// 背景：会话档位从"整配置一个布尔"改成"每档一个布尔"。
+// sessionContext1m: { main?: boolean; haiku?: boolean; sonnet?: boolean; opus?: boolean }
+// 每档独立决定别名是否带 [1m]。选 200K 的档别名不带后缀。
+
+// ── D2 per-档别名后缀：aliasName 已支持 per-call with1m ──
+test('PT1. aliasName 各档独立 with1m 后缀', () => {
+    assert.equal(aliasName('main', 1, true), 'ccp-main-1[1m]');
+    assert.equal(aliasName('haiku', 1, false), 'ccp-haiku-1');
+    assert.equal(aliasName('sonnet', 2, true), 'ccp-sonnet-2[1m]');
+    assert.equal(aliasName('opus', 3, false), 'ccp-opus-3');
+});
+
+// ── D5 buildAliasEnv 接 per-tier 对象：各档按自身 1m 决定后缀 ──
+test('PT2. buildAliasEnv opts.sessionContext1m 对象 → 各档独立后缀', () => {
+    const env = buildAliasEnv(1, { sessionContext1m: { main: true, haiku: false, sonnet: true, opus: false } });
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-1[1m]', 'main 1M → 带 [1m]');
+    assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-1', 'haiku 200K → 不带');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-1[1m]', 'sonnet 1M → 带');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'ccp-opus-1', 'opus 200K → 不带');
+});
+
+// ── D5 buildAliasEnv per-tier 部分档 undefined → 该档默认 200K ──
+test('PT3. buildAliasEnv sessionContext1m 部分档缺 → 缺的档默认 200K（不带后缀）', () => {
+    const env = buildAliasEnv(2, { sessionContext1m: { main: true } });
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-2[1m]');
+    assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-2', 'haiku 缺 → 200K');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-2', 'sonnet 缺 → 200K');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'ccp-opus-2', 'opus 缺 → 200K');
+});
+
+// ── D5 向后兼容：buildAliasEnv 仍接 { with1m: boolean }（四档同值）──
+test('PT4. buildAliasEnv opts.with1m 布尔（兼容）→ 四档同值', () => {
+    const env = buildAliasEnv(1, { with1m: true });
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-1[1m]');
+    assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-1[1m]');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-1[1m]');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'ccp-opus-1[1m]');
+});
+
+// ── D5 sessionContext1m 对象优先于 with1m（同时传时）──
+test('PT5. buildAliasEnv sessionContext1m 对象优先于 with1m', () => {
+    // 两者同传，对象优先
+    const env = buildAliasEnv(1, { with1m: true, sessionContext1m: { main: false, haiku: false, sonnet: false, opus: false } });
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-1', '对象优先 → main 200K');
+});
+
+// ── D5 类型安全：sessionContext1m 对象 value 非布尔（脏数据）→ 视为 false ──
+test('PT6. buildAliasEnv sessionContext1m value 非布尔 → 视为 false（200K）', () => {
+    const env = buildAliasEnv(1, { sessionContext1m: { main: 'yes', haiku: 1, sonnet: null, opus: undefined } });
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-1', '"yes" 非 strict true → 200K');
+    assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-1', '1 非 strict true → 200K');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-1', 'null → 200K');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'ccp-opus-1', 'undefined → 200K');
+});
+
+// ── D5 sessionContext1m 不是对象（脏数据 string/null/number）→ 四档全 200K ──
+test('PT7. buildAliasEnv sessionContext1m 非对象脏数据 → 四档 200K', () => {
+    for (const bad of ['true', null, 123, [true]]) {
+        const env = buildAliasEnv(1, { sessionContext1m: bad });
+        assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-1', `${JSON.stringify(bad)} → main 200K`);
+        assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-1');
+    }
+});
+
+// ── D4 inheritSessionContext1m 父带 [1m] → 四档都 true（对象）──
+test('PT8. inheritSessionContext1m 父带 [1m] → {四档:true}', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'claude-sonnet-5[1m]' } });
+    const r = inheritSessionContext1m(content);
+    assert.deepEqual(r, { main: true, haiku: true, sonnet: true, opus: true });
+});
+
+// ── D4 父不带 [1m] → 四档都 false ──
+test('PT9. inheritSessionContext1m 父不带 [1m] → {四档:false}', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'claude-sonnet-5' } });
+    const r = inheritSessionContext1m(content);
+    assert.deepEqual(r, { main: false, haiku: false, sonnet: false, opus: false });
+});
+
+// ── D4 父无 model / content 无效 → 四档都 false ──
+test('PT10. inheritSessionContext1m 父无 model / 无效 → {四档:false}', () => {
+    assert.deepEqual(inheritSessionContext1m(JSON.stringify({ env: {} })), { main: false, haiku: false, sonnet: false, opus: false });
+    assert.deepEqual(inheritSessionContext1m(JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x' } })), { main: false, haiku: false, sonnet: false, opus: false });
+    assert.deepEqual(inheritSessionContext1m('not json'), { main: false, haiku: false, sonnet: false, opus: false });
+    assert.deepEqual(inheritSessionContext1m(''), { main: false, haiku: false, sonnet: false, opus: false });
+});
+
+// ── D4 父带 [2m]（CLI 不认）→ 四档 false ──
+test('PT11. inheritSessionContext1m 父带 [2m] → 四档 false（CLI 只认 [1m]）', () => {
+    const content = JSON.stringify({ env: { ANTHROPIC_MODEL: 'claude-sonnet-5[2m]' } });
+    const r = inheritSessionContext1m(content);
+    assert.deepEqual(r, { main: false, haiku: false, sonnet: false, opus: false });
+});
+
+// ── D3 向后兼容：读取老派生节点 sessionContext1m 布尔 → 迁移成对象 ──
+// normalizeSessionContext1m：布尔 true → 四档 true；false → 四档 false；undefined → undefined；对象 → 原样
+test('PT12. normalizeSessionContext1m 布尔 true → 四档 true', () => {
+    assert.deepEqual(normalizeSessionContext1m(true), { main: true, haiku: true, sonnet: true, opus: true });
+});
+test('PT13. normalizeSessionContext1m 布尔 false → 四档 false', () => {
+    assert.deepEqual(normalizeSessionContext1m(false), { main: false, haiku: false, sonnet: false, opus: false });
+});
+test('PT14. normalizeSessionContext1m undefined → undefined（保持未填）', () => {
+    assert.equal(normalizeSessionContext1m(undefined), undefined);
+});
+test('PT15. normalizeSessionContext1m 对象 → 归一（非布尔 value 转 false）', () => {
+    assert.deepEqual(
+        normalizeSessionContext1m({ main: true, haiku: 'yes', sonnet: undefined, opus: false }),
+        { main: true, haiku: false, sonnet: false, opus: false },
+    );
+});
+test('PT16. normalizeSessionContext1m 非对象非布尔脏数据 → 四档 false', () => {
+    assert.deepEqual(normalizeSessionContext1m('true'), { main: false, haiku: false, sonnet: false, opus: false });
+    assert.deepEqual(normalizeSessionContext1m(null), { main: false, haiku: false, sonnet: false, opus: false });
+    assert.deepEqual(normalizeSessionContext1m(123), { main: false, haiku: false, sonnet: false, opus: false });
 });
