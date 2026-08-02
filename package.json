@@ -203,6 +203,11 @@
         "category": "Claude Code Proxy"
       },
       {
+        "command": "claude-code-proxy.probeSpawnServer",
+        "title": "LLM 代理: V1探针 spawn 独立 server 进程（临时验证用）",
+        "category": "Claude Code Proxy"
+      },
+      {
         "command": "claude-code-proxy.exportConfigs",
         "title": "Export Configs",
         "icon": "$(export)"
