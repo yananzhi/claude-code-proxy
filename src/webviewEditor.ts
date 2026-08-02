@@ -5,7 +5,7 @@ import { LocalConfigStore } from './localConfigStore';
 import { detectPlatform, readSettings } from './claudeConfig';
 import { ProxyHost } from './proxyHost';
 import { extractUpstream } from './upstream';
-import { aggregateModelCatalog, aliasName, inheritSessionContext1m, normalizeSessionContext1m } from './derivedLogic';
+import { aggregateModelCatalog, aliasName, inheritAliasesFromParent, inheritSessionContext1m, normalizeSessionContext1m } from './derivedLogic';
 
 interface EditorHandlers {
     onSaved: () => void;
@@ -87,8 +87,8 @@ export class WebviewEditor {
             );
         }
         // 三档映射默认继承父配置 content 里的 ANTHROPIC_DEFAULT_*_MODEL（父有则预填，§6.7 P3）
-        // main 档从父 ANTHROPIC_MODEL 继承（剥 [1m]，优化 2）
-        const inheritedAliases = this.inheritAliasesFromParent(parentCfg.content);
+        // 四档都剥 [1m] 后缀（约束 3：映射 value 是真实模型名；纯逻辑在 derivedLogic.inheritAliasesFromParent）
+        const inheritedAliases = inheritAliasesFromParent(parentCfg.content);
         // 会话档位默认从父 ANTHROPIC_MODEL 是否带 [1m] 继承（优化 2，约束 3）
         const inherited1m = inheritSessionContext1m(parentCfg.content);
         const cfg: LLMConfig = {
@@ -112,27 +112,6 @@ export class WebviewEditor {
         const catalog = await this.loadModelCatalog();
         await this.open(`edit:derived:${cfg.id}`, cfg.id, `Edit: ${cfg.name}`, cfg.name, cfg.content,
             'proxy', 'derived', [], { cfg, catalog });  // 派生节点强制 proxy 模式（V7）
-    }
-
-    /** 从父配置 content 解出四档默认映射（父有对应 env 则预填）。
-     *  派生节点新建时继承父的四档配置，省得用户每档重新填（§6.7 P3 + 优化 2 main 档）。
-     *  - main：从父 ANTHROPIC_MODEL 继承，剥掉 [1m] 后缀（映射 key 不带后缀，约束 3）。
-     *  - 三档：从父 ANTHROPIC_DEFAULT_*_MODEL 继承。 */
-    private inheritAliasesFromParent(parentContent: string): { main?: string; haiku?: string; sonnet?: string; opus?: string } {
-        const parsed = extractUpstream(parentContent);
-        if (!parsed) return {};
-        const env = parsed.env ?? {};
-        const aliases: { main?: string; haiku?: string; sonnet?: string; opus?: string } = {};
-        const m = env.ANTHROPIC_MODEL;
-        const h = env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-        const s = env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-        const o = env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-        // main 剥 [1m] 后缀：映射 key 不带后缀（约束 3，rewriteModel 剥后缀查表）
-        if (typeof m === 'string' && m) aliases.main = m.replace(/\[1m\]/gi, '').trim();
-        if (typeof h === 'string' && h) aliases.haiku = h;
-        if (typeof s === 'string' && s) aliases.sonnet = s;
-        if (typeof o === 'string' && o) aliases.opus = o;
-        return aliases;
     }
 
     /** 从父配置提取上游快照（§6.5 P1，防父删/改断链）。 */

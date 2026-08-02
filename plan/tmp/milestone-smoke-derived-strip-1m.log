@@ -1,0 +1,65 @@
+=== Smoke 验证归档 ===
+日期: 2026-08-02
+任务: 派生节点三档继承 [1m] 后缀剥离修复
+
+## 执行时间
+# duration_ms 163.3905
+
+## 各套件结果
+[derived-logic]
+# tests 153
+# pass 153
+# fail 0
+# skipped 0
+[mock-cli]
+# tests 11
+# pass 11
+# fail 0
+# skipped 0
+[proxy]
+# tests 140
+# pass 139
+# fail 0
+# skipped 1
+
+## 套件汇总
+- derived-logic: 153 pass / 0 fail / 0 skip（基线 136 + 本任务新增 17：IA1-IA9 + S1-S8）
+- mock-cli: 11 pass / 0 fail / 0 skip
+- proxy: 139 pass / 0 fail / 1 skip（skip 预先存在，基线一致）
+- 合计：303 pass / 0 fail / 1 skip
+
+## Flaky 注记
+- mock-cli 首次跑出现 `# pass 10`（11 中 1 未计 pass），重跑两次均 11/11 全绿。
+  mock-cli 跑真实 CLI 子进程，偶发慢致单例超时，非本任务引入。基线时亦 11/11。
+  判定：flaky（环境性超时），按 dev-with-tdd-review 规则豁免，已记录证据。
+
+## 子代理代码评审结论（Step 5）
+隔离上下文 sub-agent 评审，8 个怀疑点覆盖 6 类高风险：
+
+| 怀疑点 | 类别 | TDD 结论 |
+|---|---|---|
+| S1 env 非对象类型不崩 | 边界 | 非 bug → 翻转为回归用例 |
+| S2 值只含 [1m] 剥后空 | 边界 | 非 bug → 翻转为回归用例 |
+| S3 全角 [１ｍ] 不剥 | 边界 | 非 bug（与 CLI 一致）→ 翻转 |
+| S4 content 是 JSON 数组/原始值 | 异常路径 | 非 bug → 翻转 |
+| **S5 aggregateModelCatalog 重复候选** | **不一致** | **真 bug → 已修**（content 侧 env 值用 strip1mSuffix 剥 [1m]） |
+| S6 ctx1m+inherit+buildAliasEnv 链路一致 | 状态转换 | 非 bug → 翻转 |
+| S7 父 main 无[1m] 三档有[1m] | 状态转换 | 非 bug（inheritSessionContext1m 设计限制，只看 main）→ 翻转 |
+| S8 computeAliasSyncActions/setAlias 不剥 [1m] | 时序/一致性 | 真实缺陷但预先存在+交互层，用户决定不修（仅修继承 bug），留作遗留风险 |
+
+- 真 bug 修复：1（S5）
+- 非 bug 翻转为回归用例：7（S1-S4, S6-S8）
+- 新增测试用例：8（S1-S8）
+
+## 遗留风险（用户决定不修）
+S8: handleSetAlias（src/webviewEditor.ts:308-359）用户手输模型名路径不剥 [1m]。
+若用户在编辑器输入框复制粘贴带 [1m] 的模型名，脏值原样进代理表 + modelAliases，
+最终发上游 model not found。与继承路径（已剥）不一致。
+属交互层、非纯逻辑可单测。本次仅修继承路径，S8 留作后续。
+
+## 修改文件
+- src/derivedLogic.ts：新增 inheritAliasesFromParent（四档剥 [1m]）+ 模块私有 strip1mSuffix；
+  aggregateModelCatalog content 侧改用 strip1mSuffix（修 S5）。
+- src/webviewEditor.ts：openNewDerived 改调 inheritAliasesFromParent 纯函数，删原私有方法。
+- test/derived-logic/test.mjs：新增 IA1-IA9 + S1-S8 共 17 个用例。
+- plan/tmp/2026-08-02-derived-inherit-strip-1m.md：正交场景设计文档。

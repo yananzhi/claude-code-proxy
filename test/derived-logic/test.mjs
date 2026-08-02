@@ -17,6 +17,7 @@ import {
     filterParentConfigs,
     inheritSessionContext1m,
     normalizeSessionContext1m,
+    inheritAliasesFromParent,
 } from '../../out/derivedLogic.js';
 
 // per-tier 1m 期望对象常量（inheritSessionContext1m 现返回 per-tier 对象，非布尔）
@@ -1314,4 +1315,299 @@ test('PT16. normalizeSessionContext1m 非对象非布尔脏数据 → 四档 fal
     assert.deepEqual(normalizeSessionContext1m('true'), { main: false, haiku: false, sonnet: false, opus: false });
     assert.deepEqual(normalizeSessionContext1m(null), { main: false, haiku: false, sonnet: false, opus: false });
     assert.deepEqual(normalizeSessionContext1m(123), { main: false, haiku: false, sonnet: false, opus: false });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// inheritAliasesFromParent：派生节点新建时从父 content 继承四档映射，剥 [1m] 后缀。
+// Bug：原实现只剥 main 档，三档（haiku/sonnet/opus）漏剥 → value 带 [1m] → OCR 现象。
+// 维度覆盖见 plan/tmp/2026-08-02-derived-inherit-strip-1m.md（D1-D8）。
+// ════════════════════════════════════════════════════════════════════════
+
+// ── D1×D2: 四档都剥 [1m]（核心 bug 修复点：三档原本漏剥） ──
+test('IA1. inheritAliasesFromParent 四档都剥 [1m] 小写后缀', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 'xopglm52[1m]',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'xopglm52[1m]',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'xopglm52[1m]',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'xopglm52[1m]',
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    assert.equal(r.main, 'xopglm52');
+    assert.equal(r.haiku, 'xopglm52');   // bug 前：'xopglm52[1m]'
+    assert.equal(r.sonnet, 'xopglm52');  // bug 前：'xopglm52[1m]'
+    assert.equal(r.opus, 'xopglm52');    // bug 前：'xopglm52[1m]'
+});
+
+// ── D2 大小写不敏感：[1M] 大写也要剥（与 CLI has1mContext /\[1m\]/i 一致） ──
+test('IA2. inheritAliasesFromParent [1M] 大写后缀也剥（大小写不敏感）', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 'GLM[1M]',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'GLM[1M]',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'GLM[1M]',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'GLM[1M]',
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    assert.equal(r.main, 'GLM');
+    assert.equal(r.haiku, 'GLM');
+    assert.equal(r.sonnet, 'GLM');
+    assert.equal(r.opus, 'GLM');
+});
+
+// ── D2×D3 多次出现 + 任意位置：全局剥，不限末尾 ──
+test('IA3. inheritAliasesFromParent [1m] 多次出现/任意位置全剥', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 'a[1m]b[1m]',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: '[1m]haiku',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'sonnet[1m]tail',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'op[1m]us',
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    assert.equal(r.main, 'ab');
+    assert.equal(r.haiku, 'haiku');
+    assert.equal(r.sonnet, 'sonnettail');
+    assert.equal(r.opus, 'opus');
+});
+
+// ── D8 只剥 [1m]：[2m]/[500k] 等 CLI 不认的后缀原样保留（与 main 档一致） ──
+test('IA4. inheritAliasesFromParent [2m]/[500k] 等非 [1m] 后缀不剥', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 'glm[2m]',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm[500k]',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-sonnet',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm[1m][2m]', // 只剥 [1m]，留 [2m]
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    assert.equal(r.main, 'glm[2m]');
+    assert.equal(r.haiku, 'glm[500k]');
+    assert.equal(r.sonnet, 'glm-sonnet');
+    assert.equal(r.opus, 'glm[2m]'); // [1m] 剥掉，[2m] 留
+});
+
+// ── D4 父 content 非法 JSON → 返回 {}（与现状一致） ──
+test('IA5. inheritAliasesFromParent 非法 JSON content → {}', () => {
+    assert.deepEqual(inheritAliasesFromParent('not json'), {});
+    assert.deepEqual(inheritAliasesFromParent(''), {});
+});
+
+// ── D5 各档缺失：缺的档不进结果 ──
+test('IA6. inheritAliasesFromParent 部分档缺失 → 缺档不进结果', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 'glm[1m]',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'sonnet[1m]',
+            // haiku / opus 缺
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    assert.equal(r.main, 'glm');
+    assert.equal(r.sonnet, 'sonnet');
+    assert.equal(r.haiku, undefined);
+    assert.equal(r.opus, undefined);
+});
+
+// ── D6 值类型守卫：非字符串值不崩、视为缺失 ──
+test('IA7. inheritAliasesFromParent 非字符串 env 值不崩、视为缺失', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 12345,
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: { foo: 'bar' },
+            ANTHROPIC_DEFAULT_SONNET_MODEL: null,
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'opus[1m]',
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    assert.equal(r.main, undefined);
+    assert.equal(r.haiku, undefined);
+    assert.equal(r.sonnet, undefined);
+    assert.equal(r.opus, 'opus');
+});
+
+// ── D7 空白：剥后缀后 trim；纯空白视为未配 ──
+test('IA8. inheritAliasesFromParent 剥后缀后 trim，纯空白视为未配', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: '  glm[1m]  ',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: '[1m]   ',   // 剥后纯空白 → 不进结果
+            ANTHROPIC_DEFAULT_SONNET_MODEL: '   ',       // 纯空白 → 不进结果
+            ANTHROPIC_DEFAULT_OPUS_MODEL: ' opus [1m] ',
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    assert.equal(r.main, 'glm');
+    assert.equal(r.haiku, undefined);
+    assert.equal(r.sonnet, undefined);
+    assert.equal(r.opus, 'opus');
+});
+
+// ── D4 空 env → {} ──
+test('IA9. inheritAliasesFromParent content 无 env → {}', () => {
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify({ foo: 'bar' })), {});
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify({ env: {} })), {});
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// 代码评审 TDD：6 类高风险怀疑点（每类 ≥1 个），逐个 TDD 确认。
+// ════════════════════════════════════════════════════════════════════════
+
+// ── S1 边界条件：env 是数组/数字/字符串等非对象类型 ──
+// 怀疑：extractUpstream 的 `obj.env ?? {}` 只兜底 null/undefined，
+// 若 env 是数组/数字/字符串，env.ANTHROPIC_MODEL 取属性可能拿到意外值或崩。
+test('S1. inheritAliasesFromParent env 是数组/数字/字符串不崩', () => {
+    // env 是数组：数组无 ANTHROPIC_MODEL 属性 → 视为缺档 → {}
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify({ env: [] })), {});
+    // env 是数字
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify({ env: 123 })), {});
+    // env 是字符串
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify({ env: 'str' })), {});
+    // env 是 null（?? 兜底）
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify({ env: null })), {});
+});
+
+// ── S2 边界条件：模型名只含 [1m]（剥后空串）应视为未配 ──
+test('S2. inheritAliasesFromParent 值只含 [1m] 剥后空 → 视为未配', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: '[1m]',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: '[1M]',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: ' [1m] ',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: '[1m][1m]',
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    assert.equal(r.main, undefined);
+    assert.equal(r.haiku, undefined);
+    assert.equal(r.sonnet, undefined);
+    assert.equal(r.opus, undefined);
+});
+
+// ── S3 边界条件：[1m] 大小写混合如 [1m]/[1M]/[1m] 已覆盖，但 [1m] 中含全角字符不剥（与 CLI 一致） ──
+test('S3. inheritAliasesFromParent 全角 [１ｍ] 不剥（与 CLI has1mContext 一致）', () => {
+    const content = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 'glm［１ｍ］',  // 全角中括号+全角数字——不是 [1m]
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm[1ｍ]',  // 半角括号+全角 m
+        },
+    });
+    const r = inheritAliasesFromParent(content);
+    // 全角不是 ASCII [1m]，不剥（与 CLI /\[1m\]/i 一致，只匹配 ASCII）
+    assert.equal(r.main, 'glm［１ｍ］');
+    assert.equal(r.haiku, 'glm[1ｍ]');
+});
+
+// ── S4 异常路径：content 是 JSON 但顶层是数组/原始值（JSON.parse 不抛但非对象） ──
+test('S4. inheritAliasesFromParent content 是 JSON 数组/原始值 → {}', () => {
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify([1, 2, 3])), {});
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify('just a string')), {});
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify(42)), {});
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify(true)), {});
+    assert.deepEqual(inheritAliasesFromParent(JSON.stringify(null)), {});
+});
+
+// ── S5 状态转换/一致性：aggregateModelCatalog 父 content 带 [1m] + 派生 modelAliases 剥后 → 目录重复 ──
+// 怀疑：aggregateModelCatalog 从父 content 读 ANTHROPIC_MODEL 不剥 [1m]（得 'glm[1m]'），
+// 又从派生 modelAliases 读剥后的 'glm'，Set 里两个都进 → 下拉候选出现重复（一个带 [1m] 一个不带）。
+test('S5. aggregateModelCatalog 父 content 带 [1m] 与派生剥后值产生重复候选', () => {
+    const parentContent = JSON.stringify({
+        env: { ANTHROPIC_MODEL: 'glm[1m]', ANTHROPIC_SMALL_FAST_MODEL: 'fast[1m]' },
+    });
+    // 派生节点继承后 modelAliases 是剥后的 'glm'/'fast'
+    const derivedAliases = inheritAliasesFromParent(parentContent);
+    // 父配置 + 派生节点都在 configs 里
+    const configs = [
+        { content: parentContent, modelAliases: undefined },
+        { content: parentContent, modelAliases: derivedAliases },
+    ];
+    const catalog = aggregateModelCatalog(configs);
+    // 期望：目录应只有 'glm' 和 'fast'（剥后），不应同时出现 'glm[1m]' 和 'glm'
+    const hasStripped = catalog.includes('glm');
+    const hasWithSuffix = catalog.includes('glm[1m]');
+    // 若两者都在 → 重复候选 bug 存在
+    if (hasStripped && hasWithSuffix) {
+        assert.fail(`目录重复：同时含 'glm' 和 'glm[1m]'。catalog=${JSON.stringify(catalog)}`);
+    }
+});
+
+// ── S6 一致性：inheritSessionContext1m 与 inheritAliasesFromParent 协同 ──
+// 怀疑：父 ANTHROPIC_MODEL 带 [1m] → inheritSessionContext1m 四档 true（别名带 [1m]），
+// 同时 inheritAliasesFromParent 剥掉 value 的 [1m]。启动时 buildAliasEnv 生成带 [1m] 的别名，
+// 代理 rewriteModel 剥别名 [1m] 查表命中剥后的 value → 正确。验证这条链路一致。
+test('S6. inheritSessionContext1m + inheritAliasesFromParent + buildAliasEnv 链路一致', () => {
+    const parentContent = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 'glm[1m]',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm[1m]',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm[1m]',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm[1m]',
+        },
+    });
+    const ctx1m = inheritSessionContext1m(parentContent);
+    const aliases = inheritAliasesFromParent(parentContent);
+    // 四档都应是 true（父 main 带 [1m]）
+    assert.deepEqual(ctx1m, { main: true, haiku: true, sonnet: true, opus: true });
+    // 四档 value 都剥了
+    assert.equal(aliases.main, 'glm');
+    assert.equal(aliases.haiku, 'glm');
+    assert.equal(aliases.sonnet, 'glm');
+    assert.equal(aliases.opus, 'glm');
+    // buildAliasEnv 生成的别名带 [1m]（因 perTier 全 true）
+    const aliasEnv = buildAliasEnv(3, { sessionContext1m: ctx1m });
+    assert.equal(aliasEnv.ANTHROPIC_MODEL, 'ccp-main-3[1m]');
+    assert.equal(aliasEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-3[1m]');
+    // 代理 rewriteModel 会剥别名 [1m] 查表：ccp-main-3 → 'glm'（剥后 value），链路自洽
+});
+
+// ── S7 一致性：父三档带 [1m] 但 main 不带 → inheritSessionContext1m 全 false（只看 main），value 剥后缀 ──
+// 怀疑：父 main='glm'(无[1m]) 但 haiku='glm[1m]'，inheritSessionContext1m 看 main → 全 false（200K），
+// 但 inheritAliasesFromParent 剥掉 haiku 的 [1m]。结果：haiku 别名不带 [1m]（200K），
+// 但父 haiku 实际是 1M 模型。这是 inheritSessionContext1m 的设计限制（只看 main），不是本 PR bug。
+// 记录此行为作回归。
+test('S7. 父 main 无[1m] 但三档有[1m]：ctx1m 全 false（设计限制，非 bug）', () => {
+    const parentContent = JSON.stringify({
+        env: {
+            ANTHROPIC_MODEL: 'glm',
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm[1m]',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm[1m]',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm[1m]',
+        },
+    });
+    const ctx1m = inheritSessionContext1m(parentContent);
+    const aliases = inheritAliasesFromParent(parentContent);
+    // inheritSessionContext1m 只看 main，main 无 [1m] → 全 false
+    assert.deepEqual(ctx1m, { main: false, haiku: false, sonnet: false, opus: false });
+    // 但 value 仍剥 [1m]（四档统一剥）
+    assert.equal(aliases.main, 'glm');
+    assert.equal(aliases.haiku, 'glm');
+    assert.equal(aliases.sonnet, 'glm');
+    assert.equal(aliases.opus, 'glm');
+    // 别名不带 [1m]（perTier 全 false）——haiku 实际是 1M 但按 200K 算，设计限制
+    const aliasEnv = buildAliasEnv(1, { sessionContext1m: ctx1m });
+    assert.equal(aliasEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'ccp-haiku-1');  // 不带 [1m]
+});
+
+// ── S8 一致性：computeAliasSyncActions 不剥 [1m]（raw.trim() 原样） ──
+// 怀疑：若 modelAliases value 带 [1m]（如用户 setAlias 手输 'glm[1m]'，或老数据未剥），
+// computeAliasSyncActions 用 raw.trim() 原样设进代理表 → 代理 rewriteModel 剥别名 [1m] 查表命中
+// 'glm[1m]' value → 发 'glm[1m]' 给上游 → model not found。
+// 这是 setAlias 路径与 inheritAliasesFromParent 路径的剥后缀不一致。
+// 记录此行为：computeAliasSyncActions 不剥（设计如此——剥后缀责任在写入方 inheritAliasesFromParent），
+// 故 setAlias 路径若不剥会产生带后缀的脏值。本测试确认 computeAliasSyncActions 的原样透传行为。
+test('S8. computeAliasSyncActions 不剥 [1m]（raw.trim() 原样透传，剥后缀责任在写入方）', () => {
+    // modelAliases value 带 [1m]（模拟 setAlias 手输未剥的脏值）
+    const derived = { derivedIndex: 2, modelAliases: { haiku: 'glm[1m]' } };
+    const proxyAliases = {};
+    const actions = computeAliasSyncActions(derived, proxyAliases);
+    // computeAliasSyncActions 不剥 → toSet 的 model 带 [1m]
+    assert.equal(actions.toSet.length, 1);
+    assert.equal(actions.toSet[0].alias, 'ccp-haiku-2');
+    assert.equal(actions.toSet[0].model, 'glm[1m]');  // 原样，未剥
+    // 这意味着 setAlias 路径若不剥，脏值会进代理表 → 上游 model not found
+    // （inheritAliasesFromParent 出口已剥，故继承路径安全；setAlias 路径是独立风险点）
 });

@@ -98,6 +98,40 @@ export function inheritSessionContext1m(parentContent: string): PerTier1m {
 }
 
 /**
+ * 从父配置 content 解出派生节点新建时的四档默认映射（§6.7 P3 + 优化 2 main 档）。
+ * 派生节点新建时继承父的四档配置，省得用户每档重填。
+ *
+ * **四档都剥 `[1m]` 后缀**（约束 3：映射 value 是真实模型名，不带 `[1m]`）。
+ * `[1m]` 只是 CLI 侧 contextWindow 档位标记，不是模型名一部分；带后缀的真实模型名
+ * 发到上游会 model not found。main 档原本就剥，三档（haiku/sonnet/opus）历史上漏剥
+ * （bug：父 `ANTHROPIC_DEFAULT_*_MODEL` 带 `[1m]` 时原样继承进 `modelAliases` value）。
+ *
+ * - main：从父 `ANTHROPIC_MODEL` 继承，剥 `[1m]`。
+ * - 三档：从父 `ANTHROPIC_DEFAULT_*_MODEL` 继承，剥 `[1m]`。
+ * - 剥后缀用 `/\[1m\]/gi`（全局 + 大小写不敏感，与 main 档现状及 CLI `has1mContext` `/\[1m\]/i` 一致）。
+ * - `[2m]`/`[500k]` 等 CLI 不认的后缀不剥（只剥 `[1m]`）。
+ * - 非字符串值（extractUpstream 强转但实际可能是数字/对象）视为缺失，不崩。
+ * - 剥后 trim；trim 后空串视为未配，不进结果。
+ * - 父 content 非法 JSON / 无 env → `{}`。
+ */
+export function inheritAliasesFromParent(parentContent: string): { main?: string; haiku?: string; sonnet?: string; opus?: string } {
+    const parsed = extractUpstream(parentContent);
+    if (!parsed) return {};
+    const env = parsed.env ?? {};
+    const aliases: { main?: string; haiku?: string; sonnet?: string; opus?: string } = {};
+    // 统一剥 [1m]：四档同逻辑，用共享 strip1mSuffix（全局剥 + trim + 空串视为未配）。
+    const main = strip1mSuffix(env.ANTHROPIC_MODEL);
+    const haiku = strip1mSuffix(env.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+    const sonnet = strip1mSuffix(env.ANTHROPIC_DEFAULT_SONNET_MODEL);
+    const opus = strip1mSuffix(env.ANTHROPIC_DEFAULT_OPUS_MODEL);
+    if (main) aliases.main = main;
+    if (haiku) aliases.haiku = haiku;
+    if (sonnet) aliases.sonnet = sonnet;
+    if (opus) aliases.opus = opus;
+    return aliases;
+}
+
+/**
  * 归一化 sessionContext1m：把任意输入规整成合法 per-tier 对象（或 undefined）。
  * - undefined → undefined（保持未填，调用方会用继承初值）。
  * - 布尔 true → 四档 true；布尔 false → 四档 false（老派生节点数据迁移）。
@@ -230,9 +264,24 @@ export function computeAliasSyncActions(
 }
 
 /**
+ * 剥 [1m] 后缀（全局 + 大小写不敏感），剥后 trim，空串视为未配。
+ * 与 inheritAliasesFromParent / 代理 rewriteModel 剥离规则一致（约束 3：value 是真实模型名）。
+ * CLI 唯一识别的长度标记是 [1m]（has1mContext /\[1m\]/i），[2m]/[500k] 等不剥。
+ */
+function strip1mSuffix(v: unknown): string | undefined {
+    if (typeof v !== 'string' || !v) return undefined;
+    const stripped = v.replace(/\[1m\]/gi, '').trim();
+    return stripped || undefined;
+}
+
+/**
  * 从所有已存配置聚合去重模型清单（§6.7 P9，webview 三档下拉候选）。
  * 来源：每条配置 content 里的 ANTHROPIC_MODEL / ANTHROPIC_SMALL_FAST_MODEL，以及 derived 节点的 modelAliases 真实模型名。
  * 纯前端聚合，无需代理改动。空值/重复过滤。
+ *
+ * **剥 [1m] 后缀**（约束 3：候选是真实模型名，[1m] 只是 CLI contextWindow 标记不是模型名一部分）。
+ * content 侧 env 值可能带 [1m]（父配置原样存），modelAliases 侧已是剥后的（inheritAliasesFromParent 出口剥）。
+ * 不剥会导致同一模型在目录里同时出现 'glm' 和 'glm[1m]'（重复候选）。
  */
 export function aggregateModelCatalog(configs: Pick<LLMConfig, 'content' | 'modelAliases'>[]): string[] {
     const set = new Set<string>();
@@ -250,10 +299,10 @@ export function aggregateModelCatalog(configs: Pick<LLMConfig, 'content' | 'mode
             const parsed = extractUpstream(cfg.content);
             if (parsed) {
                 for (const key of ['ANTHROPIC_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL'] as const) {
-                    const m = parsed.env[key];
-                    // 类型守卫：extractUpstream 不保证 env 值是字符串（obj.env 强转），此处兜底
-                    if (typeof m === 'string' && m.trim()) {
-                        set.add(m.trim());
+                    // 剥 [1m]：content env 值可能带后缀，与 modelAliases 侧（已剥）统一，避免重复候选
+                    const m = strip1mSuffix(parsed.env[key]);
+                    if (m) {
+                        set.add(m);
                     }
                 }
             }
