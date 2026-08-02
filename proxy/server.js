@@ -46,8 +46,7 @@ function runtimeParams() {
     backoffSec: p.backoffSec,
     backoffMaxSec: p.backoffMaxSec,
     passthrough: p.passthrough,
-    retryOnStatus: p.retryOnStatus,
-    retryOnBodyErrorCode: p.retryOnBodyErrorCode,
+    retryRules: p.retryRules,
     upstreamTimeoutMs: env.upstreamTimeoutMs,
     upstream: env.upstream,
     upstreamBase: env.upstreamBase,
@@ -99,17 +98,26 @@ function rewriteEffort(body, effortLevel, reqId, contentType) {
 }
 
 // ── 响应首段 body 错误探测（流式版 inspectBody）────────────────
-// 作用在「已收到的部分 body」上，判是否为该重试的 body-error。
+// 作用在「已收到的部分 body」上 + 已知 status，判是否命中 retryRules 的某条规则。
 // 返回：
-//   'retryable'  — parse 成功且是 {type:error, error.code ∈ retryOnBodyErrorCode}，应丢弃重试
-//   'not-error'  — parse 成功但不是 retryable error 结构（正常 JSON 响应 / 非 retryable 错误）
+//   'retryable'  — 命中某条规则：status 匹配（含 '*' 通配）且 body code 满足规则 code 要求
+//                  （code='all' 不依赖 body；具体 code 需 parse 出 {type:error, error.code} 匹配）
+//   'not-error'  — parse 成功但不是命中的 error 结构（正常 JSON 响应 / 非规则 error）
 //   'incomplete' — 当前 buffer 还不是合法 JSON（成功 SSE 首 chunk 是 `event:...\ndata:...`，
 //                  parse 必然失败；或 error JSON 被切片尚未到齐）
 // 关键：成功响应（含 SSE）首 chunk 永远不是合法 JSON → 返回 incomplete → 调用方继续攒到上限
 // 后仍判不出 → 当成功转发。故成功响应绝不误判为错误。
+// code='all' 规则的特殊性：不依赖 body parse，只要 status 匹配就 retryable（哪怕 buf 为空）。
+// 这使"所有 503 都重试"在响应头一到即决断，不会因等 body 而被流式提前交付（修复核心 bug）。
 const FIRST_BODY_INSPECT_LIMIT = 8 * 1024; // 攒到 8KB 仍 parse 不出就当成功转发
-function inspectFirstBody(buf, retryOnBodyErrorCode) {
-  if (!retryOnBodyErrorCode || retryOnBodyErrorCode.length === 0) return 'not-error';
+function inspectFirstBody(buf, status, retryRules) {
+  if (!retryRules || retryRules.length === 0) return 'not-error';
+  // 先按 status 筛出可能命中的规则（status === '*' 通配任意）
+  const candidates = retryRules.filter((r) => r.status === '*' || r.status === status);
+  if (candidates.length === 0) return 'not-error';
+  // 含 code='all' 的规则 → 不依赖 body，直接 retryable（响应头即决断）
+  if (candidates.some((r) => r.code === 'all')) return 'retryable';
+  // 其余规则需 parse body 取 error.code 比对
   if (buf.length === 0) return 'incomplete';
   let parsed;
   try {
@@ -120,24 +128,46 @@ function inspectFirstBody(buf, retryOnBodyErrorCode) {
   if (!parsed || typeof parsed !== 'object') return 'not-error';
   if (parsed.type === 'error' && parsed.error) {
     const code = parsed.error.code;
-    if (code != null && retryOnBodyErrorCode.includes(Number(code))) return 'retryable';
+    if (code != null && candidates.some((r) => r.code === Number(code))) return 'retryable';
     return 'not-error';
   }
   return 'not-error';
 }
 
+// 命中规则的描述（供 trace verdict.reason 用），返回首条命中规则的 "status+code" 字符串。
+// 与 inspectFirstBody 同语义：先 status 筛，all 优先；否则 parse body 取 code。
+function describeHitRule(status, buf, retryRules) {
+  if (!retryRules || retryRules.length === 0) return null;
+  const candidates = retryRules.filter((r) => r.status === '*' || r.status === status);
+  if (candidates.length === 0) return null;
+  const allRule = candidates.find((r) => r.code === 'all');
+  if (allRule) return `rule ${allRule.status}+all`;
+  try {
+    const parsed = JSON.parse(buf.toString('utf8'));
+    if (parsed && parsed.type === 'error' && parsed.error) {
+      const code = parsed.error.code;
+      const hit = candidates.find((r) => r.code === Number(code));
+      if (hit) return `rule ${hit.status}+${hit.code}`;
+    }
+  } catch {}
+  return null;
+}
+
 // ── 转发一次请求到上游，成功响应即时流式回推客户端 ──────────────
-// 收到上游响应头 + 首个 data chunk 即决断：
-//   - 首段 body parse 出 retryable error（code ∈ retryOnBodyErrorCode）→ 不转发，
-//     全量缓冲返回（供上层丢弃 + 重试）。streamed: false。
-//   - 否则（parse 失败 = 成功 SSE 首 chunk 不是合法 JSON；或非 error 结构；
-//     或非 2xx 且不在 retryOnStatus）→ 立刻 writeHead + 把已攒 chunk flush 出去 +
+// 收到上游响应头 + 首个 data chunk 即按 retryRules 决断：
+//   - 命中 retryRules（status 匹配 + code 满足；code='all' 不依赖 body）→ 不转发，
+//     全量缓冲返回（供上层丢弃 + 重试）。streamed: false + bodyErrReason 标记命中规则。
+//   - 否则（未命中：parse 失败 = 成功 SSE 首 chunk 不是合法 JSON；或非 error 结构；
+//     或 status/code 不在规则里）→ 立刻 writeHead + 把已攒 chunk flush 出去 +
 //     后续边收边 write。streamed: true。
 // 关键不变量：成功响应（含 SSE）的首个 chunk 永远不是合法 JSON（是
 // `event: ...\ndata: ...`），parse 必然失败 → 必走转发分支，绝不误判成功为错误。
 // 实测（trace 日志）：讯飞 system-busy 错误 body 仅 ~132 字节、合法 JSON、必然落在
 // 首个 chunk，故首段判断充分；极罕见的 error JSON 被切片时攒够再判，仍判不出则当成功转发。
-function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, timeoutMs, upstream, token, clientRes, retryOnBodyErrorCode, retryOnStatus }) {
+// code='all' 规则不依赖 body parse：响应头一到（status 已知）即决断 retryable，
+// 哪怕 buf 为空。这使"所有 503 都重试"在 writeHead 之前决断，修复了旧 retryOnStatus
+// 因等 body 而被流式提前交付、verdict 阶段才判状态码（已不可回滚）的 bug。
+function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, timeoutMs, upstream, token, clientRes, retryRules }) {
   return new Promise((resolve) => {
     if (!upstream || !upstream.protocol) {
       detail(reqId, `attempt ${attempt} → NO UPSTREAM`, '代理尚未注入上游配置（请在 claude-code-proxy 激活一条"通过代理"配置）');
@@ -193,18 +223,19 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
         let firstChunkAt = null;
         const markFirstChunk = () => { if (firstChunkAt === null) firstChunkAt = new Date().toISOString(); };
 
-        // 在「还没开始转发」时，攒到的 chunk 试判 body-error。返回 true 表示已决断。
+        // 在「还没开始转发」时，攒到的 chunk 试判是否命中 retryRules。返回 true 表示已决断。
         const tryDecide = () => {
           if (mode !== 'pending') return;
           const buf = Buffer.concat(chunks);
-          // 只有当 status 本身就可重试（非 2xx 在 retryOnStatus，或 2xx 但可能 200-busy）
-          // 才需要 parse body 判错。但 200-busy 是 2xx + error，所以对 2xx 也得 parse。
-          // 简化：只要还 pending 且有 chunk，就试 parse 首段。
-          const inspected = inspectFirstBody(buf, retryOnBodyErrorCode);
+          // status 已知（响应头已到）。inspectFirstBody 先按 status 筛规则：
+          //   - code='all' 规则：不依赖 body，buf 为空也能判 retryable（响应头即决断）
+          //   - 具体 code 规则：parse body 取 error.code 比对
+          // 这使非 2xx 状态码规则在 writeHead 之前即决断，不会被流式提前交付（修复核心 bug）。
+          const inspected = inspectFirstBody(buf, status, retryRules);
           if (inspected === 'retryable') {
-            // 是 retryable body-error → 全量缓冲丢弃，不转发
+            // 命中规则 → 全量缓冲丢弃，不转发
             mode = 'buffer';
-            bodyErrReason = 'body error code in retryOnBodyErrorCode';
+            bodyErrReason = describeHitRule(status, buf, retryRules) || 'retry rule hit';
             return;
           }
           if (inspected === 'incomplete') {
@@ -234,8 +265,12 @@ function forwardStreaming({ method, path, reqHeaders, body, reqId, attempt, time
         });
         resp.on('end', () => {
           ended = true;
+          // 兜底决断：空 body 的非 2xx（如 503 Content-Length:0）data 事件不触发，
+          // tryDecide 从未被调用。但 code='all' 规则不依赖 body，本应响应头即决断重试。
+          // 故 end 时若仍 pending，用已攒的（可能为空）buffer 再试判一次，覆盖空 body + all 规则。
+          if (mode === 'pending') tryDecide();
           const wasPending = mode === 'pending';
-          // 仍 pending（上游 body 全到齐仍判不出，或空 body 200）→ 当成功转发。
+          // 仍 pending（上游 body 全到齐仍判不出，或空 body 200 且无 all 规则）→ 当成功转发。
           // 必须先 flush 攒到的 chunk 再 end，否则客户端只收到头、body 丢空。
           if (wasPending) {
             mode = 'stream';
@@ -327,8 +362,14 @@ async function readJsonBody(req) {
   }
 }
 function sendJson(res, status, obj) {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(obj));
+  // 必须显式写 Content-Length：不写时 Node http server 对 res.end(string) 会自动改用
+  // Transfer-Encoding: chunked 分块发送（HTTP/1.1 无 Content-Length 就得分块）。
+  // 扩展宿主（Electron）的 http 客户端不解码 chunked → data 事件不投递 → 客户端拿到 status 200 + 空 body
+  //（详见 CLAUDE.md「扩展宿主调本地 HTTP 服务的空 body 坑」，实测确认与 proxy-agent 无关，
+  //  真因是 chunked 未被客户端解码）。显式 Content-Length 让服务端发完整 body，客户端正常收。
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+  res.end(body);
 }
 
 const MIME = {
@@ -350,8 +391,10 @@ function serveStatic(req, res, urlPath) {
     return;
   }
   const mime = MIME[extname(abs).toLowerCase()] || 'application/octet-stream';
-  res.writeHead(200, { 'content-type': mime });
-  res.end(readFileSync(abs));
+  const data = readFileSync(abs);
+  // 显式 Content-Length（同 sendJson 理由：避免 chunked 被扩展宿主 http 客户端吞 body）
+  res.writeHead(200, { 'content-type': mime, 'content-length': data.length });
+  res.end(data);
 }
 
 async function handleApi(req, res, urlPath) {
@@ -564,7 +607,17 @@ function openInFileManager(dir) {
 
 // ── 请求处理（模块级，依赖 configStore/traceStore，由 startServer 先 init）──
 async function handleRequest(req, res) {
-  const urlPath = req.url.split('?')[0];
+  // 规范化 urlPath：用 URL 解析，丢弃可能的绝对路径前缀。
+  // VS Code 扩展宿主的 @vscode/proxy-agent 会劫持 http.get，把请求行改成绝对路径
+  // （GET http://127.0.0.1:11434/api/...），导致 req.url 是绝对路径、字面匹配失败、
+  // fall-through 到代理转发。用 new URL 规范化拿 pathname，免疫绝对路径。
+  let urlPath;
+  try {
+    const parsed = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+    urlPath = parsed.pathname;
+  } catch {
+    urlPath = req.url.split('?')[0];
+  }
 
   if (req.method === 'GET' && urlPath === '/healthz') {
     sendJson(res, 200, { ok: true, upstream: configStore.getEnv().upstreamBase, ts: nowIso() });
@@ -620,7 +673,7 @@ async function handleRequest(req, res) {
   const modelTag = (resolvedModel && resolvedModel !== reqModel) ? ` [model→${resolvedModel}]` : '';
 
   const params = runtimeParams();
-  const { maxAttempts, backoffSec, backoffMaxSec, passthrough, retryOnStatus, retryOnBodyErrorCode, upstreamTimeoutMs, upstream, upstreamBase, token } = params;
+  const { maxAttempts, backoffSec, backoffMaxSec, passthrough, retryRules, upstreamTimeoutMs, upstream, upstreamBase, token } = params;
   const modeTag = passthrough ? '透传' : '重试';
 
   concise(`REQ  #${id} ${req.method} ${req.url} (body ${body.length} bytes) from ${ip} [${modeTag}]${effortRewritten ? ` [effort→${effortLevel}]` : ''}${modelTag}`);
@@ -646,7 +699,7 @@ async function handleRequest(req, res) {
     attempt = 1;
     const attStart = nowIso();
     const attT0 = Date.now();
-    const r = await forwardStreaming({ method: req.method, path: req.url, reqHeaders: req.headers, body: outBody, reqId: id, attempt, timeoutMs: upstreamTimeoutMs, upstream, token, clientRes: res, retryOnBodyErrorCode, retryOnStatus });
+    const r = await forwardStreaming({ method: req.method, path: req.url, reqHeaders: req.headers, body: outBody, reqId: id, attempt, timeoutMs: upstreamTimeoutMs, upstream, token, clientRes: res, retryRules });
     const attMs = Date.now() - attT0;
     concise(`     #${id} attempt 1/1 → ${r.status || 'NETERR'} (${attMs}ms) [透传，不重试${r.streamed ? '，流式' : ''}]`);
     const firstChunkMs = r.firstChunkAt ? Date.parse(r.firstChunkAt) - attT0 : null;
@@ -656,7 +709,7 @@ async function handleRequest(req, res) {
     finalLastAttemptMs = attMs;
     if (r.status === 0) {
       const errBody = JSON.stringify({ type: 'error', error: { type: 'upstream_unreachable', message: `upstream ${upstreamBase ?? ''} unreachable (passthrough): ${r.networkError}` } });
-      res.writeHead(502, { 'content-type': 'application/json' });
+      res.writeHead(502, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(errBody) });
       res.end(errBody);
       finalDelivered = { status: 502, headers: { 'content-type': 'application/json' }, body: Buffer.from(errBody) };
       outcome = 'passed-to-client';
@@ -676,15 +729,15 @@ async function handleRequest(req, res) {
       attempt++;
       const attStart = nowIso();
       const attT0 = Date.now();
-      const r = await forwardStreaming({ method: req.method, path: req.url, reqHeaders: req.headers, body: outBody, reqId: id, attempt, timeoutMs: upstreamTimeoutMs, upstream, token, clientRes: res, retryOnBodyErrorCode, retryOnStatus });
+      const r = await forwardStreaming({ method: req.method, path: req.url, reqHeaders: req.headers, body: outBody, reqId: id, attempt, timeoutMs: upstreamTimeoutMs, upstream, token, clientRes: res, retryRules });
       const attMs = Date.now() - attT0;
       concise(`     #${id} attempt ${attempt}/${maxAttempts} → ${r.status || 'NETERR'} (${attMs}ms${r.networkError ? ` ${r.networkError}` : ''}${r.streamed ? ' [流式]' : ''})`);
 
       let verdict;
-      // 原则：代理只重试 Claude Code 处理不了的——
-      //   - body error.code ∈ retryOnBodyErrorCode（讯飞 system busy，典型 503+10310 或 200+10310）。
-      //     forwardStreaming 在首段 body 判出此类错误时缓冲不转发，streamed=false + bodyErrReason 标记。
-      //   - status ∈ retryOnStatus（如显式配 503 重试）。
+      // 原则：代理只重试 Claude Code 处理不了的——命中 retryRules 的响应。
+      //   forwardStreaming 在首段即按 retryRules 决断：命中 → 缓冲不转发（streamed=false +
+      //   bodyErrReason 标记命中规则）。code='all' 规则响应头一到即决断（不等 body），
+      //   故非 2xx 状态码规则不会被流式提前交付（修复了旧 retryOnStatus 被流式吞掉的 bug）。
       // 其余全部透传交给 Claude Code 自己处理：
       //   - 429/500/502/504 等：Claude Code 的 shouldRetry 会当 5xx/限流重试
       //   - 网络错误（超时/断连/流中断）：Claude Code 会当 APIConnectionError 重试
@@ -694,15 +747,14 @@ async function handleRequest(req, res) {
       if (r.status === 0) {
         verdict = { retryable: false, reason: `network error, pass to Claude Code (${r.networkError})` };
       } else if (r.streamed) {
-        // 已流式回推客户端（成功响应，或非 retryable 的非 2xx 透传）→ 终态，不再重试。
+        // 已流式回推客户端（成功响应，或未命中规则的非 2xx 透传）→ 终态，不再重试。
         verdict = null;
       } else if (r.bodyErrReason) {
-        // 缓冲未转发 + 判为 retryable body-error → 重试
+        // 缓冲未转发 + 命中 retryRules → 重试
         verdict = { retryable: true, reason: `${r.status} + ${r.bodyErrReason}` };
-      } else if (retryOnStatus.includes(r.status)) {
-        verdict = { retryable: true, reason: `status ${r.status} in retryOnStatus` };
       } else {
-        verdict = { retryable: false, reason: `status ${r.status} not in retryOnStatus` };
+        // 缓冲未转发但未命中规则（理论上不应到此：未命中必 streamed）→ 防御性透传
+        verdict = { retryable: false, reason: `status ${r.status} not hit any retry rule` };
       }
 
       detail(id, `attempt ${attempt}/${maxAttempts} → VERDICT`, [
@@ -755,7 +807,7 @@ async function handleRequest(req, res) {
       finalLastAttemptMs = attMs;
       if (r.status === 0) {
         const errBody = JSON.stringify({ type: 'error', error: { type: 'upstream_unreachable', message: `upstream ${upstreamBase ?? ''} unreachable (${r.networkError})` } });
-        res.writeHead(502, { 'content-type': 'application/json' });
+        res.writeHead(502, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(errBody) });
         res.end(errBody);
         finalDelivered = { status: 502, headers: { 'content-type': 'application/json' }, body: Buffer.from(errBody) };
         outcome = 'passed-to-client';
@@ -783,7 +835,7 @@ async function handleRequest(req, res) {
     responseBody: finalDelivered ? finalDelivered.body.toString('utf8') : '',
     responseHeaders: finalDelivered?.headers ?? {},
     attempts,
-    configSnapshot: { maxAttempts, backoffSec, backoffMaxSec, passthrough, retryOnStatus, retryOnBodyErrorCode },
+    configSnapshot: { maxAttempts, backoffSec, backoffMaxSec, passthrough, retryRules },
   });
 }
 
@@ -818,7 +870,7 @@ export async function startServer({ configPath, logsDir, logsConfigPath } = {}) 
       concise(`  upstream   : ${env0.upstreamBase} (${env0.upstream?.protocol === 'https:' ? 'https' : 'http'})`);
       concise(`  model      : ${env0.model ?? '(unset)'}`);
       concise(`  token      : ${maskValue(env0.token)}`);
-      concise(`  retry      : maxAttempts=${p.maxAttempts} backoffSec=${p.backoffSec} backoffMaxSec=${p.backoffMaxSec} onStatus=${JSON.stringify(p.retryOnStatus)} onBodyErrorCode=${JSON.stringify(p.retryOnBodyErrorCode)}`);
+      concise(`  retry      : maxAttempts=${p.maxAttempts} backoffSec=${p.backoffSec} backoffMaxSec=${p.backoffMaxSec} rules=${JSON.stringify(p.retryRules)}`);
       concise(`  mode       : ${p.passthrough ? '透传（不重试，原样转发）' : '拦截重试（流式转发 + 首段 body 判错）'}`);
       concise(`  timeout    : ${env0.upstreamTimeoutMs}ms`);
       concise(`  detail log : ${logsDir ?? '<default>'}  (时间均为中国时间 +08:00)`);

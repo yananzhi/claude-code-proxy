@@ -14,3 +14,8 @@ proxy/test/**
 .claude/**
 .claude_proxy/**
 docs/**
+test/**
+plan/**
+CHANGELOG.md
+proxy/.test-tmp/**
+.test-tmp/**

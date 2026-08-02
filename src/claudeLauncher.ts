@@ -6,6 +6,7 @@ import type { LocalConfigStore, LocalActiveStateStore } from './localConfigStore
 import { ProxyHost, UpstreamEnv } from './proxyHost';
 import { writeSettings } from './claudeConfig';
 import { extractUpstream, synthesizeProxySettings } from './upstream';
+import { resolveDerivedUpstream, computeAliasSyncActions, buildAliasEnv } from './derivedLogic';
 
 /** 官方 Claude Code 扩展 ID（publisher.name，不含版本号，升级后仍有效）。 */
 const OFFICIAL_EXTENSION_ID = 'anthropic.claude-code';
@@ -296,6 +297,195 @@ export class ClaudeLauncher {
             this.output.appendLine(`[launcher] 启动失败: ${msg}`);
             void vscode.window.showErrorMessage(`启动 workspace Claude 会话失败: ${msg}`);
         }
+    }
+
+    /**
+     * 启动派生节点绑定的 Claude 会话（§6.5 launchDerived）。
+     *
+     * 与 launch() 区别：跳过 localActiveState，直接用传入的 derivedCfg；继承父上游
+     * （快照优先）；三档别名走 shell env（冻结，§5.4）；BASE_URL/token 走 settings.env
+     * （沿用 synthesizeProxySettings，不降级安全，§6.6 P4）；启动前同步代理映射表（缺则补）。
+     *
+     * 终端 name 带 `#N` 标记，供 deleteDerivedConfig 匹配活终端（§6.8 P6）。
+     * 内部吞掉所有错误并 showErrorMessage，不向调用方抛。
+     */
+    async launchDerived(derivedCfg: LLMConfig): Promise<void> {
+        try {
+            if (!derivedCfg.derivedFrom) {
+                void vscode.window.showErrorMessage('该节点不是派生配置（缺少 derivedFrom）');
+                return;
+            }
+            if (derivedCfg.derivedIndex == null) {
+                void vscode.window.showErrorMessage('派生节点缺少专属编号，无法构造别名');
+                return;
+            }
+
+            const localStore = this.getLocalStore();
+            if (!localStore) {
+                void vscode.window.showErrorMessage('请先打开一个 workspace 文件夹');
+                return;
+            }
+
+            // a. 取父配置 + 解上游（快照优先）
+            const parentCfg = await localStore.get(derivedCfg.derivedFrom);
+            const upstream = resolveDerivedUpstream(derivedCfg, parentCfg ?? null);
+            if (!upstream) {
+                void vscode.window.showErrorMessage(
+                    `派生节点 '${derivedCfg.name}' 无法解析上游：父配置已删且无快照，或父 content 无效。` +
+                    `请在派生节点配置页重建，或手动指回有效父配置。`,
+                );
+                return;
+            }
+
+            if (!this.proxyHost) {
+                void vscode.window.showErrorMessage('代理尚未初始化');
+                return;
+            }
+
+            const port = this.proxyHost.getPort();
+
+            // b. 派生节点强制走代理（V7 修复）：别名 ccp-*-N 只有经代理才会被 rewriteModel 重写为
+            //    真实模型名。直连模式下别名原样打到上游 → 真实 LLM 不认识 → model not found。
+            //    故不论父 mode，launchDerived 一律 ensureRunning + 注入父上游 + BASE_URL 指代理。
+            //    direct 父的派生节点也经代理（代理 passthrough=false 时仍只重试 503+10310，
+            //    其余透传，行为近乎直连但多了别名重写这一层）。
+            await this.proxyHost.ensureRunning();
+            await this.proxyHost.setUpstream({
+                baseUrl: upstream.baseUrl,
+                token: upstream.token,
+                timeoutSec: upstream.timeoutSec,
+            } as UpstreamEnv);
+            // 上游一致性警告：代理上游全局共享 last-write-wins，并发不同上游会串味（§6.9 P5）
+            this.output.appendLine(
+                `[launcher] 派生节点 '${derivedCfg.name}' 已注入全局代理上游: ${upstream.baseUrl}。` +
+                `注意：代理进程全局共享，若并发的其它 proxy 会话用不同上游，会互相串味。`,
+            );
+
+            // c. 同步代理映射表：缺则补（§6.5 步骤6）。权威在代理，本地 modelAliases 只是缓存。
+            try {
+                const proxyAliases = await this.proxyHost.getModelAliases();
+                const actions = computeAliasSyncActions(derivedCfg, proxyAliases);
+                for (const a of actions.toSet) {
+                    await this.proxyHost.setModelAlias(a.alias, a.model);
+                }
+                if (actions.toSet.length > 0) {
+                    this.output.appendLine(`[launcher] 已补 ${actions.toSet.length} 条别名映射到代理表`);
+                }
+            } catch (err) {
+                // 同步失败不阻断启动——别名未补的档会原样透传（§3.6），用户可后续在配置页补
+                const msg = err instanceof Error ? err.message : String(err);
+                this.output.appendLine(`[launcher] 同步代理映射表失败（已忽略，继续启动）: ${msg}`);
+            }
+
+            // d. 合成 settings.json：BASE_URL 恒指代理（派生节点强制 proxy），token 走 settings.env，
+            //    三档别名走 shell env（不进 settings，§5.4 冻结前提）
+            const settingsContent = this.synthesizeDerivedSettings(derivedCfg, parentCfg, upstream, port);
+            if (settingsContent === null) {
+                void vscode.window.showErrorMessage(
+                    `派生节点 '${derivedCfg.name}' 无法合成 settings：父 content 不是有效 JSON。`,
+                );
+                return;
+            }
+
+            // e. workspace + 二进制 + 独立配置目录
+            const workspace = vscode.workspace.workspaceFolders?.[0];
+            if (!workspace) {
+                void vscode.window.showErrorMessage('请先打开一个 workspace 文件夹');
+                return;
+            }
+            const binaryPath = this.resolveBinaryPath();
+            if (!binaryPath) {
+                void vscode.window.showErrorMessage(
+                    '未找到 Claude Code CLI。请安装官方 Claude Code 扩展，或在设置 claude-code-proxy.claudeBinaryPath 中指定路径。',
+                );
+                return;
+            }
+            const workspaceRoot = workspace.uri.fsPath;
+            const configDir = path.join(workspaceRoot, WORKSPACE_CONFIG_DIR);
+            await this.ensureGitignore(workspaceRoot);
+            await fs.promises.mkdir(configDir, { recursive: true });
+            const settingsPath = path.join(configDir, 'settings.json');
+            await writeSettings(settingsPath, settingsContent);
+            await this.ensureProjectPermissions(workspaceRoot);
+            this.output.appendLine(`[launcher] 已写入派生节点 settings: ${settingsPath}`);
+
+            // f. 起终端：三档别名走 shell env（冻结），CLAUDE_CONFIG_DIR/CLAUDE_BIN 同 launch()
+            //    终端 name 带 #N 供 deleteDerivedConfig 匹配活终端
+            const isWin = process.platform === 'win32';
+            const idx = derivedCfg.derivedIndex;
+            // 别名是否带 [1m]：派生节点存了 sessionContext1m（per-tier 对象）则用之，
+            // 否则默认不带（200K，约束 3）。该标志决定 CLI 按 1M 还是 200K 算 contextWindow
+            //（[1m] 是 CLI 识别档位的唯一信号）。每档独立：main/haiku/sonnet/opus 各自决定后缀。
+            const aliasEnv = buildAliasEnv(idx, { sessionContext1m: derivedCfg.sessionContext1m });
+            const terminalOptions: vscode.TerminalOptions = {
+                name: `Claude Code #${idx} (${derivedCfg.name})`,
+                cwd: workspaceRoot,
+                env: {
+                    CLAUDE_CONFIG_DIR: configDir,
+                    CLAUDE_BIN: binaryPath,
+                    CCP_DERIVED_ID: String(idx),
+                    ...aliasEnv,
+                },
+            };
+            if (isWin) {
+                terminalOptions.shellPath = 'powershell.exe';
+            }
+            const terminal = vscode.window.createTerminal(terminalOptions);
+            terminal.show();
+            const invoke = isWin ? '& $env:CLAUDE_BIN' : '"$CLAUDE_BIN"';
+            terminal.sendText(invoke, true);
+
+            this.output.appendLine(
+                `[launcher] 已启动派生节点 Claude 会话: ${derivedCfg.name} #${idx} (mode=proxy·forced, aliases=${Object.values(aliasEnv).join(',')})`,
+            );
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.output.appendLine(`[launcher] 派生节点启动失败: ${msg}`);
+            void vscode.window.showErrorMessage(`派生节点启动失败: ${msg}`);
+        }
+    }
+
+    /**
+     * 合成派生节点的 settings.json 内容（§6.6）。
+     * - 以父 content 为基底（保留 permissions 等非 env 字段）。
+     * - 覆盖 env.ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN 为 resolveDerivedUpstream 的结果
+     *   （快照优先，故父 token 轮换不污染派生节点）。
+     * - BASE_URL 恒指代理 http://127.0.0.1:<port>（派生节点强制 proxy，V7 修复——
+     *   别名只有经代理 rewriteModel 才会被重写为真实模型名）。
+     * - **不写入三档别名**（别名走 shell env，settings.env 不含同名 key 是 §5.4 冻结前提）。
+     * - 父 content 无效 JSON 且无快照 → null（调用方报错）。
+     */
+    private synthesizeDerivedSettings(
+        derivedCfg: LLMConfig,
+        parentCfg: LLMConfig | undefined,
+        upstream: { baseUrl: string; token: string; timeoutSec?: number; mode: string },
+        port: number,
+    ): string | null {
+        // 优先用父 content 作基底；父缺/父 content 无效则从最小骨架起（upstream 已由 resolveDerivedUpstream
+        // 解析——快照存在时不依赖父 content，故父 content 无效不应阻断合成）。
+        let obj: Record<string, unknown>;
+        if (parentCfg) {
+            const parsed = extractUpstream(parentCfg.content);
+            obj = parsed ? parsed.obj : {};
+        } else {
+            obj = {};
+        }
+        const env = { ...((obj.env as Record<string, string> | undefined) ?? {}) };
+        env.ANTHROPIC_AUTH_TOKEN = upstream.token;
+        env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
+        if (upstream.timeoutSec != null) {
+            env.API_TIMEOUT_MS = String(Math.round(upstream.timeoutSec * 1000));
+        }
+        // 显式删除可能残留的别名 key（防父 content 恰好带同名 key 破坏 §5.4 冻结前提）。
+        // 四档别名均走 shell env（buildAliasEnv），settings.env 不能含同名 key，否则 shell env 被覆盖、
+        // 别名失效。ANTHROPIC_MODEL 尤其要删：父 content 的真名若留在 settings.env，会覆盖 shell env 的
+        // ccp-main-N 别名，导致主对话模型不经代理重写（约束 4/§5.4）。
+        delete env.ANTHROPIC_MODEL;
+        delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+        delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+        delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+        obj.env = env;
+        return JSON.stringify(obj, null, 2);
     }
 }
 

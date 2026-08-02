@@ -4,6 +4,7 @@ import { ConfigStore } from './configStore';
 import { ActiveStateStore } from './activeState';
 import { LocalConfigStore, LocalActiveStateStore } from './localConfigStore';
 import { detectPlatform, readSettings } from './claudeConfig';
+import { summarizeAliases, isOrphan, filterParentConfigs } from './derivedLogic';
 
 /** A row in the sidebar tree — info, group header, or a config (global/local). */
 export type ConfigNode = vscode.TreeItem;
@@ -26,6 +27,8 @@ export const CV_GROUP_GLOBAL = 'group-global';
 export const CV_GROUP_LOCAL = 'group-local';
 export const CV_CONFIG = 'config';
 export const CV_LOCAL_CONFIG = 'local-config';
+/** 派生节点（§6.3）。 */
+export const CV_DERIVED_CONFIG = 'derived-config';
 
 /** workspace_local_llm_config 分组节点的提示语。 */
 const LOCAL_GROUP_TOOLTIP =
@@ -100,10 +103,48 @@ export class ConfigTreeProvider implements vscode.TreeDataProvider<ConfigNode> {
             }
             const configs = await this.localStore.load();
             const activeConfigId = (await this.localActiveState.load())?.id;
+            // 派生节点（derivedFrom 非空）不作为普通 local 配置渲染——它们挂在父节点下或作孤儿。
+            // 否则会在 local 分组下出现重复项（派生节点既在父下、又作为普通 local 项）。
+            const parentConfigs = filterParentConfigs(configs);
             if (configs.length === 0) {
                 return [this.buildHintNode('no local configs — click + to create')];
             }
-            return configs.map(cfg => this.buildConfigNode(cfg, activeConfigId === cfg.id, true));
+            const configIds = new Set(configs.map(c => c.id));
+            // 并发查每条 local 配置的派生节点数，决定是否可展开
+            const withDerived = await Promise.all(
+                parentConfigs.map(async cfg => {
+                    const derived = await this.localStore!.getDerivedByParent(cfg.id);
+                    return { cfg, derivedCount: derived.length };
+                }),
+            );
+            const nodes = withDerived.map(({ cfg, derivedCount }) =>
+                this.buildConfigNode(cfg, activeConfigId === cfg.id, true, derivedCount),
+            );
+            // 孤儿派生节点（父配置已删）：直接挂在 local 组下，标 ⚠ 可删可重建（§6.3/§6.5 P1）。
+            // 否则它们无父可展开，会从树中消失，用户无法删/重建，违背"保留可删/可重建"设计。
+            const orphans = configs.filter(c => c.derivedFrom && !configIds.has(c.derivedFrom));
+            for (const orphan of orphans) {
+                nodes.push(this.buildDerivedNode(orphan, false));
+            }
+            return nodes;
+        }
+
+        // 展开 local-config 节点 → 返回其下派生节点（§6.3）
+        if (element.contextValue === CV_LOCAL_CONFIG) {
+            if (!this.localStore) {
+                return [];
+            }
+            const parentCfg = getConfigFromNode(element);
+            if (!parentCfg) {
+                return [];
+            }
+            const derived = await this.localStore.getDerivedByParent(parentCfg.id);
+            // 全部 local 配置用于孤儿判定（查父是否还在）
+            const allLocal = await this.localStore.load();
+            return derived.map(d => {
+                const parentExists = allLocal.some(c => c.id === d.derivedFrom);
+                return this.buildDerivedNode(d, parentExists);
+            });
         }
 
         return [];
@@ -141,8 +182,9 @@ export class ConfigTreeProvider implements vscode.TreeDataProvider<ConfigNode> {
 
     /**
      * @param isLocal true=workspace-local 配置（contextValue=local-config，单击走 switchLocalConfig）
+     * @param derivedCount 派生节点数（仅 local 有意义，>0 时父节点可展开）
      */
-    private buildConfigNode(cfg: LLMConfig, active: boolean, isLocal: boolean): ConfigNode {
+    private buildConfigNode(cfg: LLMConfig, active: boolean, isLocal: boolean, derivedCount = 0): ConfigNode {
         const mode: ConfigMode = cfg.mode === 'proxy' ? 'proxy' : 'direct';
         const modeLabel = mode === 'proxy' ? '代理' : '直连';
         const item = new vscode.TreeItem(cfg.name);
@@ -161,11 +203,51 @@ export class ConfigTreeProvider implements vscode.TreeDataProvider<ConfigNode> {
         const icon = mode === 'proxy' ? 'cloud' : (active ? 'circle-filled' : 'circle-outline');
         item.iconPath = new vscode.ThemeIcon(icon);
         item.contextValue = isLocal ? CV_LOCAL_CONFIG : CV_CONFIG;
-        item.collapsibleState = vscode.TreeItemCollapsibleState.None;
+        // local 配置有派生子节点时默认展开（让派生节点一进来就可见，不必手动点开）；global 永不展开
+        item.collapsibleState = isLocal && derivedCount > 0
+            ? vscode.TreeItemCollapsibleState.Expanded
+            : vscode.TreeItemCollapsibleState.None;
         itemToConfig.set(item, cfg);
         item.command = {
             command: isLocal ? 'claude-code-proxy.switchLocalConfig' : 'claude-code-proxy.switchConfig',
             title: 'Switch to This Config',
+            arguments: [cfg],
+        };
+        return item;
+    }
+
+    /**
+     * 构建派生节点（§6.3）。
+     * - description：映射摘要 `S:.. · H:.. · O:..`；孤儿前缀 ⚠。
+     * - 单击绑 launchDerivedClaude（非 switchLocalConfig）。
+     * - 孤儿（父已删）也建节点，但 description 标 ⚠，启动命令侧自行禁用/警告。
+     */
+    private buildDerivedNode(cfg: LLMConfig, parentExists: boolean): ConfigNode {
+        const orphan = isOrphan(cfg, parentExists ? { id: cfg.derivedFrom ?? '' } : null);
+        const summary = summarizeAliases(cfg.modelAliases);
+        const idxLabel = cfg.derivedIndex != null ? `#${cfg.derivedIndex}` : '#?';
+        const item = new vscode.TreeItem(`${orphan ? '⚠ ' : ''}${cfg.name} ${idxLabel}`);
+        const descParts: string[] = ['派生'];
+        if (summary) descParts.push(summary);
+        if (orphan) descParts.push('孤儿');
+        item.description = descParts.join(' · ');
+        const aliasStr = cfg.derivedIndex != null
+            ? `ccp-haiku-${cfg.derivedIndex} / ccp-sonnet-${cfg.derivedIndex} / ccp-opus-${cfg.derivedIndex}`
+            : '(编号缺失)';
+        item.tooltip = new vscode.MarkdownString(
+            `**${cfg.name}** ${idxLabel} (derived)${orphan ? ' — ⚠ 孤儿（父配置已删）' : ''}\n\n` +
+            `继承自: ${cfg.derivedFrom ?? '(未知)'}\n\n` +
+            `别名: ${aliasStr}\n\n` +
+            `映射: ${summary || '(未配置)'}\n\n` +
+            `Click to launch a Claude session bound to this node's aliases.`
+        );
+        item.iconPath = new vscode.ThemeIcon(orphan ? 'warning' : 'symbol-runtime');
+        item.contextValue = CV_DERIVED_CONFIG;
+        item.collapsibleState = vscode.TreeItemCollapsibleState.None;
+        itemToConfig.set(item, cfg);
+        item.command = {
+            command: 'claude-code-proxy.launchDerivedClaude',
+            title: 'Launch Derived Claude',
             arguments: [cfg],
         };
         return item;

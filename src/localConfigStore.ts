@@ -71,6 +71,14 @@ export class LocalConfigStore {
     async get(id: string): Promise<LLMConfig | undefined> {
         return (await this.load()).find(c => c.id === id);
     }
+
+    /** 取某父 local 配置下所有派生节点（§6.2）。按 derivedIndex 升序，便于树展示稳定。 */
+    async getDerivedByParent(parentId: string): Promise<LLMConfig[]> {
+        const configs = await this.load();
+        return configs
+            .filter(c => c.derivedFrom === parentId)
+            .sort((a, b) => (a.derivedIndex ?? 0) - (b.derivedIndex ?? 0));
+    }
 }
 
 /**

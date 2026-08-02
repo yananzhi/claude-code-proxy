@@ -1,10 +1,11 @@
 # Claude Code Proxy
 
-一个 VS Code 扩展，合三件事于一身：
+一个 VS Code 扩展，合四件事于一身：
 
 1. **管理 + 切换 Claude Code 配置**（原名 cc-switch，现 claude-code-proxy）：保存多条命名的 LLM 配置（每条是完整 `settings.json` 内容），点一下就切换；支持导入/导出。配置分两层——**global**（机器级，写 `~/.claude/settings.json`）和 **workspace-local**（workspace 级，只用于终端启动的隔离会话）。
-2. **本地 LLM 代理**（原 llmAutoRetry）：每条配置可选"直连"或"通过代理连接"。代理自动重试 Claude Code 处理不了的瞬时错误（如讯飞 503 system busy，code 10310），并提供 Web 控制台看重试参数 + trace 记录。
+2. **本地 LLM 代理**（原 llmAutoRetry）：每条配置可选"直连"或"通过代理连接"。代理按可配置组合规则（HTTP 状态码 + body 错误码）自动重试上游瞬时错误（如讯飞 503+10310 system busy、429+11210 authorization failed），并提供 Web 控制台看重试规则 + trace 记录。
 3. **Workspace 隔离的 Claude CLI 会话**：一个按钮 / 快捷键在终端打开 Claude Code CLI，用 `CLAUDE_CONFIG_DIR` 指向 `{workspace}/.claude_proxy/`，让该 workspace 的 Claude 状态独立于全局 `~/.claude/`。会话用当前 workspace-local active 配置。
+4. **运行时模型切换（派生节点 alias）**：从一条 local 配置派生出"虚拟配置节点"，给 CLI 配固定假模型名（别名 `ccp-main-N` / `ccp-haiku-N` / `ccp-sonnet-N` / `ccp-opus-N`），代理在请求层把别名实时替换成真实模型——不用重启 CLI 就能切模型。支持每档独立 `[1m]` 会话档位（1M contextWindow）、四档映射在线改、跨档位警告。
 
 ---
 
@@ -43,6 +44,41 @@
 
 ---
 
+## 1.5 派生节点 + 运行时模型切换（v1.2.0+）
+
+派生节点是从一条 **workspace-local** 配置派生出的"虚拟配置节点"，目的是**不重启 Claude Code CLI 就能切换真实模型**。
+
+### 为什么需要
+
+Claude Code CLI 的模型配置有三套独立机制（`ANTHROPIC_MODEL` env / `/model` 命令 / `ANTHROPIC_DEFAULT_*_MODEL`），启动后 session 内冻结，运行中改 settings 不换当前会话主模型。要"运行时切模型"，只能在**请求层**动手——给 CLI 配固定的假模型名（别名），代理拦截请求把别名替换成真实模型，映射表可在线热更新。这样切模型只需改代理映射表，下个请求就生效，不重启 CLI。
+
+### 怎么用
+
+1. 在一条 local 配置上点 `$(git-branch)`（派生）按钮，向代理申请一个全局唯一编号 N。
+2. 派生编辑器里配四档映射 + 每档 1m：
+   - **Main 档**（主对话模型，走 `ANTHROPIC_MODEL`）：别名 `ccp-main-N` → 真实模型。
+   - **Haiku / Sonnet / Opus 档**（子 agent alias，走 `ANTHROPIC_DEFAULT_*_MODEL`）：别名 `ccp-<tier>-N` → 真实模型。
+   - **每档 1m 上下文**：每个档位那一行各有"1M"checkbox，勾选的档别名带 `[1m]` 后缀（CLI 按 1M 算 contextWindow），不勾的标准 200K。四档各自独立。默认从父配置的 `ANTHROPIC_MODEL` 是否带 `[1m]` 继承。
+3. 四档映射默认从父配置继承；改任一档下拉值**即时同步到代理映射表**，刷新树，下个请求生效，无需重启 CLI、无需关闭编辑面板。
+4. 点 `Save & 启动` 启动该派生节点的隔离 CLI 会话（终端 name 带 `#N`）。
+
+派生节点**强制走代理**（别名只有经代理 `rewriteModel` 才会被重写为真实模型名；直连会把别名原样打到上游 → model not found）。继承父上游快照（防父删/改断链），BASE_URL/token 走 settings.env，别名走 shell env（session 内冻结）。
+
+### 硬约束（不可逾越）
+
+派生节点 / 模型别名机制受 Claude Code CLI 行为的物理约束，详见 `docs/model-aliasing-constraints.md`。关键几条：
+
+- **代理换 model 对 CLI contextWindow 决策零影响**（请求层 vs 决策层分离）：CLI 按**别名**算 contextWindow，代理在请求层换 model 只影响发往上游的请求。跨 contextWindow 档位切（200K↔1M）会脱节——只弹通用警告，不硬拦。
+- **`[1m]` 是 CLI 识别 contextWindow 档位的唯一信号**：别名带 `[1m]` → CLI 按 1M 算；不带 → 200K。代理映射表 key 一律不带后缀（CLI 发请求时剥掉 `[1m]`，代理剥后缀查表）。
+- **`/model` 命令脱离代理感知**：用户在 CLI 内用 `/model` 改的模型会脱离别名体系，代理替换对主对话失效（子 agent 三档仍受控）。代理/扩展侧运行时检测不到，只能编辑页 main 行 hover 静态提示。
+- **子 agent 三档别名稳定可追踪**：子 agent 不认 `/model`，代理能稳定识别 `ccp-haiku-N`/`ccp-sonnet-N`/`ccp-opus-N` 按 N 关联会话（trace 已记 `model` 原始别名 + `resolvedModel` 映射后真实模型）。
+
+### 树结构
+
+派生节点挂在父 local 配置下展开（`viewItem = derived-config`），description 显示四档摘要 `M:.. · S:.. · H:.. · O:..`。孤儿派生（父已删）标 ⚠ 禁启动。父删时弹确认是否级联删派生节点 + 清代理映射表四条。
+
+---
+
 ## 2. 本地 LLM 代理
 
 ### 工作机制
@@ -50,8 +86,9 @@
 - **进程内常驻**：代理跑在 VS Code 扩展宿主进程里，跟着 VS Code 生命周期。
 - **单例**：开多个 VS Code 窗口只有一个实际跑代理（靠端口 bind），其他窗口只心跳监听。
 - **2s 心跳接管**：宿主窗口关了导致代理停，其他窗口 2s 内接管拉起。
-- **精确重试**：代理只重试 Claude Code 处理不了的——`HTTP 503` + body `error.code === 10310`（讯飞 system busy）。其余全部透传交给 Claude Code 自己处理：429/500/502/504（CC 当 5xx 重试）、网络错误/超时/断连/流中断（CC 当 APIConnectionError 重试，代理合成 502 回客户端）。可在控制台调 `retryOnStatus`/`retryOnBodyErrorCode`。
+- **可配置重试规则**：代理按用户自定义的组合规则重试——每条规则 = `HTTP 状态码 + body 错误码`，状态码填数字或 `*`（任意状态码），body code 填数字或 `all`（任意 body code，响应头一到即决断重试）。默认 `503+10310` / `200+10310`（讯飞 system busy，含假成功 200+10310）；用户可在 Web 控制台自加如 `429+11210`（讯飞网关 authorization failed）或 `503+all`（所有 503 都重试）。命中规则的响应在 `writeHead` 前就缓冲丢弃重试，不流式交付给客户端；未命中的状态码（如普通 429/500/502/504）透传交给 Claude Code 自己处理。可在控制台调 `retryRules`。
 - **流式增量转发**（1.0.3+）：代理对上游响应（含 SSE）边收边转发给客户端，token 逐个到达，不再整体延迟到上游 `end`。body-error 重试仍生效——错误 body（实测 ~132 字节、合法 JSON、必在首个 chunk）在 `writeHead` 前就判出并丢弃重试；成功 SSE 首 chunk 非 JSON → 不误判、立即流式转发。
+- **模型别名重写**（1.2.0+，派生节点用）：代理对请求 body 的 `model` 字段做热替换——CLI 配的是固定别名（`ccp-main-N` / `ccp-<tier>-N`，可能带 `[1m]`），代理剥掉 `[1m]` 后查映射表替换成真实模型名，下个请求生效。映射表可经扩展编辑页或 `/api/model-alias` 接口在线改、热重载，不重启代理。见 §1.5 派生节点。
 - **跨平台**：`extensionKind: workspace`，WSL 里代理和 Claude Code 同 localhost。
 
 ### 端口（按平台分默认）
@@ -106,10 +143,20 @@
 | 命令 | 作用 |
 |---|---|
 | `Launch Workspace-Isolated Claude` | 终端启动 workspace 隔离 Claude（`Ctrl+Shift+Alt+C`） |
-| `LLM 代理: 打开控制台` | 打开 Web 控制台（重试参数 + Trace） |
+| `LLM 代理: 打开控制台` | 打开 Web 控制台（重试参数 + Trace + 别名映射表） |
 | `LLM 代理: 重启代理` | 关闭监听，宿主心跳 2s 内自动重起 |
 | `LLM 代理: 切换本窗口 backup proxy 开关` | 本窗口代理开关 |
+| `LLM 代理: 诊断 proxy-agent 劫持` | 一键诊断代理接口（验证裸 socket 读写全链路 + http 栈对照），输出到 output 面板 |
 | `Export Configs` / `Import Configs` | 导入/导出 **global** 配置 |
+
+派生节点命令（树视图按钮触发，不常从命令面板调）：
+
+| 命令 | 作用 |
+|---|---|
+| `New Derived Config` | 从 local 配置派生（申请编号 N + 开配置页） |
+| `Edit (Derived)` | 编辑派生节点四档映射 + 每档 1m 上下文 |
+| `Launch Derived Claude` | 启动派生节点的隔离 CLI 会话 |
+| `Delete (Derived)` | 删派生节点 + 清代理映射表四条 + 关联活终端 |
 
 ### Settings
 
@@ -124,10 +171,27 @@ global 切换会先备份原 `settings.json`，toast 提供 **Reload Window** / 
 
 ```bash
 npm install
-npm run compile        # 编译 TS
-node mock/test.mjs     # 代理重试逻辑测试（断言）
-node proxy/test/trace-store.test.mjs   # trace 存储写时分流测试
-npx @vscode/vsce package  # 打包 .vsix
+npx tsc -p ./                              # 编译 TS 到 out/（CommonJS）
+node --test proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/  # 全量测试
+npx @vscode/vsce package                  # 打包 .vsix
 ```
 
-代理核心在 `proxy/`（ESM JS，零依赖），扩展宿主用动态 `import()` 加载（详见 [docs/pitfall-esm-dynamic-import.md](docs/pitfall-esm-dynamic-import.md)）。TS 源在 `src/`，编译到 `out/`。
+### 模块结构
+
+- `src/`：VS Code 扩展 TS（编译到 `out/`，CommonJS）。
+  - `proxyHost.ts`：代理宿主（ESM `import` proxy/server.js 进扩展进程，非子进程）+ 调代理接口的 wrapper（统一裸 `net` socket `rawHttp`，绕过扩展宿主 http 栈对本地响应 body 的吞没，详见 CLAUDE.md「空 body 坑」）。
+  - `claudeLauncher.ts`：启动 workspace 隔离 CLI（`CLAUDE_CONFIG_DIR` + 别名走 shell env + token 走 settings.env）。
+  - `derivedLogic.ts`：派生节点纯逻辑（继承快照、别名 env 构造、映射表同步、档位继承），抽出独立可单测。
+  - `treeProvider.ts` / `webviewEditor.ts` / `localConfigStore.ts`：配置树 / 编辑器（含派生节点四档映射 UI）/ 存储。
+  - `types.ts`：`ModelAliasMapping`（四档 main/haiku/sonnet/opus）+ `LLMConfig`（派生节点字段 + `sessionContext1m` 档位）。
+- `proxy/`：本地 LLM 代理（ESM JS，不进 tsc）。
+  - `server.js`：转发主路径 + `rewriteModel`（别名替换，剥 `[1m]` 查表）+ `rewriteEffort` + API 接口（所有 `res.end` 出口显式 `Content-Length`）。
+  - `config-store.js`：配置读写 + 热重载 + modelAliases 映射表 + nextAliasId 计数器。
+  - `trace-store.js`：trace 写时分流（`model` 原始别名 + `resolvedModel` 映射后真实模型）。
+- `test/mock-cli/`：Claude Code CLI 配置加载层等价重实现（探针 + 假设验证，source of truth 是 CLI 源码）。
+- `test/derived-logic/`：派生节点纯逻辑单测。
+- `docs/`：设计文档与约束。
+  - `claude code cli运行时model切换方案.md`：运行时 model 切换主方案。
+  - `model-aliasing-constraints.md`：model aliasing 7 条硬约束（CLI 行为物理边界，改动必读）。
+
+代理核心零依赖，扩展宿主用动态 `import()` 加载（详见 [docs/pitfall-esm-dynamic-import.md](docs/pitfall-esm-dynamic-import.md)）。TS 源在 `src/`，编译到 `out/`。

@@ -1,8 +1,35 @@
+// ⚠️ 扩展宿主（Electron）的 http 栈对 127.0.0.1 响应 body 单向吞没——http.get/http.request/fetch
+// 的 data 事件不投递，直接 end，客户端拿 status 200 + 空 body（rawLen=0）。
+// 是 http 栈本身在扩展宿主里的行为，与 proxy-agent / chunked / Content-Length 均无关（都已诊断排除）：
+//  - 不是 proxy-agent（系统 HTTP_PROXY 全 unset、NO_PROXY 兜底无效、proxy-agent 无劫持条件）
+//  - 不是 chunked（服务端加 Content-Length 改发完整 body，http 栈仍吞 body）
+//  - 不是服务端没发（裸 socket 拿到完整 body）
+// 请求 body 不吞（上行正常），只有响应 body 被吞（单向）。命令行 node/curl 正常，只在扩展宿主复现。
+// 治本：调代理的 wrapper 一律用裸 net socket（rawHttp 方法），绕过 http 栈，稳定拿 body。
+// 新增 wrapper 照 rawHttp 模式写，不用 http.get/http.request/fetch。
+// 代理侧 sendJson 等 res.end 出口仍显式写 Content-Length（对非扩展宿主如 web UI/命令行规范，
+// 对扩展宿主虽无效但无害）。详见 CLAUDE.md「扩展宿主调本地 HTTP 服务的空 body 坑」。
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
+import * as net from 'net';
 import { ProxyToggleStore } from './proxyToggle';
+
+/** 解 HTTP chunked 编码：把 <size>\r\n<chunk>\r\n... 拼成连续 body。简单实现，够本地 API 用。 */
+function dechunk(raw: string): string {
+    let out = '';
+    let i = 0;
+    while (i < raw.length) {
+        const cr = raw.indexOf('\r\n', i);
+        if (cr < 0) break;
+        const size = parseInt(raw.slice(i, cr), 16);
+        if (!Number.isFinite(size) || size <= 0) break;
+        out += raw.slice(cr + 2, cr + 2 + size);
+        i = cr + 2 + size + 2; // 跳过 chunk + 尾 \r\n
+    }
+    return out;
+}
 
 const HEARTBEAT_MS = 2000;
 const HEALTH_TIMEOUT_MS = 500;
@@ -184,22 +211,10 @@ export class ProxyHost {
             return { ok: false, message: `代理未在运行（127.0.0.1:${port} 无监听），无需 kill` };
         }
         try {
-            await new Promise<void>((resolve, reject) => {
-                const req = http.request(
-                    `http://127.0.0.1:${port}/api/kill`,
-                    { method: 'POST', headers: { 'content-type': 'application/json' }, timeout: 3000 },
-                    (res) => {
-                        res.resume();
-                        res.on('end', () => {
-                            if (res.statusCode === 200) resolve();
-                            else reject(new Error(`代理返回 ${res.statusCode}`));
-                        });
-                    },
-                );
-                req.on('error', reject);
-                req.on('timeout', () => reject(new Error('kill 请求超时')));
-                req.end();
-            });
+            const { status } = await this.rawHttp('POST', '/api/kill');
+            if (status !== 200) {
+                throw new Error(`代理返回 ${status}`);
+            }
             return { ok: true, message: `已关闭代理监听，宿主窗口心跳将在 2s 内自动重起` };
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -209,7 +224,6 @@ export class ProxyHost {
 
     /** 把上游配置注入运行中的代理（POST /api/upstream） */
     async setUpstream(env: UpstreamEnv): Promise<void> {
-        const port = this.getPort();
         const body = JSON.stringify({
             upstream: {
                 baseUrl: env.baseUrl,
@@ -219,23 +233,257 @@ export class ProxyHost {
                 timeoutSec: env.timeoutSec ?? 600,
             },
         });
-        await new Promise<void>((resolve, reject) => {
-            const req = http.request(
-                `http://127.0.0.1:${port}/api/upstream`,
-                { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeout: 3000 },
-                (res) => {
-                    res.resume();
-                    res.on('end', () => {
-                        if (res.statusCode === 200) resolve();
-                        else reject(new Error(`代理返回 ${res.statusCode}`));
-                    });
-                },
-            );
-            req.on('error', reject);
-            req.on('timeout', () => reject(new Error('注入上游超时（代理未运行？）')));
+        const { status } = await this.rawHttp('POST', '/api/upstream', body);
+        if (status !== 200) {
+            throw new Error(`代理返回 ${status}`);
+        }
+        this.log(`已注入上游: ${env.baseUrl} model=${env.model ?? '(unset)'}`);
+    }
+
+    /** 设置/更新一条别名映射（POST /api/model-alias）。照 setUpstream 模板。 */
+    async setModelAlias(alias: string, model: string): Promise<void> {
+        await this.postJson('/api/model-alias', { alias, model });
+        this.log(`已设置别名映射: ${alias} → ${model}`);
+    }
+
+    /** 删除一条别名映射（POST /api/model-alias/delete）。 */
+    async removeModelAlias(alias: string): Promise<void> {
+        await this.postJson('/api/model-alias/delete', { alias });
+        this.log(`已删除别名映射: ${alias}`);
+    }
+
+    /** 向代理申请下一个全局唯一编号 N（GET /api/model-alias/next-id）。 */
+    async nextAliasId(): Promise<number> {
+        const { status, body } = await this.rawHttp('GET', '/api/model-alias/next-id');
+        if (status !== 200) {
+            throw new Error(`代理返回 ${status}`);
+        }
+        try {
+            const obj = JSON.parse(body) as { id: number };
+            if (typeof obj.id !== 'number' || !Number.isFinite(obj.id)) {
+                throw new Error(`代理返回的 id 非数字: ${body}`);
+            }
+            return obj.id;
+        } catch (e) {
+            this.log(`nextAliasId: 解析失败 body=${JSON.stringify(body.slice(0, 200))} err=${(e as Error).message}`);
+            throw new Error(`解析 next-id 响应失败: ${(e as Error).message}`);
+        }
+    }
+
+    /**
+     * 诊断探针（临时，验证 proxy-agent 劫持假设用）：用 http.get 调本地代理指定路径，
+     * 返回完整证据（status/headers/rawLen/raw 前若干字节/err），**不**做任何兜底解析。
+     *
+     * 关键：opts.withNoProxy 控制调用前是否临时清掉 NO_PROXY/no_proxy env，用于孤立
+     * "NO_PROXY 是否在兜底"这一变量。清掉后恢复原值，避免污染后续请求。
+     *
+     * 用 http.get（被测对象）而非裸 socket——目的就是观测 proxy-agent 对 http 栈的实际影响。
+     */
+    async diagHttpGet(path: string, opts: { withNoProxy: boolean }): Promise<string> {
+        const port = this.getPort();
+        const savedNoProxy = process.env.NO_PROXY;
+        const savedNo_proxy = process.env.no_proxy;
+        if (!opts.withNoProxy) {
+            // 模拟"无 NO_PROXY 兜底"：临时删除本地回环绕过，让 proxy-agent 按系统代理处理
+            delete process.env.NO_PROXY;
+            delete process.env.no_proxy;
+        }
+        const envSnapshot = {
+            HTTP_PROXY: process.env.HTTP_PROXY ?? '(unset)',
+            HTTPS_PROXY: process.env.HTTPS_PROXY ?? '(unset)',
+            NO_PROXY: process.env.NO_PROXY ?? '(unset)',
+            no_proxy: process.env.no_proxy ?? '(unset)',
+        };
+        return new Promise<string>((resolve) => {
+            const tryFinish = (label: string, payload: Record<string, unknown>) => {
+                // 恢复 env，避免污染后续请求
+                process.env.NO_PROXY = savedNoProxy;
+                process.env.no_proxy = savedNo_proxy;
+                resolve(JSON.stringify({ label, path, withNoProxy: opts.withNoProxy, env: envSnapshot, ...payload }));
+            };
+            let raw = '';
+            let req: http.ClientRequest;
+            try {
+                req = http.get(
+                    `http://127.0.0.1:${port}${path}`,
+                    { timeout: 3000 },
+                    (res) => {
+                        res.setEncoding('utf8');
+                        res.on('data', (chunk: string) => { raw += chunk; });
+                        res.on('end', () => {
+                            tryFinish('ok', {
+                                status: res.statusCode,
+                                headers: res.headers,
+                                rawLen: raw.length,
+                                rawHead: raw.slice(0, 200),
+                            });
+                        });
+                    },
+                );
+            } catch (e) {
+                tryFinish('throw', { err: (e as Error).message });
+                return;
+            }
+            req.on('error', (e) => {
+                tryFinish('error', { err: e.message, rawLen: raw.length, rawHead: raw.slice(0, 200) });
+            });
+            req.on('timeout', () => { req.destroy(); tryFinish('timeout', { rawLen: raw.length }); });
+        });
+    }
+
+    /**
+     * 诊断探针 2：用裸 net socket GET 同一个路径，拿到原始字节流（含 chunked 编码字节），
+     * 手动 dechunk 后得到明文 body。对照 diagHttpGet——若裸 socket 拿到完整 body 而 http.get 拿空，
+     * 则证明服务端 body 完整、是 http 客户端吞了 chunked body，而非服务端没发。
+     */
+    async diagRawSocketGet(path: string): Promise<string> {
+        const port = this.getPort();
+        return new Promise<string>((resolve) => {
+            const sock = net.connect(port, '127.0.0.1', () => {
+                sock.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
+            });
+            let buf = Buffer.alloc(0);
+            sock.on('data', (chunk) => { buf = Buffer.concat([buf, chunk]); });
+            sock.on('end', () => {
+                const text = buf.toString('utf8');
+                const sep = text.indexOf('\r\n\r\n');
+                if (sep < 0) { resolve(JSON.stringify({ label: 'nosep', rawTextHead: text.slice(0, 300) })); return; }
+                const statusLine = text.slice(0, text.indexOf('\r\n'));
+                const status = Number(statusLine.split(' ')[1]);
+                const headerBlock = text.slice(0, sep);
+                const bodyRaw = text.slice(sep + 4);
+                const isChunked = /transfer-encoding:\s*chunked/i.test(headerBlock);
+                const body = isChunked ? dechunk(bodyRaw) : bodyRaw;
+                resolve(JSON.stringify({
+                    label: 'ok',
+                    path,
+                    via: 'raw-socket',
+                    status,
+                    isChunked,
+                    rawBytesLen: bodyRaw.length,
+                    decodedLen: body.length,
+                    decodedHead: body.slice(0, 200),
+                }));
+            });
+            sock.on('error', (e) => { resolve(JSON.stringify({ label: 'error', err: e.message })); });
+            sock.setTimeout(3000, () => { sock.destroy(); resolve(JSON.stringify({ label: 'timeout' })); });
+        });
+    }
+
+    /**
+     * 诊断探针 3：用 http.request POST 一个测试映射，观测响应（status/headers/rawLen）。
+     * 目的：验证 POST 响应是否同样被吞 body，以及请求 body 是否送达（靠探针 4 读回验证）。
+     * 用 http.request（被测对象），不用 postJson wrapper（那是它要验证的）。
+     */
+    async diagHttpPost(path: string, bodyObj: unknown): Promise<string> {
+        const port = this.getPort();
+        const body = JSON.stringify(bodyObj);
+        return new Promise<string>((resolve) => {
+            const tryFinish = (label: string, payload: Record<string, unknown>) => {
+                resolve(JSON.stringify({ label, path, via: 'http.request-POST', reqBodyLen: body.length, ...payload }));
+            };
+            let raw = '';
+            let req: http.ClientRequest;
+            try {
+                req = http.request(
+                    `http://127.0.0.1:${port}${path}`,
+                    { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeout: 3000 },
+                    (res) => {
+                        res.setEncoding('utf8');
+                        res.on('data', (chunk: string) => { raw += chunk; });
+                        res.on('end', () => {
+                            tryFinish('ok', { status: res.statusCode, headers: res.headers, rawLen: raw.length, rawHead: raw.slice(0, 200) });
+                        });
+                    },
+                );
+            } catch (e) {
+                tryFinish('throw', { err: (e as Error).message });
+                return;
+            }
+            req.on('error', (e) => { tryFinish('error', { err: e.message, rawLen: raw.length }); });
+            req.on('timeout', () => { req.destroy(); tryFinish('timeout', { rawLen: raw.length }); });
             req.end(body);
         });
-        this.log(`已注入上游: ${env.baseUrl} model=${env.model ?? '(unset)'}`);
+    }
+
+    /** 取代理当前别名映射全表（GET /api/config 的 modelAliases 字段）。供上游一致性比对等用。 */
+    async getModelAliases(): Promise<Record<string, string>> {
+        const { status, body } = await this.rawHttp('GET', '/api/config');
+        if (status !== 200) {
+            throw new Error(`代理返回 ${status}`);
+        }
+        try {
+            const obj = JSON.parse(body) as { modelAliases?: Record<string, string> };
+            return obj.modelAliases ?? {};
+        } catch (e) {
+            throw new Error(`解析 /api/config 响应失败: ${(e as Error).message}`);
+        }
+    }
+
+    /** POST JSON 到代理的通用封装。 */
+    private async postJson(path: string, bodyObj: unknown): Promise<void> {
+        const body = JSON.stringify(bodyObj);
+        const { status } = await this.rawHttp('POST', path, body);
+        if (status !== 200) {
+            throw new Error(`代理返回 ${status}`);
+        }
+    }
+
+    /**
+     * 裸 net socket 调本地代理（绕过 VS Code 扩展宿主 http 栈对响应 body 的吞没）。
+     * 用 net.connect + 手写 HTTP 请求行 + 手动解析响应（含 chunked 解码 dechunk）。
+     * 所有调代理的 wrapper 都走此方法——扩展宿主 http 栈对 127.0.0.1 响应 body 一律吞
+     *（无论 chunked 还是 Content-Length，data 事件都不投递），裸 socket 不被 hook、稳定拿到 body。
+     *
+     * @param method GET/POST
+     * @param path 请求路径，如 /api/config
+     * @param body POST 请求体（string）。GET 传 undefined。
+     * @returns { status, body }——status 是 HTTP 状态码（number），body 是解 chunked 后的明文响应体
+     */
+    private rawHttp(method: 'GET' | 'POST', path: string, body?: string): Promise<{ status: number; body: string }> {
+        const port = this.getPort();
+        return new Promise<{ status: number; body: string }>((resolve, reject) => {
+            const sock = net.connect(port, '127.0.0.1', () => {
+                const reqHeaders = [
+                    `${method} ${path} HTTP/1.1`,
+                    `Host: 127.0.0.1:${port}`,
+                    'Connection: close',
+                ];
+                if (body !== undefined) {
+                    reqHeaders.push('content-type: application/json');
+                    reqHeaders.push(`content-length: ${Buffer.byteLength(body)}`);
+                }
+                sock.write(`${reqHeaders.join('\r\n')}\r\n\r\n${body ?? ''}`);
+            });
+            let buf = Buffer.alloc(0);
+            sock.on('data', (chunk) => { buf = Buffer.concat([buf, chunk]); });
+            sock.on('end', () => {
+                const text = buf.toString('utf8');
+                // 响应格式：HTTP/1.1 200 OK\r\n<headers>\r\n\r\n<body>
+                const sep = text.indexOf('\r\n\r\n');
+                if (sep < 0) {
+                    this.log(`rawHttp: 无 header/body 分隔 ${method} ${path} text=${text.slice(0, 300)}`);
+                    reject(new Error('响应无 header/body 分隔'));
+                    return;
+                }
+                const statusLine = text.slice(0, text.indexOf('\r\n'));
+                const status = Number(statusLine.split(' ')[1]);
+                const headerBlock = text.slice(0, sep);
+                const bodyRaw = text.slice(sep + 4);
+                // 处理 chunked（若 transfer-encoding: chunked）——服务端现在带 Content-Length 不分块，
+                // 但保留 dechunk 以兼容老响应 / 历史数据
+                let respBody = bodyRaw;
+                if (/transfer-encoding:\s*chunked/i.test(headerBlock)) {
+                    respBody = dechunk(bodyRaw);
+                }
+                resolve({ status, body: respBody });
+            });
+            sock.on('error', (e) => {
+                this.log(`rawHttp: socket 错误 ${method} ${path} port=${port} err=${e.message}`);
+                reject(e);
+            });
+            sock.setTimeout(3000, () => { sock.destroy(); reject(new Error(`${method} ${path} 超时（代理未运行？）`)); });
+        });
     }
 
     private async tryBecomeHost(): Promise<void> {
@@ -332,17 +580,24 @@ export class ProxyHost {
     }
 }
 
+/** 探测本地代理是否在跑（GET /healthz，只看 status 200）。用裸 socket，不依赖扩展宿主 http 栈。 */
 function healthz(port: number): Promise<boolean> {
     return new Promise((resolve) => {
         let done = false;
         const finish = (v: boolean) => { if (!done) { done = true; resolve(v); } };
-        const req = http.get(`http://127.0.0.1:${port}/healthz`, { timeout: HEALTH_TIMEOUT_MS }, (res) => {
-            const ok = res.statusCode === 200;
-            res.resume();
-            res.on('end', () => finish(ok));
+        const sock = net.connect(port, '127.0.0.1', () => {
+            sock.write(`GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
         });
-        req.on('timeout', () => { req.destroy(); finish(false); });
-        req.on('error', () => finish(false));
+        let buf = Buffer.alloc(0);
+        sock.on('data', (chunk) => { buf = Buffer.concat([buf, chunk]); });
+        sock.on('end', () => {
+            const text = buf.toString('utf8');
+            const statusLine = text.slice(0, text.indexOf('\r\n'));
+            const status = Number(statusLine.split(' ')[1]);
+            finish(status === 200);
+        });
+        sock.on('error', () => finish(false));
+        sock.setTimeout(HEALTH_TIMEOUT_MS, () => { sock.destroy(); finish(false); });
     });
 }
 
@@ -361,9 +616,12 @@ const DEFAULT_PROXY_CONFIG = {
         backoffSec: 3,
         backoffMaxSec: 16,
         passthrough: false,
-        // 只重试 Claude Code 处理不了的：503 + body error.code === 10310。
+        // 可配置组合重试规则：{status, code}。status 填状态码或 '*'；code 填数字或 'all'。
+        // 默认 503+10310 / 200+10310（讯飞 system busy，含假成功 200+10310）。
         // 其他状态码 Claude Code 自己能处理，代理不插手（避免拖慢 + 叠加重试）。
-        retryOnStatus: [],
-        retryOnBodyErrorCode: [10310],
+        retryRules: [
+            { status: 503, code: 10310 },
+            { status: 200, code: 10310 },
+        ],
     },
 };

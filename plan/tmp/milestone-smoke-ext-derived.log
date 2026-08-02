@@ -1,0 +1,70 @@
+# Smoke milestone — 扩展侧派生节点 (derived node)
+date: 2026-07-31T13:25:52Z
+
+## 1. tsc compile
+compile: PASS
+
+## 2. derived-logic 单测 (扩展侧纯逻辑)
+  ---
+  duration_ms: 0.0876
+  ...
+1..50
+# tests 50
+# suites 0
+# pass 50
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 107.4298
+
+## 3. proxy + mock-cli baseline (回归)
+  ---
+  duration_ms: 81.3227
+  ...
+1..79
+# tests 89
+# suites 0
+# pass 88
+# fail 0
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 4680.1265
+
+## 4. 子 agent 代码审查（Step 5）结论
+
+隔离 context sub-agent 对本次扩展侧改动做穷尽怀疑审查，覆盖 6 类高风险各≥1 点，共 22+ 怀疑点。
+对每个怀疑点独立 TDD 确认（写测试断言 bug 存在 → 失败则真 bug 修复 → 通过则翻转为回归用例）。
+
+### 真 bug 已修（14 个）
+- S1/S1b: computeAliasSyncActions 对 derivedIndex=0/负数未拦截 → 加 idx<1||!Number.isInteger 守卫
+- S2/S4: aggregateModelCatalog 对非字符串 env 值调 .trim() 崩溃 → 加 typeof==='string' 守卫
+- S3: summarizeAliases 对非字符串值崩溃 → 加类型守卫
+- S8/S23/S24: resolveDerivedUpstream 快照/父 content 路径不防非字符串 baseUrl/token → 加 typeof 检查
+- S9: computeAliasSyncActions model 带尾空格时比较不 trim → 先 trim 再比较/设置
+- S22: deleteDerivedAndAliases 终端匹配 #2 误匹配 #20/#200 → 改正则 #${idx}(?![0-9])
+- V1: synthesizeDerivedSettings 父 content 无效 JSON 时返回 null 中止（即便快照自洽）→ 回退最小骨架
+- V2: handleSetAlias 对新建未保存派生节点也 upsert → 加 existingId 参数，新建跳过 upsert
+- V3: 孤儿派生节点在树中不可见（无父可展开）→ local 组下追加渲染孤儿派生节点
+- V4: openNewDerived 快照缺失静默 → 缺失时 showWarningMessage 提示
+- V5: 派生节点连接模式 radio 可改但保存时被忽略 → derived scope radio 加 disabled
+- V6: postJson 超时不调 req.destroy()（与 GET 不一致）→ 加 req.destroy()
+- V7（主 agent 修复）: direct 模式派生节点别名不被重写 → model not found → 派生节点强制 proxy 模式
+
+### 非 bug 翻转为回归用例（4 个）
+- S11: aliasName('sonnet', 2.0) 不抛（Number.isInteger(2.0)===true）→ 回归用例
+- S15: nextDerivedIndex 字符串 derivedIndex 正确忽略 → 回归用例
+- S21: isOrphan 不检查 derivedFrom（调用方约束）→ 回归用例
+- S10/S12-S20: 边界/幂等/一致性用例，代码行为正确，留作回归
+
+### 记录未修（设计取舍/dead code，3 个）
+- V8: nextDerivedIndex 导出但 src/ 零调用（dead code，权威编号走 proxyHost.nextAliasId）
+- V9: setUpstream 缺 model/smallFastModel → 代理全局 ANTHROPIC_MODEL 被清空（已有警告文案，已知取舍）
+- V10: 孤儿派生节点单击仍绑 launchDerivedClaude（VS Code TreeItem 无 disable 态，靠内部报错兜底）
+
+### 最终测试
+- derived-logic: 50 用例全绿（原 23 + 子 agent 新增 27 TDD 用例）
+- proxy + mock-cli: 88 绿 + 1 skipped，无回归
+- tsc 编译: 通过
+

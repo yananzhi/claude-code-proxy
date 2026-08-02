@@ -1,8 +1,8 @@
 {
   "name": "claude-code-proxy",
   "displayName": "Claude Code Proxy",
-  "description": "管理 Claude Code 配置并切换；每条配置可选直连或通过本地代理（代理只重试 Claude Code 处理不了的 503+10310，其余透传交给 Claude Code）。",
-  "version": "1.1.0",
+  "description": "管理 Claude Code 配置切换 + 本地 LLM 代理（重试 503/10310）+ workspace 隔离 CLI 会话 + 运行时模型切换（派生节点别名，不重启 CLI 切模型）。",
+  "version": "1.3.0",
   "publisher": "zaczh",
   "repository": {
     "type": "git",
@@ -117,6 +117,26 @@
           "command": "claude-code-proxy.deleteLocalConfig",
           "when": "view == claude-code-proxy.configs && viewItem == local-config",
           "group": "inline@3"
+        },
+        {
+          "command": "claude-code-proxy.newDerivedConfig",
+          "when": "view == claude-code-proxy.configs && viewItem == local-config && workspaceFolderCount > 0",
+          "group": "inline@4"
+        },
+        {
+          "command": "claude-code-proxy.launchDerivedClaude",
+          "when": "view == claude-code-proxy.configs && viewItem == derived-config",
+          "group": "inline@1"
+        },
+        {
+          "command": "claude-code-proxy.editDerivedConfig",
+          "when": "view == claude-code-proxy.configs && viewItem == derived-config",
+          "group": "inline@2"
+        },
+        {
+          "command": "claude-code-proxy.deleteDerivedConfig",
+          "when": "view == claude-code-proxy.configs && viewItem == derived-config",
+          "group": "inline@3"
         }
       ]
     },
@@ -178,6 +198,11 @@
         "enablement": "claude-code-proxy.proxyToggleEnabled"
       },
       {
+        "command": "claude-code-proxy.diagProxyHttp",
+        "title": "LLM 代理: 诊断 proxy-agent 劫持（http.get 探针）",
+        "category": "Claude Code Proxy"
+      },
+      {
         "command": "claude-code-proxy.exportConfigs",
         "title": "Export Configs",
         "icon": "$(export)"
@@ -211,6 +236,26 @@
       {
         "command": "claude-code-proxy.deleteLocalConfig",
         "title": "Delete (Local)",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claude-code-proxy.newDerivedConfig",
+        "title": "New Derived Config (Alias Session)",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "claude-code-proxy.editDerivedConfig",
+        "title": "Edit (Derived)",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claude-code-proxy.launchDerivedClaude",
+        "title": "Launch Derived Claude Session",
+        "icon": "$(play)"
+      },
+      {
+        "command": "claude-code-proxy.deleteDerivedConfig",
+        "title": "Delete (Derived)",
         "icon": "$(trash)"
       },
       {
