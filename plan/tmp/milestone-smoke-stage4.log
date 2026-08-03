@@ -1,0 +1,92 @@
+# 阶段 4 smoke 验证存档 — 配置编辑页迁移
+
+> 日期：2026-08-03
+> 任务：阶段 4，配置编辑页迁移（webviewEditor → 独立网页）
+> 设计依据：docs/standalone-backend-plan.md（阶段 4）+ plan/tmp/2026-08-03-stage4-config-editor.md（正交设计）
+
+## 执行结果
+
+```
+命令：node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
+duration_ms: 67776（约 68s）
+
+# tests 499
+# pass 497
+# fail 0
+# skipped 2
+```
+
+- baseline 465（阶段 3 后）+ 新增 34（18 config-editor + 16 子代理 REVIEW）= 499
+- 2 skip 为 POSIX 专属在 Windows 跳过（已知，与本次改动无关）
+- 0 fail，VS Code 形态 465 用例零破坏 ✅
+- standalone 套件 114 全过
+
+## 新增文件清单
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/configApi.js` | ESM JS。createLocalConfig（普通+derived，复用 derivedLogic 的 snapshotFromParent/inheritAliasesFromParent/inheritSessionContext1m + extractUpstream）、updateLocalConfig（保留 derived 字段 + sessionContext1m 持久化）、deleteLocalConfig、getModelCatalog（aggregateModelCatalog）、proxyForward（转发 proxy /api/model-alias）。类型化 Error：ValidationError/NotFoundError/ProxyUnavailableError |
+| `test/standalone/config-editor.test.mjs` | 18 测试：D1-D6 维度 |
+| `test/standalone/config-editor-review.test.mjs` | 16 测试：子代理 TDD |
+
+## 改动文件
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/managementServer.js` | 加 config CRUD 路由（GET/POST/PUT/DELETE /api/workspaces/:id/configs[/:cfgId]）、别名转发路由（/configs/:cfgId/alias + /alias/delete，前置 checkDerivedForAlias 校验）、model-catalog 路由、next-alias-id 转发、编辑页路由（/workspace/:id/configs/:cfgId/edit + /new/edit，new 前置避免被当 cfgId）。错误分类用类型化 Error。CORS 加 PUT |
+| `standalone/web/workspaces-html.js` | 加 buildConfigEditorHtml（name/mode/content textarea + derived 别名四档前端 JS 渲染 + 1m checkbox + fetch 通信）。新增 safeJsonForScript（转义 `</script>` XSS）+ TEMPLATE + escapeHtml |
+| `CLAUDE.md` | 用例数 465→499，standalone 套件描述加配置编辑 |
+
+## 子代理 review 结论
+
+隔离上下文子代理审查 4 个改动文件 + 测试，覆盖 6 高风险类别，产出 16 个疑点：
+
+| # | 类别 | 疑点 | TDD 结论 |
+|---|---|---|---|
+| S1a | 类型/安全 | `</script>` XSS（JSON.stringify 不转义 `<`，content 含 `</script>` 破出 script 块） | **真 bug，已修**（safeJsonForScript 转义 `</`/`>`/U+2028/2029，影响 buildConfigEditorHtml + buildTerminalHtml） |
+| S2 | 状态/一致性 | sessionContext1m PUT 未持久化（updateLocalConfig 忽略 body.sessionContext1m） | **真 bug，已修**（加 derived 分支 + normalizeSessionContext1m） |
+| S4 | 一致性 | 普通 config 也能调别名转发（不校验 cfgId 是否 derived） | **真 bug，已修**（checkDerivedForAlias 前置校验） |
+| S5 | 类型 | derivedFrom=null 误导进 derived 分支（`!== undefined` 对 null 为 true） | **真 bug，已修**（加类型校验 derivedFrom 必须非空字符串） |
+| S6 | 一致性 | 前端清空别名无法删（空 model → proxy 400，无 delete 路径） | **真 bug，已修**（空 model 走 /alias/delete） |
+| S1b | 安全 | textarea content 含 `</textarea>`（escapeHtml 中和） | 非 bug → 回归用例 |
+| S1c | 安全 | workspaceName 含 `</script>`（escapeHtml + safeJsonForScript 保护） | 非 bug → 回归用例 |
+| S10 | 状态 | PUT 普通配置不传 content → content 保留 | 非 bug → 回归用例 |
+| S3 | 一致性 | getModelCatalog 对不存在 workspace 返 []（vs createLocalConfig 抛 404） | 记录当前行为 |
+| S7 | 状态 | derivedIndex 客户端提供可重号（未用 next-id） | 潜在 bug，记录当前行为（设计层面，留后续） |
+| S8 | 安全 | alias 转发不校验 alias 格式 | 记录当前行为 |
+| S9 | 边界 | PUT derived 不传 name → 400（name 必填） | 记录当前行为 |
+
+**真 bug：5 个（S1a/S2/S4/S5/S6）。非 bug 翻转成回归：3 个。记录当前行为：8 个。新增 REVIEW 用例 16 个。**
+
+## 维度覆盖核对
+
+| 维度 | 用例数 | 覆盖 |
+|---|---|---|
+| D1 local config CRUD（新建/更新/删除/校验/不存在） | 7 | ✅ |
+| D2 derived 创建（含字段/父无效/derivedIndex 非法/derivedFrom 类型） | 4 + REVIEW | ✅ |
+| D3 别名转发（proxy 不可达 502/derived 校验） | 1 + REVIEW | ✅ |
+| D4 模型清单（聚合/空） | 2 | ✅ |
+| D5 编辑页（普通/derived/新建） | 3 + REVIEW | ✅ |
+| D6 content（derived 只读/PUT 保留） | 1 + REVIEW | ✅ |
+| REVIEW TDD（XSS/sessionContext1m/derivedFrom/alias delete） | 16 | ✅ |
+
+## 关键设计决策
+
+- **独立形态无 global config 概念**：只有 workspace-local config。简化迁移。
+- **阶段 4 不做"激活"**：只做 config CRUD + 编辑网页 + 别名即时生效。激活（写 settings.json + 注入 upstream + spawn CLI 用配置）留后续。
+- **别名转发到 proxy**：management API 加 /configs/:cfgId/alias 路由，内部 HTTP 调 proxy /api/model-alias。前端单端口（不跨端口 fetch）。
+- **derived 别名四档前端 JS 动态渲染**：静态 HTML 含 cfg JSON 数据，JS 执行后注入 DOM。
+- **XSS 防护 safeJsonForScript**：JSON.stringify 后转义 `<`/`>`/U+2028/2029，防 content 含 `</script>` 破出 script 块。
+- **复用 derivedLogic 纯函数**：snapshotFromParent/inheritAliasesFromParent/inheritSessionContext1m/aggregateModelCatalog/normalizeSessionContext1m 都从 out/ 加载，零改。
+- **路由顺序**：/configs/new/edit 在 /configs/:cfgId/edit 之前（避免 new 被当 cfgId）。
+- **类型化错误**：ValidationError→400/NotFoundError→404/ProxyUnavailableError→502，比正则匹配消息更可靠。
+
+## 结论
+
+阶段 4 通过七步流程。配置编辑页迁移完成：
+- local config CRUD + derived 创建 + 别名即时生效转发工作正常。
+- 配置编辑网页（name/mode/content + derived 别名四档 + 1m）就绪。
+- VS Code 形态零破坏（465 用例全绿）。
+- standalone 套件 114 测试纳入全量（499 用例）。
+
+设计文档 6 阶段（0-5）中 0-4 已完成。剩阶段 5（打包 npm 全局包）。

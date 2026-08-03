@@ -15,8 +15,12 @@ import { createRequire } from 'node:module';
 import { WorkspaceManager } from './workspaceManager.js';
 import { ClaudeSessionManager } from './claudeSession.js';
 import { resolveClaudeBinaryStandalone } from './claudeBinaryStandalone.js';
+import {
+    createLocalConfig, updateLocalConfig, deleteLocalConfig, getModelCatalog,
+    proxyForward, ValidationError, NotFoundError, ProxyUnavailableError,
+} from './configApi.js';
 import { managementPort } from './ports.js';
-import { buildWorkspacesHtml, buildTerminalHtml } from './web/workspaces-html.js';
+import { buildWorkspacesHtml, buildTerminalHtml, buildConfigEditorHtml } from './web/workspaces-html.js';
 
 // ws 是 CJS 模块
 const require = createRequire(import.meta.url);
@@ -38,7 +42,7 @@ export async function startManagementServer(opts = {}) {
 
         // CORS（管理网页可能从 proxy 端口或 file:// 访问，宽松允许本机）
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
         if (method === 'OPTIONS') {
             res.writeHead(204);
@@ -129,6 +133,133 @@ export async function startManagementServer(opts = {}) {
             }
             // ── /CLI 会话路由 ──────────────────────────────────────────
 
+            // ── 配置编辑路由（阶段 4）─────────────────────────────────
+            // GET /api/workspaces/:id/configs → 列 local configs
+            const mCfgList = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs$/);
+            if (method === 'GET' && mCfgList) {
+                const id = decodeURIComponent(mCfgList[1]);
+                const ws = await manager.get(id);
+                if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
+                const configs = await manager.getLocalConfigs(id);
+                sendJson(res, 200, { configs });
+                return;
+            }
+            // POST /api/workspaces/:id/configs → 新建（普通或 derived）
+            if (method === 'POST' && mCfgList) {
+                const id = decodeURIComponent(mCfgList[1]);
+                const body = await readJsonBody(req);
+                const { config, created } = await createLocalConfig(manager, id, body);
+                sendJson(res, 201, { config, created });
+                return;
+            }
+
+            // GET /api/workspaces/:id/configs/:cfgId → 单个 config
+            const mCfgOne = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)$/);
+            if (method === 'GET' && mCfgOne) {
+                const id = decodeURIComponent(mCfgOne[1]);
+                const cfgId = decodeURIComponent(mCfgOne[2]);
+                const configs = await manager.getLocalConfigs(id);
+                const cfg = configs.find(c => c.id === cfgId);
+                if (!cfg) { sendJson(res, 404, { error: `config 不存在: ${cfgId}` }); return; }
+                sendJson(res, 200, { config: cfg });
+                return;
+            }
+            // PUT /api/workspaces/:id/configs/:cfgId → 更新
+            if (method === 'PUT' && mCfgOne) {
+                const id = decodeURIComponent(mCfgOne[1]);
+                const cfgId = decodeURIComponent(mCfgOne[2]);
+                const body = await readJsonBody(req);
+                const { config } = await updateLocalConfig(manager, id, cfgId, body);
+                sendJson(res, 200, { config });
+                return;
+            }
+            // DELETE /api/workspaces/:id/configs/:cfgId → 删除
+            if (method === 'DELETE' && mCfgOne) {
+                const id = decodeURIComponent(mCfgOne[1]);
+                const cfgId = decodeURIComponent(mCfgOne[2]);
+                await deleteLocalConfig(manager, id, cfgId);
+                sendJson(res, 200, { ok: true });
+                return;
+            }
+
+            // POST /api/workspaces/:id/configs/:cfgId/alias → 转发 proxy 设置别名（即时生效）
+            const mAlias = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/alias$/);
+            if (method === 'POST' && mAlias) {
+                const id = decodeURIComponent(mAlias[1]);
+                const cfgId = decodeURIComponent(mAlias[2]);
+                const err = await checkDerivedForAlias(manager, id, cfgId);
+                if (err) { sendJson(res, err.status, { error: err.error }); return; }
+                const body = await readJsonBody(req);
+                const r = await proxyForward(opts.proxyPort, '/api/model-alias', 'POST', body);
+                res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify(r.body));
+                return;
+            }
+            // POST /api/workspaces/:id/configs/:cfgId/alias/delete → 转发 proxy 删别名
+            const mAliasDel = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/alias\/delete$/);
+            if (method === 'POST' && mAliasDel) {
+                const id = decodeURIComponent(mAliasDel[1]);
+                const cfgId = decodeURIComponent(mAliasDel[2]);
+                const err = await checkDerivedForAlias(manager, id, cfgId);
+                if (err) { sendJson(res, err.status, { error: err.error }); return; }
+                const body = await readJsonBody(req);
+                const r = await proxyForward(opts.proxyPort, '/api/model-alias/delete', 'POST', body);
+                res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify(r.body));
+                return;
+            }
+
+            // GET /api/workspaces/:id/model-catalog → 聚合模型清单
+            const mCatalog = pathname.match(/^\/api\/workspaces\/([^/]+)\/model-catalog$/);
+            if (method === 'GET' && mCatalog) {
+                const id = decodeURIComponent(mCatalog[1]);
+                const catalog = await getModelCatalog(manager, id);
+                sendJson(res, 200, { catalog });
+                return;
+            }
+            // GET /api/workspaces/:id/next-alias-id → 转发 proxy 取下一个派生编号
+            const mNextId = pathname.match(/^\/api\/workspaces\/([^/]+)\/next-alias-id$/);
+            if (method === 'GET' && mNextId) {
+                const r = await proxyForward(opts.proxyPort, '/api/model-alias/next-id', 'GET');
+                res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
+                res.end(JSON.stringify(r.body));
+                return;
+            }
+
+            // GET /workspace/:id/configs/new/edit → 新建配置编辑网页（必须在 :cfgId/edit 之前，避免 new 被当 cfgId）
+            const mNewPage = pathname.match(/^\/workspace\/([^/]+)\/configs\/new\/edit$/);
+            if (method === 'GET' && mNewPage) {
+                const id = decodeURIComponent(mNewPage[1]);
+                const ws = await manager.get(id);
+                if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
+                const catalog = await getModelCatalog(manager, id);
+                const html = buildConfigEditorHtml({
+                    workspaceId: id, workspaceName: ws.name, config: null, catalog, apiBase: '',
+                });
+                res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+                res.end(html);
+                return;
+            }
+            // GET /workspace/:id/configs/:cfgId/edit → 配置编辑网页
+            const mEditPage = pathname.match(/^\/workspace\/([^/]+)\/configs\/([^/]+)\/edit$/);
+            if (method === 'GET' && mEditPage) {
+                const id = decodeURIComponent(mEditPage[1]);
+                const cfgId = decodeURIComponent(mEditPage[2]);
+                const ws = await manager.get(id);
+                if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
+                const configs = await manager.getLocalConfigs(id);
+                const cfg = configs.find(c => c.id === cfgId);
+                if (!cfg) { sendJson(res, 404, { error: `config 不存在: ${cfgId}` }); return; }
+                const catalog = await getModelCatalog(manager, id);
+                const html = buildConfigEditorHtml({
+                    workspaceId: id, workspaceName: ws.name, config: cfg, catalog, apiBase: '',
+                });
+                res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+                res.end(html);
+                return;
+            }
+            // ── /配置编辑路由 ─────────────────────────────────────────
+
             // GET /api/workspaces/:id
             const mGet = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
             if (method === 'GET' && mGet) {
@@ -171,9 +302,17 @@ export async function startManagementServer(opts = {}) {
             sendJson(res, 404, { error: `未知路由: ${method} ${pathname}` });
         } catch (err) {
             const msg = err.message || String(err);
-            // 业务校验错误（dir 不存在/已注册/缺 name/body 非法）→ 400
-            const isValidation = /不能为空|目录不存在|已注册|不是有效 JSON|请求体过大|不是目录/.test(msg);
-            sendJson(res, isValidation ? 400 : 500, { error: msg });
+            // 类型化错误（configApi 抛出）→ 对应状态码
+            if (err instanceof NotFoundError) {
+                sendJson(res, 404, { error: msg });
+            } else if (err instanceof ProxyUnavailableError) {
+                sendJson(res, 502, { error: msg });
+            } else if (err instanceof ValidationError
+                || /不能为空|目录不存在|已注册|不是有效 JSON|请求体过大|不是目录/.test(msg)) {
+                sendJson(res, 400, { error: msg });
+            } else {
+                sendJson(res, 500, { error: msg });
+            }
         }
     });
 
@@ -215,6 +354,19 @@ export async function startManagementServer(opts = {}) {
             });
         });
     });
+}
+
+/** 校验 cfgId 对应的 config 是否 derived（仅 derived 可设/删别名）。返回 null=通过，{status,error}=拒绝。 */
+async function checkDerivedForAlias(manager, workspaceId, cfgId) {
+    const ws = await manager.get(workspaceId);
+    if (!ws) return { status: 404, error: `workspace 不存在: ${workspaceId}` };
+    const configs = await manager.getLocalConfigs(workspaceId);
+    const cfg = configs.find(c => c.id === cfgId);
+    if (!cfg) return { status: 404, error: `config 不存在: ${cfgId}` };
+    if (cfg.derivedFrom === undefined) {
+        return { status: 400, error: '仅派生节点可设置别名（普通配置无别名映射）' };
+    }
+    return null;
 }
 
 /** 读 JSON body（限 1MB，防滥用）。 */
