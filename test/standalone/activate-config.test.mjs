@@ -358,3 +358,64 @@ test('D2: proxy 模式 + 临时代理可达 → 合成 settings BASE_URL=localho
         rmSync(TMP_PROXY_HOME, { recursive: true, force: true });
     }
 });
+
+// ════════════════════════════════════════════════════════════
+// 跨阶段审查：proxy 返回非 2xx（upstream 被拒）→ activate 不应假成功
+// proxyForward 只在连接失败时 reject（ProxyUnavailableError → 502），
+// 但 proxy 返回 400（如 baseUrl 格式错误）时 resolve {status:400}。
+// activateConfig 旧实现忽略 r.status 直接写 settings + active 标记 → 假成功。
+// 期望：proxy 非 2xx → 抛 ProxyUnavailableError（或对应错误）→ 502，不写 settings。
+// ════════════════════════════════════════════════════════════
+async function startTmpProxy(tmpProxyPort) {
+    const TMP_PROXY_HOME = mkdtempSync(join(tmpdir(), 's6-rev-tmpproxy-'));
+    fs.writeFileSync(join(TMP_PROXY_HOME, 'proxy-config.json'), JSON.stringify({
+        env: { ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_BASE_URL: '', API_TIMEOUT_MS: '600000', ANTHROPIC_MODEL: '' },
+        effortLevel: 'max',
+        proxy: { listenHost: '127.0.0.1', listenPort: tmpProxyPort, maxAttempts: 5, backoffSec: 1, backoffMaxSec: 16, passthrough: true, retryRules: [] },
+    }));
+    fs.mkdirSync(join(TMP_PROXY_HOME, 'logs'), { recursive: true });
+    const { spawn } = await import('node:child_process');
+    const SERVER_JS = resolve(__dirname, '..', '..', 'proxy', 'server.js');
+    const proxyChild = spawn(process.execPath, [SERVER_JS], {
+        env: { ...process.env, CCP_CONFIG_PATH: join(TMP_PROXY_HOME, 'proxy-config.json'), CCP_LOGS_DIR: join(TMP_PROXY_HOME, 'logs'), CCP_LOGS_CONFIG_PATH: join(TMP_PROXY_HOME, 'logs', 'logs-config.json'), ELECTRON_RUN_AS_NODE: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+    });
+    // 等就绪
+    const ready = await new Promise((res) => {
+        const to = setTimeout(() => res(false), 5000);
+        const check = setInterval(async () => {
+            try {
+                const r = await fetch(`http://127.0.0.1:${tmpProxyPort}/healthz`);
+                if (r.ok) { clearTimeout(to); clearInterval(check); res(true); }
+            } catch {}
+        }, 200);
+    });
+    return { proxyChild, ready, TMP_PROXY_HOME };
+}
+
+test('REVIEW: proxy 返回 400（baseUrl 格式错误）→ activate 应失败，不假成功', async () => {
+    const tmpProxyPort = 11655;
+    const { proxyChild, ready, TMP_PROXY_HOME } = await startTmpProxy(tmpProxyPort);
+    const { handle, port, home } = await startMgmt('rev400', { proxyPort: tmpProxyPort });
+    const { wsId, proj } = await createWorkspace(port, 'rev400');
+    // content 的 baseUrl 是 "not-a-url" → proxy updateUpstream 抛 "Base URL 格式错误" → proxy 返回 400
+    const BAD_PROXY_CONTENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'not-a-url', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm' } });
+    const cfg = await createConfig(port, wsId, { name: 'p', mode: 'proxy', content: BAD_PROXY_CONTENT });
+    try {
+        if (!ready) return; // 环境问题跳过
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        // 期望：非 200（502 或 400），不应假成功 200
+        assert.notEqual(r.status, 200, `proxy 拒绝 upstream 时 activate 不应假成功 200，实际 ${r.status}`);
+        // settings.json 不应被写（注入失败应中止）
+        assert.ok(!existsSync(join(proj, '.claude_proxy', 'settings.json')),
+            'proxy 拒绝 upstream 时不应写 settings.json（假成功）');
+    } finally {
+        await handle.stop();
+        proxyChild.kill('SIGTERM');
+        await new Promise(r => proxyChild.on('exit', () => r()));
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+        rmSync(TMP_PROXY_HOME, { recursive: true, force: true });
+    }
+});

@@ -293,8 +293,13 @@ export async function activateConfig(manager, proxyPort, workspaceId, cfgId, opt
         if (parsed.env.ANTHROPIC_SMALL_FAST_MODEL) upstream.smallFastModel = parsed.env.ANTHROPIC_SMALL_FAST_MODEL;
         if (timeoutSec != null) upstream.timeoutSec = timeoutSec;
 
-        // 注入 upstream（proxy 不在→抛 ProxyUnavailableError → 502）
-        await proxyForward(proxyPort, '/api/upstream', 'POST', { upstream });
+        // 注入 upstream（proxy 不在→抛 ProxyUnavailableError → 502；
+        // proxy 返回非 2xx（如 baseUrl 格式错误→400）→ 抛 ProxyUnavailableError → 502，不假成功）
+        const r = await proxyForward(proxyPort, '/api/upstream', 'POST', { upstream });
+        if (r.status < 200 || r.status >= 300) {
+            const detail = (r.body && r.body.error) ? r.body.error : `proxy 返回 ${r.status}`;
+            throw new ProxyUnavailableError(`代理拒绝 upstream: ${detail}`);
+        }
 
         // 合成指向 localhost:proxyPort 的 settings
         const synthesized = synthesizeProxySettings(cfg.content, proxyPort);
@@ -338,6 +343,9 @@ export async function getActiveConfig(manager, workspaceId) {
  * @param body 请求体（对象，会 JSON.stringify）
  * @returns {Promise<{status, body}>} proxy 响应
  */
+/** proxy 转发超时（ms）。与 proxyHost.rawHttp 的 3s 一致，防代理 TCP 连通但不响应时路由挂死。 */
+const PROXY_FORWARD_TIMEOUT_MS = 3000;
+
 export async function proxyForward(proxyPort, proxyPath, method, body) {
     const bodyStr = body !== undefined ? JSON.stringify(body) : null;
     const headers = { 'Content-Type': 'application/json' };
@@ -350,6 +358,7 @@ export async function proxyForward(proxyPort, proxyPath, method, body) {
             path: proxyPath,
             method,
             headers,
+            timeout: PROXY_FORWARD_TIMEOUT_MS,
         }, (res) => {
             const chunks = [];
             res.on('data', (c) => chunks.push(c));
@@ -360,7 +369,12 @@ export async function proxyForward(proxyPort, proxyPath, method, body) {
                 resolve({ status: res.statusCode, body: parsed });
             });
         });
-        req.on('error', (e) => reject(new ProxyUnavailableError(`proxy 不可达: ${e.message}`)));
+        req.on('timeout', () => { req.destroy(); reject(new ProxyUnavailableError(`proxy 超时（${PROXY_FORWARD_TIMEOUT_MS}ms 无响应）`)); });
+        req.on('error', (e) => {
+            // timeout 已 reject 过（destroy 触发的 error 被吞掉，不重复 reject）
+            if (req.destroyed) return;
+            reject(new ProxyUnavailableError(`proxy 不可达: ${e.message}`));
+        });
         if (bodyStr !== null) req.write(bodyStr);
         req.end();
     });

@@ -111,6 +111,15 @@ test('D1c: node standalone/cli.js 能起后端（healthz 通）', async () => {
 
 test('D1d: CCP_HOME 覆盖默认 home', async () => {
     const home = join(PROJECT_ROOT, '.test-tmp', 'stage5-ccphome');
+    // 覆盖 proxy-config 用临时端口，避免与用户真实代理（11434/11435/11436）抢端口。
+    // ensureConfig 只在 config 不存在时建默认；这里预先建一个用临时端口的 config。
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(join(home, 'proxy-config.json'), JSON.stringify({
+        env: { ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_BASE_URL: '', API_TIMEOUT_MS: '600000', ANTHROPIC_MODEL: '' },
+        effortLevel: 'max',
+        proxy: { listenHost: '127.0.0.1', listenPort: 11612, maxAttempts: 20, backoffSec: 3, backoffMaxSec: 16, passthrough: false, retryRules: [{ status: 503, code: 10310 }, { status: 200, code: 10310 }] },
+    }));
+    fs.mkdirSync(join(home, 'logs'), { recursive: true });
     const child = spawn(process.execPath, [CLI_JS], {
         env: { ...process.env, CCP_HOME: home },
         stdio: ['ignore', 'pipe', 'pipe'],

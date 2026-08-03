@@ -68,10 +68,11 @@ VS Code 形态的多 workspace 能力（多窗口各自 CLI 配置 + 端口 bind
 - 测试更容易模拟实际状态（测试形态本就 spawn）。
 - 独立形态下 `process.execPath` 是普通 node，`cleanEnv` 里针对 Electron 的净化变成 no-op 但不碍事，`CCP_*` 路径注入照旧。
 
-### 决策 6：CLI 会话调用系统安装的 claude code cli 二进制
+### 决策 6：CLI 会话调用系统安装的 claude code cli 二进制（node-pty + xterm.js）
 
-- Windows 走 PowerShell，Linux/Mac 走 shell。
-- xterm.js 终端模拟器作为**将来 todo**，首版先 spawn + 日志可见。
+- 阶段 3 实际用 **node-pty spawn**（PTY 让 claude CLI 以为在真终端，TUI 不降级），不走 PowerShell/shell 调用操作符。
+- 每个会话一个 xterm.js 网页终端（CDN 加载），WebSocket 双向流 PTY 数据。
+- ~~xterm.js 作为将来 todo~~ ——探索阶段中途决定一次性做到位，阶段 3 已含 xterm.js。
 - 二进制探测三来源（见决策 7）。
 
 ### 决策 7：claude 二进制探测顺序
@@ -100,7 +101,7 @@ resolveClaudeBinary() 探测顺序：
 
 ### 决策 10：打包 npm 全局包
 
-`package.json` 加 `bin` 入口指向 `standalone/main.js`。
+`package.json` 加 `bin` 入口指向 `standalone/cli.js`（带 shebang 的 wrapper，import main.js 调 launchStandalone——不直接用 main.js 因其 isMain 判断在 bin shim 下不稳定）。`files` 白名单含 out/+standalone/+proxy 核心文件，`prepublishOnly` 编译。
 
 ---
 
@@ -276,12 +277,13 @@ resolveClaudeBinary() 探测顺序：
 - 网页加 workspace 管理页。新增管理 HTTP API（workspace CRUD）。
 - **验证**：网页创建 workspace → `.claude_proxy/` 生成 → 能列出/删除。
 
-### 阶段 3：claude 二进制探测 + CLI 会话 spawn
+### 阶段 3：claude 二进制探测 + CLI 会话 spawn（含 xterm.js）
 
-- 实现 `resolveClaudeBinary()`（系统 PATH + VS Code 扩展目录扫描 + 用户指定路径）。
-- CLI 会话 spawn：选 workspace → `.claude_proxy/` 当 `CLAUDE_CONFIG_DIR` → PowerShell/shell 起 claude cli。
-- 日志重定向到文件 + 网页滚动区（先不做 xterm.js）。
-- **验证**：网页选 workspace 起 CLI 会话，CLI 能跑、转发走代理、trace 进控制台。
+- 新建 `standalone/claudeBinaryStandalone.js`：`resolveClaudeBinaryStandalone` 包一层，补系统 PATH 遍历（`searchPathForClaude`）+ VS Code 扩展目录扫描（`scanVscodeExtensionDir`，semver 取最新）。探测顺序：用户覆盖 > 系统 PATH > VS Code 扩展 > null。
+- 新建 `standalone/claudeSession.js`：`ClaudeSessionManager` 用 **node-pty** spawn claude（PTY 让 TUI 不降级），每 workspace 一会话，`CLAUDE_CONFIG_DIR` 指向 `.claude_proxy/`。PTY onData→广播 WS，WS message→PTY write，onExit 清理。
+- management API 加 CLI 会话路由（POST/GET/DELETE claude-session）+ 终端页路由 + WebSocket upgrade（/claude-session/ws）。
+- 网页 `buildTerminalHtml`：xterm.js（CDN）+ WS 双向流。
+- **验证**：网页选 workspace 起 CLI 会话，xterm 终端可交互、转发走代理、trace 进控制台。
 
 ### 阶段 4：配置编辑页迁移
 
@@ -291,15 +293,24 @@ resolveClaudeBinary() 探测顺序：
 
 ### 阶段 5：打包 npm 全局包
 
-- `package.json` 加 `bin` 入口。
-- `npm install -g` 测试全局 `claude-code-proxy` 命令能起。
-- **验证**：全局安装后命令行启动后端。
+- 新建 `standalone/cli.js`（shebang wrapper，import main.js 调 launchStandalone）。
+- `package.json` 加 `bin`（claude-code-proxy → standalone/cli.js）+ `files` 白名单（out/+standalone/+proxy 具体文件，不含 logs/test 防泄露）+ `prepublishOnly` 编译。
+- **验证**：`node standalone/cli.js` 起后端、`npm pack --dry-run` 含 out/standalone/proxy 不含 logs/test。
+
+### 阶段 6：激活 local config（阶段 4 留的"激活"后续）
+
+- `configApi.js` 加 `activateConfig`：direct 模式 writeSettings 原样 content；proxy 模式 extractUpstream→校验→proxyForward 注入 upstream→synthesizeProxySettings 合成→writeSettings。写 LocalActiveStateStore active 标记 + ensureProjectPermissions + ensureGitignore（复制自 claudeLauncher）。
+- management API 加 POST /configs/:cfgId/activate + GET /active。
+- 复用 out/upstream.js + out/claudeConfig.js + out/localConfigStore.js（零改）。
+- **验证**：direct/proxy 激活写 settings.json + 注入 upstream + active 标记；新 spawn 会话读 settings.json 生效。测试用临时代理子进程，不碰真实代理 11434。
 
 ---
 
 ## 九、待定 / 将来 todo
 
-- **xterm.js 终端模拟器**：阶段 3 先 spawn + 日志可见，xterm.js 作为后续增强（体验最接近 VS Code 集成终端）。
-- **per-workspace upstream 隔离**：当前定为公共一份。如未来需要 workspace 级 upstream 隔离，另起方案（单进程多配置按 workspace 路由）。
+- ~~xterm.js 终端模拟器~~：阶段 3 已完成。
+- ~~激活 local config~~：阶段 6 已完成。
+- **per-workspace upstream 隔离**：当前定为公共一份（last-write-wins）。如未来需要 workspace 级 upstream 隔离，另起方案（单进程多配置按 workspace 路由）。
 - **token 安全**：当前明文存 JSON。如需可加 chmod 600 / 加密。
-- **多用户/鉴权**：当前纯本机单用户。如需可加本地 token 鉴权。
+- **多用户/鉴权**：当前纯本机单用户（management API 监听 127.0.0.1 + CORS *）。如需可加本地 token 鉴权。
+- **github 源码安装的 postinstall 编译**：当前 `files` 白名单 + `prepublishOnly` 保证 npm 包含 out/，但 `npm install -g github:repo` 无 out/（.gitignore 排除）。需 postinstall 编译或预编译发布。
