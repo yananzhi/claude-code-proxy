@@ -1,24 +1,26 @@
-// standalone/managementServer.js — workspace management HTTP API（ESM JS）
+// standalone/managementServer.js — workspace management HTTP API + CLI 会话（ESM JS）
 //
-// 职责（阶段 2）：
+// 职责：
 //   - http.createServer 监听单独端口（platformPort+100，或 CCP_MGMT_PORT 覆盖）
 //   - 路由 workspace CRUD + serve 管理网页
+//   - CLI 会话路由（POST/DELETE/GET /api/workspaces/:id/claude-session）
+//   - WebSocket /api/workspaces/:id/claude-session/ws 双向流 PTY → xterm.js
 //   - 不污染 proxy/server.js（proxy 只管转发）
 //
-// 设计依据：docs/standalone-backend-plan.md 阶段 2
-// 正交设计：plan/tmp/2026-08-03-stage2-workspace-manager.md
-//
-// 路由：
-//   GET    /api/workspaces        → 列出
-//   POST   /api/workspaces        → 创建 {name, dir}
-//   GET    /api/workspaces/:id    → 单个（含 local configs）
-//   DELETE /api/workspaces/:id    → 删除
-//   GET    /                      → 管理网页 HTML
+// 设计依据：docs/standalone-backend-plan.md 阶段 2/3
+// 正交设计：plan/tmp/2026-08-03-stage2-workspace-manager.md, 2026-08-03-stage3-cli-session.md
 
 import * as http from 'node:http';
+import { createRequire } from 'node:module';
 import { WorkspaceManager } from './workspaceManager.js';
+import { ClaudeSessionManager } from './claudeSession.js';
+import { resolveClaudeBinaryStandalone } from './claudeBinaryStandalone.js';
 import { managementPort } from './ports.js';
-import { buildWorkspacesHtml } from './web/workspaces-html.js';
+import { buildWorkspacesHtml, buildTerminalHtml } from './web/workspaces-html.js';
+
+// ws 是 CJS 模块
+const require = createRequire(import.meta.url);
+const { WebSocketServer } = require('ws');
 
 /**
  * 启动 management API server。
@@ -26,6 +28,7 @@ import { buildWorkspacesHtml } from './web/workspaces-html.js';
  */
 export async function startManagementServer(opts = {}) {
     const manager = new WorkspaceManager({ homeDir: opts.homeDir, log: opts.log });
+    const sessions = new ClaudeSessionManager({ log: opts.log });
     const port = opts.port || managementPort(process.platform);
 
     const server = http.createServer(async (req, res) => {
@@ -66,6 +69,65 @@ export async function startManagementServer(opts = {}) {
                 sendJson(res, 201, { workspace, created });
                 return;
             }
+
+            // ── CLI 会话路由（阶段 3）──────────────────────────────────
+            // GET /workspace/:id/terminal → 终端页 HTML（xterm.js + WS）
+            const mTermPage = pathname.match(/^\/workspace\/([^/]+)\/terminal$/);
+            if (method === 'GET' && mTermPage) {
+                const id = decodeURIComponent(mTermPage[1]);
+                const ws = await manager.get(id);
+                if (!ws) {
+                    sendJson(res, 404, { error: `workspace 不存在: ${id}` });
+                    return;
+                }
+                const html = buildTerminalHtml({ workspaceId: id, workspaceName: ws.name, apiBase: '' });
+                res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+                res.end(html);
+                return;
+            }
+
+            // POST /api/workspaces/:id/claude-session → 启动会话
+            const mStart = pathname.match(/^\/api\/workspaces\/([^/]+)\/claude-session$/);
+            if (method === 'POST' && mStart) {
+                const id = decodeURIComponent(mStart[1]);
+                const ws = await manager.get(id);
+                if (!ws) {
+                    sendJson(res, 404, { error: `workspace 不存在: ${id}` });
+                    return;
+                }
+                // 探测二进制（用户覆盖可从 config 读，阶段 3 首版用默认探测）
+                const binaryPath = resolveClaudeBinaryStandalone({ log: opts.log });
+                if (!binaryPath) {
+                    sendJson(res, 400, { error: '未找到 Claude Code CLI 二进制。请安装 Claude Code，或在系统 PATH 中配置 claude。' });
+                    return;
+                }
+                try {
+                    const result = await sessions.start(id, { dir: ws.dir, binaryPath });
+                    sendJson(res, 201, result);
+                } catch (e) {
+                    sendJson(res, 400, { error: e.message || String(e) });
+                }
+                return;
+            }
+
+            // GET /api/workspaces/:id/claude-session → 会话状态
+            const mStatus = pathname.match(/^\/api\/workspaces\/([^/]+)\/claude-session$/);
+            if (method === 'GET' && mStatus) {
+                const id = decodeURIComponent(mStatus[1]);
+                const s = sessions.status(id);
+                sendJson(res, 200, { session: s });
+                return;
+            }
+
+            // DELETE /api/workspaces/:id/claude-session → 停止会话
+            const mStop = pathname.match(/^\/api\/workspaces\/([^/]+)\/claude-session$/);
+            if (method === 'DELETE' && mStop) {
+                const id = decodeURIComponent(mStop[1]);
+                const stopped = await sessions.stop(id);
+                sendJson(res, 200, { stopped });
+                return;
+            }
+            // ── /CLI 会话路由 ──────────────────────────────────────────
 
             // GET /api/workspaces/:id
             const mGet = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
@@ -115,13 +177,41 @@ export async function startManagementServer(opts = {}) {
         }
     });
 
+    // WebSocket 升级：/api/workspaces/:id/claude-session/ws
+    const wss = new WebSocketServer({ noServer: true });
+    server.on('upgrade', (req, socket, head) => {
+        const url = new URL(req.url, `http://127.0.0.1:${port}`);
+        const m = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/claude-session\/ws$/);
+        if (!m) {
+            socket.destroy();
+            return;
+        }
+        const id = decodeURIComponent(m[1]);
+        wss.handleUpgrade(req, socket, head, (ws) => {
+            // 会话不存在 → 拒绝（要求先 POST 启动）。
+            // 注意 TOCTOU：status 检查与 attachWs 之间会话可能被 stop。
+            // 因此以 attachWs 返回值为准（false = 会话已删），关 ws 防孤儿。
+            if (!sessions.status(id) || !sessions.attachWs(id, ws)) {
+                try {
+                    ws.send(JSON.stringify({ type: 'error', error: '会话不存在，请先 POST 启动' }));
+                    ws.close(1008, 'session not found');
+                } catch {}
+                return;
+            }
+        });
+    });
+
     return new Promise((resolve, reject) => {
         server.on('error', reject);
         server.listen(port, '127.0.0.1', () => {
             resolve({
                 server,
                 port,
-                stop: () => new Promise(r => server.close(() => r())),
+                stop: async () => {
+                    await sessions.stopAll();
+                    wss.close();
+                    return new Promise(r => server.close(() => r()));
+                },
             });
         });
     });

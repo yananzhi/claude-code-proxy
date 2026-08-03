@@ -123,3 +123,91 @@ loadList();
 </body>
 </html>`;
 }
+
+/**
+ * 生成 CLI 终端页 HTML（xterm.js + WebSocket 双向流）。
+ * 阶段 3：每 workspace 一个 xterm 终端，连 /api/workspaces/:id/claude-session/ws。
+ */
+export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } = {}) {
+    // 防注入：workspaceId 可能来自 URL（decodeURIComponent），含任意字符。
+    // - 插入 HTML 上下文（title/bar）→ escapeHtml
+    // - 插入 JS 字符串字面量 → JSON.stringify（转义引号/反斜杠/换行）
+    // - 插入 URL 路径 → encodeURIComponent
+    const safeId = JSON.stringify(String(workspaceId ?? ''));
+    const safeApiBase = JSON.stringify(String(apiBase));
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Claude Code — ${escapeHtml(workspaceName || workspaceId)}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 8px; background: #1e1e1e; color: #ddd; }
+  .bar { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; }
+  .bar a { color: #6cf; }
+  #terminal { padding: 8px; }
+  .msg { color: #f88; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <span>Claude Code — ${escapeHtml(workspaceName || workspaceId)}</span>
+  <span><a href="${escapeHtml(apiBase)}/">← 返回 workspace 列表</a></span>
+</div>
+<div id="msg"></div>
+<div id="terminal"></div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script>
+(function() {
+  var apiBase = ${safeApiBase};
+  var wsId = ${safeId};
+  var wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + apiBase + '/api/workspaces/' + encodeURIComponent(wsId) + '/claude-session/ws';
+  var term = new Terminal({ cursorBlink: true });
+  var fit = new FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('terminal'));
+  fit.fit();
+  var msgEl = document.getElementById('msg');
+
+  // 会话可能未启动 → 先 POST 启动，再连 WS
+  fetch(apiBase + '/api/workspaces/' + encodeURIComponent(wsId) + '/claude-session', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { msgEl.textContent = '启动会话失败: ' + d.error; return; }
+      connectWs();
+    })
+    .catch(e => { msgEl.textContent = '启动会话异常: ' + e.message; });
+
+  function connectWs() {
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => { msgEl.textContent = ''; term.focus(); };
+    ws.onmessage = (ev) => {
+      // 消息可能是 binary（PTY 输出）或 text（控制事件如 exit）
+      if (typeof ev.data === 'string') {
+        try {
+          const obj = JSON.parse(ev.data);
+          if (obj.type === 'exit') { msgEl.textContent = 'Claude 已退出（code=' + obj.exitCode + '）'; }
+          else if (obj.type === 'error') { msgEl.textContent = obj.error; }
+        } catch { term.write(ev.data); }
+      } else {
+        ev.data.text().then(t => term.write(t));
+      }
+    };
+    ws.onclose = (ev) => {
+      if (!msgEl.textContent) msgEl.textContent = '连接已关闭（' + (ev.reason || ev.code) + '）';
+    };
+    ws.onerror = () => { msgEl.textContent = 'WebSocket 错误'; };
+    // 用户输入 → PTY
+    term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+    window.addEventListener('resize', () => fit.fit());
+  }
+})();
+</script>
+</body>
+</html>`;
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}

@@ -1,0 +1,97 @@
+# 阶段 3 smoke 验证存档 — claude 二进制探测 + CLI 会话 spawn（xterm.js）
+
+> 日期：2026-08-03
+> 任务：阶段 3，CLI 会话交互式终端
+> 设计依据：docs/standalone-backend-plan.md（阶段 3）+ plan/tmp/2026-08-03-stage3-cli-session.md（正交设计）
+
+## 执行结果
+
+```
+命令：node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
+duration_ms: 69701（约 70s）
+
+# tests 465
+# pass 463
+# fail 0
+# skipped 2
+```
+
+- baseline 428（阶段 2 后）+ 新增 37（claude-session：30 维度 + 7 子代理 REVIEW）= 465
+- 2 skip 为 POSIX 专属在 Windows 跳过（已知，与本次改动无关）
+- 0 fail，VS Code 形态 428 用例零破坏 ✅
+- standalone 套件 80 全过（43 阶段2 + 37 阶段3）
+
+## 新增文件清单
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/claudeBinaryStandalone.js` | ESM JS。在 resolveClaudeBinary 之上包一层：searchPathForClaude（PATH 遍历）、scanVscodeExtensionDir（扩展目录扫描 semver 取最新）、resolveClaudeBinaryStandalone（探测顺序：用户>PATH>扩展>null） |
+| `standalone/claudeSession.js` | ESM JS。ClaudeSessionManager：node-pty spawn claude（每 workspace 一会话，CLAUDE_CONFIG_DIR→.claude_proxy/），PTY onData→广播 WS，WS message→PTY write，onExit→清 Map+关 WS。pty 可注入（测试 mock） |
+| `test/standalone/claude-session.test.mjs` | 37 测试：D1-D7 维度 + 7 REVIEW。mock pty 避免 conpty handle 卡 event loop |
+
+## 改动文件
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/managementServer.js` | 加 CLI 会话路由（POST/GET/DELETE /api/workspaces/:id/claude-session）+ 终端页路由（GET /workspace/:id/terminal）+ WebSocket upgrade（/api/workspaces/:id/claude-session/ws）。TOCTOU 修复（attachWs 返回值检查） |
+| `standalone/web/workspaces-html.js` | 加 buildTerminalHtml（xterm.js CDN + WS 双向流）。XSS 修复（workspaceId JSON.stringify + encodeURIComponent） |
+| `standalone/main.js` | （阶段 1 已接入 management server；阶段 3 的 stopAll 通过 mgmt.stop() 链调用） |
+| `CLAUDE.md` | 用例数 428→465，standalone 套件描述加 CLI 会话 |
+| `package.json` | 新增 dependencies：node-pty + ws（首次引入运行时依赖） |
+
+## 子代理 review 结论
+
+隔离上下文子代理审查 4 个改动文件 + 测试，覆盖 6 高风险类别，产出 6 个疑点：
+
+| # | 类别 | 疑点 | TDD 结论 |
+|---|---|---|---|
+| BUG-1 | 类型/安全 | buildTerminalHtml workspaceId 未转义插值进 JS/HTML → XSS | **真 bug，已修**（JSON.stringify + encodeURIComponent） |
+| BUG-2 | 状态/并发 | PTY onExit 未设 disposed=true → ws message 在 close 前仍 write 死 PTY | **真 bug，已修**（onExit 首行设 disposed） |
+| BUG-3 | 异常 | onData 广播一个 ws.send 抛错中断循环 → 其他 ws 丢数据 | **真 bug，已修**（每个 ws.send 独立 try/catch） |
+| BUG-4 | 异常/状态 | onExit send/close 同一 try → send 抛错 close 被跳过成孤儿 ws | **真 bug，已修**（拆分 try） |
+| BUG-5 | 并发 | WS upgrade TOCTOU（status 检查与 attachWs 之间会话被删）→ 孤儿 ws | **真 bug，已修**（合并 if !status \|\| !attachWs） |
+| BUG-6 | 边界 | parseSemver 预发布版本与正式版同号视为相等 | 已知局限，留回归用例（影响低） |
+
+**真 bug：5 个。已知局限留回归：1 个。新增 REVIEW 用例 7 个（含 1 个真实 WS 集成测试验证 TOCTOU 修复）。**
+
+## 非缺陷（已验证）
+
+- PTY onExit 与 mgr.stop 竞争：stop 的 delete/clear 幂等，双调 ws.close 有 try/catch
+- searchPathForClaude Windows 用 existsSync（非 accessSync X_OK）：正确（Windows X_OK 语义不同）
+- 路由正则互撞：mTermPage/mStart/mStatus/mStop/mGet 互斥
+- attachWs ws.on('error') 不 close：正确（ws 库 error 后必跟 close）
+
+## 维度覆盖核对
+
+| 维度 | 用例数 | 覆盖 |
+|---|---|---|
+| D1 探测来源优先级（4 组合） | 4 | ✅ |
+| D2 系统 PATH 遍历（含/不含/空/Windows 扩展名/多目录顺序） | 5 | ✅ |
+| D3 VS Code 扩展目录扫描（多版本/单版本/不存在/无匹配/缺二进制/semver） | 6 | ✅ |
+| D4 PTY 会话生命周期（启动/复用/停止/不存在/自然退出） | 5 | ✅ |
+| D5 PTY onData→WS 广播 / WS→PTY write / 不存在 attach / WS close 保持 | 4 + REVIEW | ✅ |
+| D6 二进制不可用（空/缺 dir） | 2 | ✅ |
+| D7 cleanup（stopAll） | 1 + REVIEW | ✅ |
+| management API 会话路由（404/状态/终端页） | 3 | ✅ |
+| REVIEW TDD（XSS/竞态/TOCTOU/semver） | 7 | ✅ |
+
+## 关键设计决策
+
+- **二进制探测包一层不改 claudeBinary.ts**：VS Code 形态冻结。来源④扫到目录作 vscodeExtensionPath 传 resolveClaudeBinary 复用。
+- **探测顺序 用户>PATH>扩展>null**（决策 7）：与 VS Code 形态（用户>扩展）不同，独立形态把系统 PATH 提前。
+- **node-pty + ws + xterm.js(CDN)**：PTY 让 claude CLI 不降级 TUI，每会话一 xterm 终端，WS 双向流。
+- **真实 PTY 不进 node --test**：node-pty 的 conpty handle 进程退出后不自动释放卡 event loop。测试用 mock pty，真实 PTY 端到端手动验证。
+- **阶段 3 spawn "裸 claude 会话"**：CLAUDE_CONFIG_DIR + cwd + env，不预写 settings.json。完整配置合成（proxy 模式 upstream + 派生节点别名）留后续。
+- **WS 升级要求会话已存在**：先 POST 启动，不存在→拒绝 close（避免隐式创建难追踪）。
+- **XSS 防护**：workspaceId 来自 URL，JSON.stringify 嵌 JS 字面量 + encodeURIComponent 拼 URL + escapeHtml 嵌 HTML。
+
+## 结论
+
+阶段 3 通过七步流程。CLI 会话交互式终端完成：
+- 二进制探测（系统 PATH + VS Code 扩展目录扫描）工作正常。
+- PTY 会话（node-pty）+ WebSocket 双向流 + xterm.js 前端就绪。
+- VS Code 形态零破坏（428 用例全绿）。
+- standalone 套件 80 测试纳入全量（465 用例）。
+- 首次引入运行时依赖（node-pty + ws）。
+
+为阶段 4（配置编辑页迁移：LLMConfig CRUD + 别名映射）铺好基础。
