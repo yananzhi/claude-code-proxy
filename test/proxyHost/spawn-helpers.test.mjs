@@ -1,8 +1,7 @@
-// test/proxyHost/spawn-helpers.test.mjs — M2: killChild / waitForPortReady / exit 注册时机 行为测试
+// test/proxyHost/spawn-helpers.test.mjs — killChild / waitForPortReady / exit 注册时机 行为测试
 //
-// proxyHost.ts 顶部 import vscode，纯 Node 测试环境无法 require 整个模块。
-// killChild / waitForPortReady / healthz 是不依赖 vscode 的纯 child_process/net 逻辑，
-// 这里内联与源码逐字一致的实现，用真子进程验证边界行为（证明逻辑缺陷是否存在）。
+// 直接 import 编译产物 out/proxySpawnController.js 的真函数（不内联复制源码），
+// 避免源码改了测试不同步。proxySpawnController.ts 不 import vscode，纯 Node 可 require。
 //
 // 运行：node --test test/proxyHost/spawn-helpers.test.mjs
 import { test } from 'node:test';
@@ -10,68 +9,21 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import * as net from 'node:net';
 import * as http from 'node:http';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { createRequire } from 'node:module';
 
-const HEALTH_TIMEOUT_MS = 500;
-const SPAWN_READY_TIMEOUT_MS = 5000;
-
-/** 与 src/proxyHost.ts healthz 逐字一致。 */
-function healthz(port) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const sock = net.connect(port, '127.0.0.1', () => {
-      sock.write(`GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
-    });
-    let buf = Buffer.alloc(0);
-    sock.on('data', (chunk) => { buf = Buffer.concat([buf, chunk]); });
-    sock.on('end', () => {
-      const text = buf.toString('utf8');
-      const statusLine = text.slice(0, text.indexOf('\r\n'));
-      const status = Number(statusLine.split(' ')[1]);
-      finish(status === 200);
-    });
-    sock.on('error', () => finish(false));
-    sock.setTimeout(HEALTH_TIMEOUT_MS, () => { sock.destroy(); finish(false); });
-  });
+const OUT = join(process.cwd(), 'out', 'proxySpawnController.js');
+if (!existsSync(OUT)) {
+  console.error('out/proxySpawnController.js 不存在，请先 npm run compile');
+  process.exit(1);
 }
-
-/** 与 src/proxyHost.ts waitForPortReady 逐字一致。 */
-function waitForPortReady(port, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  const poll = async () => {
-    while (Date.now() < deadline) {
-      if (await healthz(port)) return true;
-      await new Promise(r => setTimeout(r, 100));
-    }
-    return false;
-  };
-  return poll();
-}
+const require = createRequire(import.meta.url);
+const { healthz, waitForPortReady, killChild } = require(OUT);
 
 /** 子进程是否已退出（Windows 上 kill 后 exitCode=null 但 signalCode='SIGTERM'）。 */
 function isDead(child) {
   return child.exitCode !== null || child.signalCode !== null;
-}
-/** 与 src/proxyHost.ts killChild 逐字一致。 */
-function killChild(child) {
-  return new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode) {
-      resolve(); // 已退出
-      return;
-    }
-    const onExit = () => resolve();
-    child.once('exit', onExit);
-    try { child.kill(); } catch {}
-    // 兜底：3s 没退出则 SIGKILL 强杀，再等 1s 让 exit 落地
-    setTimeout(() => {
-      if (child.exitCode !== null || child.signalCode) { resolve(); return; }
-      try { child.kill('SIGKILL'); } catch {}
-      setTimeout(() => {
-        child.removeListener('exit', onExit);
-        resolve();
-      }, 1000);
-    }, 3000);
-  });
 }
 
 // ── 怀疑点 3：spawn 后 child.on('exit') 注册前子进程就 exit ───────────────

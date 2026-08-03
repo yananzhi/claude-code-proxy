@@ -14,8 +14,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
 import * as net from 'net';
-import { spawn, type ChildProcess } from 'child_process';
 import { cleanEnv } from './cleanEnv';
+import { healthz, spawnProxyChild, type ProxyChildHandle } from './proxySpawnController';
 import { ProxyToggleStore } from './proxyToggle';
 
 /** 解 HTTP chunked 编码：把 <size>\r\n<chunk>\r\n... 拼成连续 body。简单实现，够本地 API 用。 */
@@ -34,9 +34,6 @@ function dechunk(raw: string): string {
 }
 
 const HEARTBEAT_MS = 2000;
-const HEALTH_TIMEOUT_MS = 500;
-/** spawn 子进程后轮询 healthz 就绪的超时（ms）。server.js 启动通常 <1s，留 5s 余量。 */
-const SPAWN_READY_TIMEOUT_MS = 5000;
 
 /**
  * 按平台给默认端口，避免 Windows + WSL 同机装时抢同一个 localhost 端口。
@@ -54,12 +51,8 @@ function defaultPortForPlatform(): number {
 }
 const DEFAULT_PORT = defaultPortForPlatform();
 
-/** spawn 出来的子进程句柄。stop = kill + 等退出。port 供心跳自检。 */
-interface ProxyHandle {
-    child: ChildProcess;
-    port: number;
-    stop: () => Promise<void>;
-}
+/** spawn 出来的子进程句柄。stop = kill + 等退出。port 供心跳自检。复用 controller 的类型。 */
+type ProxyHandle = ProxyChildHandle;
 
 /** 注入代理的上游配置（从激活的"通过代理"配置 content.env 解出） */
 export interface UpstreamEnv {
@@ -506,60 +499,31 @@ export class ProxyHost {
             // 注入死锁（子进程不 listen 不 exit 零输出）；净化后正常。详见 docs/server独立进程化调研.md。
             const serverPath = path.join(this.extensionPath, 'proxy', 'server.js');
             const env = cleanEnv({ configPath: this.configPath, logsDir: this.logsDir, logsConfigPath: this.logsConfigPath });
-            const child = spawn(process.execPath, [serverPath], {
+            const handle = await spawnProxyChild({
+                serverPath,
+                port,
                 env,
-                stdio: ['ignore', 'pipe', 'pipe'],
-                windowsHide: true,
+                callbacks: {
+                    onLog: (line) => this.log(line),
+                    onExit: (child, code, signal) => {
+                        if (this.handle?.child === child) {
+                            this.log(`代理子进程退出 code=${code} signal=${signal ?? '(none)'}，清 handle（下次心跳 re-spawn）`);
+                            this.handle = null;
+                            this.updateStatusBar();
+                        }
+                    },
+                },
             });
-            // 子进程 stdout/stderr → OutputChannel（concise 日志 + FATAL 诊断）
-            // 每个流独立 lineBuf：共享会让 stdout 半行 + stderr 半行混合、前缀错乱。
-            // 残行 flush 在 stream 'end'/'close' 触发（exit 事件后 stdio 可能还有缓冲 data，
-            // 在 stream 真正结束时 flush 才能拿到完整残行，如 FATAL + process.exit）。
-            const forward = (stream: NodeJS.ReadableStream | null, prefix: string): (() => void) => {
-                if (!stream) return () => {};
-                let lineBuf = '';
-                const flush = () => { if (lineBuf.length) { this.log(`${prefix}${lineBuf}`); lineBuf = ''; } };
-                stream.on('data', (c: Buffer) => {
-                    lineBuf += c.toString('utf8');
-                    let nl: number;
-                    while ((nl = lineBuf.indexOf('\n')) >= 0) {
-                        const line = lineBuf.slice(0, nl);
-                        lineBuf = lineBuf.slice(nl + 1);
-                        if (line.length) this.log(`${prefix}${line}`);
-                    }
-                });
-                // exit 后 stdio 可能还有 data；在流结束（end/close）时 flush 残行最全
-                stream.on('end', flush);
-                stream.on('close', flush);
-                return flush;
-            };
-            const flushStdout = forward(child.stdout, '');
-            const flushStderr = forward(child.stderr, '[stderr] ');
-            // 子进程 crash/exit：主动清 handle，下次心跳 re-spawn（kill 导致的 exit 除外——kill 时已清）
-            child.on('exit', (code, signal) => {
-                // exit 时先 flush 一次（覆盖 exit 后 stdio 不会触发 end 的极端情况，如被 SIGKILL）；
-                // stream 的 end/close 会再 flush（幂等，lineBuf 已清则 no-op）。
-                flushStdout(); flushStderr();
-                if (this.handle?.child === child) {
-                    this.log(`代理子进程退出 code=${code} signal=${signal ?? '(none)'}，清 handle（下次心跳 re-spawn）`);
-                    this.handle = null;
-                    this.updateStatusBar();
+            if (handle) {
+                // deactivate 可能在 await spawnProxyChild 期间已置 disposed=true。
+                // 此时不应再赋 handle（否则子进程泄漏——deactivate 已跑完不会停它）。
+                if (this.disposed) {
+                    this.log('扩展已卸载，停掉刚 spawn 的代理子进程（deactivate 与 spawn 竞争）');
+                    try { await handle.stop(); } catch {}
+                } else {
+                    this.handle = handle;
+                    this.log(`成为宿主，代理子进程在 127.0.0.1:${port} 运行（pid=${handle.child.pid}）`);
                 }
-            });
-            // 就绪检测：轮询 healthz（裸 socket，绕过扩展宿主 http 栈吞 body）
-            const ready = await waitForPortReady(port, SPAWN_READY_TIMEOUT_MS);
-            if (ready) {
-                this.handle = {
-                    child,
-                    port,
-                    stop: () => killChild(child),
-                };
-                this.log(`成为宿主，代理子进程在 127.0.0.1:${port} 运行（pid=${child.pid}）`);
-            } else {
-                // 未就绪：子进程可能已 exit（exit 事件已清 handle 设为 null，但 this.handle 此时本就 null）
-                // 或卡死（5s 内既不 listen 也不 exit）→ kill 掉，下次心跳重试
-                this.log(`代理子进程 ${SPAWN_READY_TIMEOUT_MS}ms 内未就绪（exitCode=${child.exitCode}），kill 并重试`);
-                try { child.kill(); } catch {}
             }
         } catch (e: unknown) {
             this.log('启动代理子进程失败:', e instanceof Error ? `${e.message}\n${e.stack ?? ''}` : String(e));
@@ -633,63 +597,6 @@ export class ProxyHost {
     }
 }
 
-/** 探测本地代理是否在跑（GET /healthz，只看 status 200）。用裸 socket，不依赖扩展宿主 http 栈。 */
-function healthz(port: number): Promise<boolean> {
-    return new Promise((resolve) => {
-        let done = false;
-        const finish = (v: boolean) => { if (!done) { done = true; resolve(v); } };
-        const sock = net.connect(port, '127.0.0.1', () => {
-            sock.write(`GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
-        });
-        let buf = Buffer.alloc(0);
-        sock.on('data', (chunk) => { buf = Buffer.concat([buf, chunk]); });
-        sock.on('end', () => {
-            const text = buf.toString('utf8');
-            const statusLine = text.slice(0, text.indexOf('\r\n'));
-            const status = Number(statusLine.split(' ')[1]);
-            finish(status === 200);
-        });
-        sock.on('error', () => finish(false));
-        sock.setTimeout(HEALTH_TIMEOUT_MS, () => { sock.destroy(); finish(false); });
-    });
-}
-
-/** 轮询 healthz 直到通或超时。供 tryBecomeHost 判断子进程是否 listen 就绪。 */
-function waitForPortReady(port: number, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    const poll = async (): Promise<boolean> => {
-        while (Date.now() < deadline) {
-            if (await healthz(port)) return true;
-            await new Promise(r => setTimeout(r, 100));
-        }
-        return false;
-    };
-    return poll();
-}
-
-/** kill 子进程并等其退出。Windows 无信号，child.kill() 走 TerminateProcess。 */
-function killChild(child: ChildProcess): Promise<void> {
-    return new Promise((resolve) => {
-        if (child.exitCode !== null || child.signalCode) {
-            resolve(); // 已退出
-            return;
-        }
-        const onExit = () => resolve();
-        child.once('exit', onExit);
-        try { child.kill(); } catch {}
-        // 兜底：3s 没退出则 SIGKILL 强杀（防忽略 SIGTERM 的子进程僵死占端口），
-        // 再等最多 1s 让 exit 事件落地；仍未退出也 resolve（极端情况，不阻塞调用方）。
-        setTimeout(() => {
-            if (child.exitCode !== null || child.signalCode) { resolve(); return; }
-            try { child.kill('SIGKILL'); } catch {}
-            // SIGKILL 后再给 1s 让 exit 事件触发
-            setTimeout(() => {
-                child.removeListener('exit', onExit);
-                resolve();
-            }, 1000);
-        }, 3000);
-    });
-}
 
 const DEFAULT_PROXY_CONFIG = {
     env: {
