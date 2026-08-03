@@ -41,20 +41,33 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 ## 架构速览
 
 - `src/`：VS Code 扩展 TS（编译到 `out/`，CommonJS）。
-  - `proxyHost.ts`：代理宿主（ESM import proxy/server.js 进扩展进程，非子进程）+ 调代理接口的 wrapper（裸 socket）。
+  - `proxyHost.ts`：代理宿主/控制器（spawn 独立子进程跑 proxy/server.js，用 `process.execPath` + 净化 env + `ELECTRON_RUN_AS_NODE`，详见下方「Server 独立进程化」）+ 调代理接口的 wrapper（裸 socket）+ 心跳/多窗口协调（端口 bind 单例 + 2s healthz 探测 + child.on('exit') 主动 re-spawn）。
+  - `cleanEnv.ts`：净化 `process.env` 给 spawn 子进程用（删 `NODE_OPTIONS`/`VSCODE_*`/`ELECTRON_*`/`CHROME_*`/`PIPE` 注入变量，设 `ELECTRON_RUN_AS_NODE=1` + `CCP_*` 路径）。纯函数，抽出来好单测。
   - `claudeLauncher.ts`：启动 workspace 隔离 CLI（`CLAUDE_CONFIG_DIR` + 别名走 shell env + token 走 settings.env）。
   - `derivedLogic.ts`：派生节点纯逻辑（继承快照、别名 env 构造、映射表同步、per-档 1m 上下文 `sessionContext1m`/`normalizeSessionContext1m`/`inheritSessionContext1m`），抽出来好单测。
   - `treeProvider.ts` / `webviewEditor.ts` / `localConfigStore.ts`：配置树 / 编辑器 / 存储。
 - `proxy/`：本地 LLM 代理（ESM JS，不进 tsc）。
-  - `server.js`：转发主路径 + `rewriteModel`（别名替换）+ `rewriteEffort` + `inspectFirstBody`/`describeHitRule`（retryRules 命中判定，status+code 组合，`all`/`*` 通配）+ API 接口。
+  - `server.js`：转发主路径 + `rewriteModel`（别名替换）+ `rewriteEffort` + `inspectFirstBody`/`describeHitRule`（retryRules 命中判定，status+code 组合，`all`/`*` 通配）+ API 接口。`isMainModule` 入口认 `CCP_*` env（扩展子进程用，优先）/ `CONFIG_PATH`（向后兼容，mock 测试用）/ 默认 `./config.json`（CLI 模式）；`exitOnKill` 选项让子进程模式下 `/api/kill` 与 `/api/port POST` 触发 `process.exit(0)` 让宿主 re-spawn。
   - `config-store.js`：配置读写 + 热重载 + modelAliases 映射表 + nextAliasId 计数器 + retryRules（含老 retryOnStatus/retryOnBodyErrorCode 向后兼容迁移）。
   - `trace-store.js`：trace 写时分流（model=原始别名、resolvedModel=映射后真实模型）。
 - `test/mock-cli/`：Claude Code CLI 配置加载层等价重实现（探针 + 假设验证）。
 - `test/derived-logic/`：派生节点纯逻辑单测。
+- `test/proxyHost/`：ProxyHost 辅助函数单测（`cleanEnv`/`spawn-helpers`/`stdio-forward`）。
+
+## Server 独立进程化
+
+`proxy/server.js` 作为**独立 Node 子进程**运行（不再 in-proc import 进 Extension Host）。设计/验证记录见 `docs/server独立进程化调研.md`。
+
+- **spawn 方式**：`spawn(process.execPath, [serverPath], { env: cleanEnv(...), stdio:['ignore','pipe','pipe'], windowsHide:true })`。`process.execPath` = `Code.exe`（VS Code 自带 Node Runtime），加 `ELECTRON_RUN_AS_NODE=1` 当纯 Node 跑 ESM。
+- **⚠ 净化 env 是关键**（V1-f 验证，曾耗时定位）：扩展宿主 `process.env` 注入了 `NODE_OPTIONS`（含 `--require bootstrap-fork.js`）/ `VSCODE_*` IPC handle / `ELECTRON_*` / `CHROME_*` 等私货，原样透传给子进程会让 `Code.exe` 在等 IPC 句柄时**死锁**（子进程不 listen 不 exit 零输出）。必须用 `cleanEnv()` 删这些注入变量，死锁才解除。**新增 spawn 调用一律走 `cleanEnv`，不要 `...process.env` 原样透传。**
+- **就绪检测**：spawn 后轮询 `/healthz`（裸 socket，`waitForPortReady`），最多 5s，通=宿主成功；超时=kill 子进程下次心跳重试。
+- **生命周期**：`child.on('exit')` 主动清 handle + 下次心跳 re-spawn；`spawning` 守卫防重入 spawn 多子进程；`disposed` 守卫防 deactivate 后心跳继续 spawn（泄漏）。
+- **`/api/kill` 与 `/api/port POST`**：子进程模式（`exitOnKill=true`）触发 `process.exit(0)` 让宿主 re-spawn，而非 in-proc 的 `server.close()` 空转。in-proc 测试模式不退出进程。
+- **通信通道不变**：扩展↔子进程仍走裸 socket HTTP（`rawHttp`/`healthz`），扩展宿主 http 栈吞 body 坑依然存在（见上节），裸 socket 仍必须。
 
 ## 测试与开发
 
 - `npm run test:mock-cli`：mock-cli 套件。
-- `node --test proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/`：全量。
+- `node --test proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/`：全量（含 ProxyHost 辅助函数单测）。
 - 代理测试用 mock 上游（`mock/mock-server.js`），不依赖真实 LLM。
-- 设计文档：`docs/claude code cli运行时model切换方案.md`（运行时 model 切换方案）。
+- 设计文档：`docs/claude code cli运行时model切换方案.md`（运行时 model 切换方案）、`docs/server独立进程化调研.md`（独立进程化方案 + V1 验证记录）。

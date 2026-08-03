@@ -569,6 +569,9 @@ async function handleApi(req, res, urlPath) {
       // 先回响应，再 kill 监听（和 /api/kill 同样套路）
       sendJson(res, 200, { ok: true, port: updated.listenPort });
       setImmediate(() => {
+        // 子进程模式：exit(0) 让宿主 re-spawn 新端口进程；in-proc：只关监听
+        // exit 分支不 close——process.exit 立即终止，close 来不及生效（评审观察：死代码）
+        if (exitOnKill) { process.exit(0); }
         try { runningServer?.close?.(); } catch {}
       });
     } catch (e) {
@@ -581,6 +584,8 @@ async function handleApi(req, res, urlPath) {
     sendJson(res, 200, { ok: true });
     // 先回响应再关，避免连接复位导致前端拿不到 200
     setImmediate(() => {
+      // 子进程模式：exit(0) 让宿主心跳探测不通不了后 re-spawn；in-proc：只关监听（进程空转无妨）
+      if (exitOnKill) { process.exit(0); }
       try { runningServer?.close?.(); } catch {}
     });
     return;
@@ -842,8 +847,12 @@ async function handleRequest(req, res) {
 // ── 启动服务（扩展和 CLI 共用）──────────────────────────────
 // 返回 { server, stop, port }；端口占用等 listen 错误时 reject（不 process.exit）
 // runningServer 模块级持有，供 /api/kill 关闭监听用
+// exitOnKill：子进程模式（isMainModule 入口）传 true，/api/kill 与 /api/port POST
+//   触发 process.exit(0) 让宿主 re-spawn；in-proc 测试不传，只 server.close 不退出进程。
 let runningServer = null;
-export async function startServer({ configPath, logsDir, logsConfigPath } = {}) {
+let exitOnKill = false;
+export async function startServer({ configPath, logsDir, logsConfigPath, exitOnKill: exitOnKillOpt } = {}) {
+  exitOnKill = !!exitOnKillOpt;
   configStore.init(configPath);
   if (logsDir) {
     loggerSetLogDir(logsDir);
@@ -891,10 +900,19 @@ export async function startServer({ configPath, logsDir, logsConfigPath } = {}) 
 }
 
 // ── CLI 模式：直接 node server.js 时启动 ────────────────────
+// env 命名空间统一 CCP_*（扩展子进程用）；旧 CONFIG_PATH 仍认（mock 测试向后兼容）。
+// exitOnKill=true：子进程模式下 /api/kill 与 /api/port POST 触发 process.exit(0)，
+//   让宿主心跳探测不通后 re-spawn 新进程（而非 server.close 后进程空转成僵尸）。
+//   in-proc 调用方（测试 import startServer）不传此选项，kill 只关监听、不退出测试进程。
 const isMainModule = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isMainModule) {
-  const cfgPath = process.env.CONFIG_PATH || new URL('./config.json', import.meta.url);
-  startServer({ configPath: typeof cfgPath === 'string' ? cfgPath : fileURLToPath(cfgPath) }).catch((e) => {
+  const cfgPath = process.env.CCP_CONFIG_PATH || process.env.CONFIG_PATH || new URL('./config.json', import.meta.url);
+  startServer({
+    configPath: typeof cfgPath === 'string' ? cfgPath : fileURLToPath(cfgPath),
+    logsDir: process.env.CCP_LOGS_DIR || undefined,
+    logsConfigPath: process.env.CCP_LOGS_CONFIG_PATH || undefined,
+    exitOnKill: true,
+  }).catch((e) => {
     concise(`FATAL: ${e.message}`);
     if (e.code === 'EADDRINUSE') concise(`  port already in use — change proxy.listenPort in config.json`);
     process.exit(1);

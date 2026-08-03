@@ -14,6 +14,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
 import * as net from 'net';
+import { spawn, type ChildProcess } from 'child_process';
+import { cleanEnv } from './cleanEnv';
 import { ProxyToggleStore } from './proxyToggle';
 
 /** 解 HTTP chunked 编码：把 <size>\r\n<chunk>\r\n... 拼成连续 body。简单实现，够本地 API 用。 */
@@ -33,6 +35,8 @@ function dechunk(raw: string): string {
 
 const HEARTBEAT_MS = 2000;
 const HEALTH_TIMEOUT_MS = 500;
+/** spawn 子进程后轮询 healthz 就绪的超时（ms）。server.js 启动通常 <1s，留 5s 余量。 */
+const SPAWN_READY_TIMEOUT_MS = 5000;
 
 /**
  * 按平台给默认端口，避免 Windows + WSL 同机装时抢同一个 localhost 端口。
@@ -50,11 +54,10 @@ function defaultPortForPlatform(): number {
 }
 const DEFAULT_PORT = defaultPortForPlatform();
 
-/** 代理 startServer 返回的句柄（来自 ESM proxy/server.js） */
+/** spawn 出来的子进程句柄。stop = kill + 等退出。port 供心跳自检。 */
 interface ProxyHandle {
-    server: unknown;
+    child: ChildProcess;
     port: number;
-    host: string;
     stop: () => Promise<void>;
 }
 
@@ -67,22 +70,24 @@ export interface UpstreamEnv {
     timeoutSec?: number;
 }
 
-/** ESM proxy 模块导出的最小类型 */
-interface ProxyModule {
-    startServer: (opts: { configPath: string; logsDir: string; logsConfigPath: string }) => Promise<ProxyHandle>;
-}
-
 /**
- * 进程内 LLM 代理管理。
- * - 单例：靠端口 bind（EADDRINUSE）保证全局只有一个窗口实际跑代理。
+ * 独立进程 LLM 代理管理（控制器）。
+ * - spawn 一个 Node 子进程跑 proxy/server.js（ESM），用 process.execPath（Code.exe）+
+ *   净化 env + ELECTRON_RUN_AS_NODE。V1-f 验证此路径可用（详见 docs/server独立进程化调研.md）。
+ * - 单例：靠端口 bind（别的窗口先起则本窗口当从机）。
  * - 心跳：每 2s 探测 /healthz；宿主自检、从机探测宿主，断了就接管。
- * - 生命周期跟着扩展：activate 起、deactivate 停（其他窗口心跳接管）。
+ * - 生命周期：activate 起、deactivate 停（其他窗口心跳接管）。子进程 crash（exit 事件）
+ *   主动清 handle，下次心跳 re-spawn。
+ * - 通信：rawHttp（裸 socket）调代理接口，绕过扩展宿主 http 栈对本地响应 body 的吞没。
  */
 export class ProxyHost {
     private statusBar: vscode.StatusBarItem;
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     private handle: ProxyHandle | null = null; // 非 null = 本窗口是宿主
-    private proxyModule: ProxyModule | null = null;
+    /** tryBecomeHost 正在进行中（spawn + waitForPortReady 期间）。防止心跳重入 spawn 多个子进程。 */
+    private spawning = false;
+    /** 扩展已卸载（deactivate）。阻止心跳 tick 在 deactivate 后继续 spawn 子进程（泄漏）。 */
+    private disposed = false;
     private readonly configPath: string;
     private readonly logsDir: string;
     private readonly logsConfigPath: string;
@@ -124,6 +129,7 @@ export class ProxyHost {
     }
 
     async deactivate(): Promise<void> {
+        this.disposed = true; // 先标记，阻止正在执行的心跳 tick 继续 spawn
         if (this.heartbeatTimer) {
             clearInterval(this.heartbeatTimer);
             this.heartbeatTimer = null;
@@ -487,36 +493,78 @@ export class ProxyHost {
     }
 
     private async tryBecomeHost(): Promise<void> {
+        if (this.disposed) return; // 扩展已卸载，不再 spawn（防泄漏）
         if (!this.toggle.isEnabled()) return; // 开关关闭：本窗口不启动也不接管
         if (this.handle) return; // 已是宿主
+        if (this.spawning) return; // 上次 tryBecomeHost 还在 spawn/等就绪，避免重入 spawn 多个子进程
         const port = this.getPort();
         if (await healthz(port)) return; // 别的窗口在跑
-        // 动态加载 ESM 代理模块。import() 必须在 try 内，否则抛错会被外层 void 吞掉，
-        // 导致零日志、零云朵、零监听——无法诊断。
-        // 加载方式照搬 llmAutoRetry（已验证能在扩展宿主跑）：用相对路径 './...' 或 '../...'
-        // 形式，而非 pathToFileURL 产生的 file:// 绝对 URL。原因：VS Code 扩展宿主
-        // （Electron）对带 file:// scheme 的字符串会走 CJS require 拦截路径，把整个 URL
-        // 当模块名解析，报 "Cannot find module 'file:///...'"。相对路径不带 scheme，
-        // Node 按 proxy/package.json 的 "type":"module" 把 server.js 当 ESM 加载，
-        // 三平台一致。out/proxyHost.js 到 proxy/server.js 是 ../proxy/server.js。
+        this.spawning = true;
         try {
-            if (!this.proxyModule) {
-                this.log('动态加载代理模块: ../proxy/server.js');
-                // @ts-expect-error server.js 是 ESM、无 .d.ts；运行时由 Node 解析，类型此处无意义。
-                this.proxyModule = await import('../proxy/server.js') as ProxyModule;
-                if (!this.proxyModule?.startServer) {
-                    throw new Error(`代理模块未导出 startServer（实际导出: ${Object.keys(this.proxyModule ?? {}).join(',') || '无'})`);
+            // spawn 独立子进程跑 proxy/server.js。用 process.execPath（Code.exe / VS Code 自带 Node）+
+            // 净化 env + ELECTRON_RUN_AS_NODE=1。V1-f 验证：不净化 env 会因 NODE_OPTIONS/VSCODE_*
+            // 注入死锁（子进程不 listen 不 exit 零输出）；净化后正常。详见 docs/server独立进程化调研.md。
+            const serverPath = path.join(this.extensionPath, 'proxy', 'server.js');
+            const env = cleanEnv({ configPath: this.configPath, logsDir: this.logsDir, logsConfigPath: this.logsConfigPath });
+            const child = spawn(process.execPath, [serverPath], {
+                env,
+                stdio: ['ignore', 'pipe', 'pipe'],
+                windowsHide: true,
+            });
+            // 子进程 stdout/stderr → OutputChannel（concise 日志 + FATAL 诊断）
+            // 每个流独立 lineBuf：共享会让 stdout 半行 + stderr 半行混合、前缀错乱。
+            // 残行 flush 在 stream 'end'/'close' 触发（exit 事件后 stdio 可能还有缓冲 data，
+            // 在 stream 真正结束时 flush 才能拿到完整残行，如 FATAL + process.exit）。
+            const forward = (stream: NodeJS.ReadableStream | null, prefix: string): (() => void) => {
+                if (!stream) return () => {};
+                let lineBuf = '';
+                const flush = () => { if (lineBuf.length) { this.log(`${prefix}${lineBuf}`); lineBuf = ''; } };
+                stream.on('data', (c: Buffer) => {
+                    lineBuf += c.toString('utf8');
+                    let nl: number;
+                    while ((nl = lineBuf.indexOf('\n')) >= 0) {
+                        const line = lineBuf.slice(0, nl);
+                        lineBuf = lineBuf.slice(nl + 1);
+                        if (line.length) this.log(`${prefix}${line}`);
+                    }
+                });
+                // exit 后 stdio 可能还有 data；在流结束（end/close）时 flush 残行最全
+                stream.on('end', flush);
+                stream.on('close', flush);
+                return flush;
+            };
+            const flushStdout = forward(child.stdout, '');
+            const flushStderr = forward(child.stderr, '[stderr] ');
+            // 子进程 crash/exit：主动清 handle，下次心跳 re-spawn（kill 导致的 exit 除外——kill 时已清）
+            child.on('exit', (code, signal) => {
+                // exit 时先 flush 一次（覆盖 exit 后 stdio 不会触发 end 的极端情况，如被 SIGKILL）；
+                // stream 的 end/close 会再 flush（幂等，lineBuf 已清则 no-op）。
+                flushStdout(); flushStderr();
+                if (this.handle?.child === child) {
+                    this.log(`代理子进程退出 code=${code} signal=${signal ?? '(none)'}，清 handle（下次心跳 re-spawn）`);
+                    this.handle = null;
+                    this.updateStatusBar();
                 }
-            }
-            this.handle = await this.proxyModule.startServer({ configPath: this.configPath, logsDir: this.logsDir, logsConfigPath: this.logsConfigPath });
-            this.log(`成为宿主，代理在 127.0.0.1:${this.handle.port} 运行（本窗口）`);
-        } catch (e: unknown) {
-            const err = e as NodeJS.ErrnoException;
-            if (err.code === 'EADDRINUSE') {
-                this.log('端口已被占用（别的窗口已起代理），本窗口作为从机');
+            });
+            // 就绪检测：轮询 healthz（裸 socket，绕过扩展宿主 http 栈吞 body）
+            const ready = await waitForPortReady(port, SPAWN_READY_TIMEOUT_MS);
+            if (ready) {
+                this.handle = {
+                    child,
+                    port,
+                    stop: () => killChild(child),
+                };
+                this.log(`成为宿主，代理子进程在 127.0.0.1:${port} 运行（pid=${child.pid}）`);
             } else {
-                this.log('启动代理失败:', err.message || String(e), err.stack ?? '');
+                // 未就绪：子进程可能已 exit（exit 事件已清 handle 设为 null，但 this.handle 此时本就 null）
+                // 或卡死（5s 内既不 listen 也不 exit）→ kill 掉，下次心跳重试
+                this.log(`代理子进程 ${SPAWN_READY_TIMEOUT_MS}ms 内未就绪（exitCode=${child.exitCode}），kill 并重试`);
+                try { child.kill(); } catch {}
             }
+        } catch (e: unknown) {
+            this.log('启动代理子进程失败:', e instanceof Error ? `${e.message}\n${e.stack ?? ''}` : String(e));
+        } finally {
+            this.spawning = false;
         }
         this.updateStatusBar();
     }
@@ -598,6 +646,43 @@ function healthz(port: number): Promise<boolean> {
         });
         sock.on('error', () => finish(false));
         sock.setTimeout(HEALTH_TIMEOUT_MS, () => { sock.destroy(); finish(false); });
+    });
+}
+
+/** 轮询 healthz 直到通或超时。供 tryBecomeHost 判断子进程是否 listen 就绪。 */
+function waitForPortReady(port: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    const poll = async (): Promise<boolean> => {
+        while (Date.now() < deadline) {
+            if (await healthz(port)) return true;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        return false;
+    };
+    return poll();
+}
+
+/** kill 子进程并等其退出。Windows 无信号，child.kill() 走 TerminateProcess。 */
+function killChild(child: ChildProcess): Promise<void> {
+    return new Promise((resolve) => {
+        if (child.exitCode !== null || child.signalCode) {
+            resolve(); // 已退出
+            return;
+        }
+        const onExit = () => resolve();
+        child.once('exit', onExit);
+        try { child.kill(); } catch {}
+        // 兜底：3s 没退出则 SIGKILL 强杀（防忽略 SIGTERM 的子进程僵死占端口），
+        // 再等最多 1s 让 exit 事件落地；仍未退出也 resolve（极端情况，不阻塞调用方）。
+        setTimeout(() => {
+            if (child.exitCode !== null || child.signalCode) { resolve(); return; }
+            try { child.kill('SIGKILL'); } catch {}
+            // SIGKILL 后再给 1s 让 exit 事件触发
+            setTimeout(() => {
+                child.removeListener('exit', onExit);
+                resolve();
+            }, 1000);
+        }, 3000);
     });
 }
 
