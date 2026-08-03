@@ -67,7 +67,27 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 
 ## 测试与开发
 
-- `npm run test:mock-cli`：mock-cli 套件。
-- `node --test proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/`：全量（含 ProxyHost 辅助函数单测）。
-- 代理测试用 mock 上游（`mock/mock-server.js`），不依赖真实 LLM。
-- 设计文档：`docs/claude code cli运行时model切换方案.md`（运行时 model 切换方案）、`docs/server独立进程化调研.md`（独立进程化方案 + V1 验证记录）。
+- **全量**（一条命令跑完所有 `node --test` 套件，约 60s）：
+  ```
+  node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/
+  ```
+  ⚠ `--test-concurrency=1` 必须加：`mock/` 套件起真代理子进程 + mock 上游，默认并发会端口抢占/资源竞争卡死。串行才稳定。
+  现状 ~352 tests / 348 pass / 2 fail（原有失败，见下）/ 2 skip（POSIX 专属在 Windows 跳过）。
+
+- **已知失败（原有，非改造引入）**：`mock/test-stats-e2e.mjs`（3 个 web UI HTML 断言与 `proxy/web/index.html` 不符）、`mock/test-stream-incremental.mjs`（代理在本环境缓冲了整个 SSE 响应而非增量转发）。两者在改造前就是失败/被 `exit 0` 掩盖，改造后变成显式 test failure。
+
+- **按目录跑**（改某块时针对性）：
+  - `node --test proxy/test/` — server/config/trace 配置层 + e2e（9 文件，~157 用例）
+  - `node --test test/derived-logic/test.mjs` — 派生节点纯逻辑（~153 用例）
+  - `node --test test/mock-cli/test/` — Claude CLI 配置加载层等价重实现（~10 用例）
+  - `node --test test/proxyHost/` — `cleanEnv` / `spawnProxyChild` / `healthz` / `killChild` / `forwardStdio` 控制器（4 文件，~28 用例）
+  - `node --test mock/` — 端到端（起真代理+mock上游，effort/日志/model/端口/stats/SSE，6 文件）
+
+- **单文件跑**：`node --test proxy/test/server-entry-kill.test.mjs`（任意 `.test.mjs` 文件路径）。
+
+- `npm run test:mock-cli`：等价于 `node --test test/mock-cli/test/`（package.json 留的快捷方式）。
+
+- 代理测试用 mock 上游（`mock/mock-server.js`，认 `MOCK_PORT`/`MOCK_SEQUENCE` env），不依赖真实 LLM。
+
+- 设计文档：`docs/claude code cli运行时model切换方案.md`（运行时 model 切换方案）、`docs/server独立进程化调研.md`（独立进程化方案 + V1 验证记录 + 最终架构）。
+
