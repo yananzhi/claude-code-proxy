@@ -19,6 +19,10 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { platformPort } from './ports.js';
+
+// platformPort re-export 供外部 import（阶段 1 测试依赖 main.js 的导出面）
+export { platformPort };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -40,17 +44,6 @@ const HEARTBEAT_MS = 2000;
 /** spawn 连续失败后的退避基数（ms），实际退避 = BASE * 2^(failures-1)，封顶 MAX。 */
 const SPAWN_BACKOFF_BASE_MS = 2000;
 const SPAWN_BACKOFF_MAX_MS = 30000;
-
-/**
- * 平台默认端口（与 proxyHost DEFAULT_PORT 一致，避免同机 WSL 冲突）。
- * win32→11434 / linux→11435 / darwin→11436。
- */
-export function platformPort(platform = process.platform) {
-    if (platform === 'win32') return 11434;
-    if (platform === 'linux') return 11435;
-    if (platform === 'darwin') return 11436;
-    return 11435; // 未知平台兜底 linux 端口（与 proxyHost defaultPortForPlatform 一致）
-}
 
 /**
  * 默认 proxy-config 模板（照 proxyHost.ts DEFAULT_PROXY_CONFIG 复刻）。
@@ -270,7 +263,8 @@ export class StandaloneBackend {
 }
 
 /**
- * 启动独立后端（顶层入口用）。返回 { backend, stop }。
+ * 启动独立后端（顶层入口用）。返回 { backend, mgmt, stop }。
+ * mgmt = management API server（workspace 管理 + 网页），监听 platformPort+100。
  */
 export async function launchStandalone(opts = {}) {
     const { configPath, logsDir, logsConfigPath, created } = await ensureConfig(opts.homeDir);
@@ -282,19 +276,39 @@ export async function launchStandalone(opts = {}) {
     const backend = new StandaloneBackend({ configPath, logsDir, logsConfigPath, log });
     await backend.start();
 
+    // management API server（workspace 管理 + 网页）
+    const { startManagementServer } = await import('./managementServer.js');
+    const proxyPort = readListenPort(configPath) || platformPort(process.platform);
+    const mgmtPort = opts.mgmtPort || Number(process.env.CCP_MGMT_PORT) || (platformPort(process.platform) + 100);
+    let mgmt = null;
+    try {
+        mgmt = await startManagementServer({ homeDir: opts.homeDir, port: mgmtPort, proxyPort, log });
+        log(`workspace 管理 API + 网页：http://127.0.0.1:${mgmt.port}/`);
+    } catch (e) {
+        log('management server 启动失败（不影响代理转发）:', e?.message || String(e));
+    }
+
     // 信号处理：SIGINT/SIGTERM → 优雅关闭
     let stopping = false;
     const handleSignal = async (sig) => {
         if (stopping) return;
         stopping = true;
         log(`收到 ${sig}，正在关闭...`);
+        try { if (mgmt) await mgmt.stop(); } catch {}
         await backend.stop();
         process.exit(0);
     };
     process.on('SIGINT', () => void handleSignal('SIGINT'));
     process.on('SIGTERM', () => void handleSignal('SIGTERM'));
 
-    return { backend, stop: () => backend.stop() };
+    return {
+        backend,
+        mgmt,
+        stop: async () => {
+            try { if (mgmt) await mgmt.stop(); } catch {}
+            await backend.stop();
+        },
+    };
 }
 
 // ── 直接运行入口（仿 server.js isMainModule 模式）──────────────────────────

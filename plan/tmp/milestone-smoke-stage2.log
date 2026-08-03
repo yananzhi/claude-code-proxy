@@ -1,0 +1,100 @@
+# 阶段 2 smoke 验证存档 — WorkspaceManager + management API + 网页
+
+> 日期：2026-08-03
+> 任务：阶段 2，workspace 管理
+> 设计依据：docs/standalone-backend-plan.md（阶段 2）+ plan/tmp/2026-08-03-stage2-workspace-manager.md（正交设计）
+
+## 执行结果
+
+```
+命令：node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
+duration_ms: 66959（约 67s）
+
+# tests 428
+# pass 426
+# fail 0
+# skipped 2
+```
+
+- baseline 385（阶段 1 后）+ 新增 43（27 workspace-manager + 16 子代理 TDD）= 428
+- 2 skip 为 POSIX 专属在 Windows 跳过（已知，与本次改动无关）
+- 0 fail，VS Code 形态 385 用例零破坏 ✅
+- standalone 套件 43 全过（5 次连跑无 flake，子代理验证）
+
+## 新增文件清单
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/workspaceManager.js` | ESM JS。WorkspaceManager 类（loadIndex/saveIndex/list/create/remove/get/getLocalConfigs）+ normalizeDir/generateWorkspaceId/resolveHome。索引存 {home}/workspaces.json，读-改-写用 `_transaction` 串行化（防并发互踩 + 链断裂防护）。复用 out/localConfigStore.js |
+| `standalone/managementServer.js` | ESM JS。http.createServer 路由 workspace CRUD + serve 管理网页。监听 managementPort（proxy+100）。CORS 本机宽松 |
+| `standalone/ports.js` | ESM JS。platformPort + managementPort（proxy+100）。main.js 的 platformPort 改从这里 re-export（单一来源） |
+| `standalone/web/workspaces-html.js` | ESM JS。buildWorkspacesHtml 生成管理网页 HTML（列出/创建/删除 workspace + 显示 local configs 只读） |
+| `test/standalone/workspace-manager.test.mjs` | 27 测试：D1-D7 维度 |
+| `test/standalone/code-review-findings.test.mjs` | 16 测试：子代理 TDD 疑点确认 |
+
+## 改动文件
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/main.js` | platformPort 从 ports.js import（re-export）；launchStandalone 加 management server 启动 + 信号关闭 + proxyPort 传网页 |
+| `CLAUDE.md` | 用例数 385→428，standalone 套件描述更新 |
+
+## 子代理 review 结论
+
+隔离上下文子代理审查 standalone/workspaceManager.js + managementServer.js + ports.js + web/workspaces-html.js + test，覆盖 6 高风险类别，产出 15 个疑点：
+
+| # | 类别 | 疑点 | TDD 结论 |
+|---|---|---|---|
+| S5/S5b/S5c | 状态/并发 | `_transaction` Promise 链断裂（fn 抛错后 _saveChain reject → 后续 create/remove 静默失败） | **真 bug，已修**（吞错保链 + 闭包变量记录错误） |
+| S7b | 状态/并发 | saveIndex 链断裂（同 S5 原理） | **真 bug，已修**（吞错保链模式） |
+| S22 | 异常/并发 | 并发 DELETE 同 id → 第二个 remove 抛"不存在"→ 500（应 404） | **真 bug，已修**（remove 失败匹配"不存在"返 404） |
+| S23 | 异常 | readJsonBody 超限 req.destroy() → 客户端 fetch failed（应 400） | **真 bug，已修**（去 destroy，改 tooLarge 标志） |
+| S9 | 类型/边界 | loadIndex 不校验 null 元素 → list/create 遍历 NPE | **真 bug，已修**（filter null/非对象） |
+| S7 | 边界 | _doSave rename 失败后 tmp 文件残留 | **真 bug，已修**（失败时 unlink 清理） |
+| S18 | 一致性/安全 | 网页配置渲染 innerHTML 拼接用户可控 name → 存储型 XSS | **真 bug，已修**（改 textContent/createElement） |
+| S1 | 边界 | normalizeDir 根目录边界 | 非 bug → 回归用例 |
+| S3 | 异常 | POST 空 body → resolve({}) → create 抛"name 不能为空"→400 | 非 bug → 回归用例 |
+| S12 | 状态 | .claude_proxy mkdir 在事务外，事务失败后残留 | 非 bug（不影响索引，重试复用）→ 回归用例 |
+| S16 | 一致性 | 错误分类靠中文消息正则匹配（脆弱） | 非 bug（当前全覆盖，建议后续改 error code）→ 回归用例 |
+| S19 | 并发/安全 | :id decodeURIComponent 注入 %2F | 非 bug（路由正则 decode 前匹配）→ 回归用例 |
+| S20 | 类型 | create 对非字符串 name/dir 隐式 String() | 非 bug（类型一致）→ 回归用例 |
+| S21 | 并发 | 并发 create+remove 混合索引一致性 | 非 bug（_transaction 串行化保证）→ 回归用例 |
+
+**真 bug：7 个（S5/S5b/S5c/S7b/S22/S23/S9/S7/S18 实为 8 个修复点）。非 bug 翻转成回归用例：8 个。**
+
+## 未修但记录的安全提示
+
+- **CORS `*` + 127.0.0.1**：任意网页（含 evil.com）可向本地管理 API 发 POST 创建/删除 workspace。对本地开发工具可接受，若部署到共享环境需收紧 Origin 校验。
+- **错误分类靠正则匹配中文消息字符串**：脆弱，建议后续改用 error code/枚举。
+
+## 维度覆盖核对
+
+| 维度 | 用例数 | 覆盖 |
+|---|---|---|
+| D1 索引读写（不存在/损坏不崩/null 元素不崩） | 2 + S9 | ✅ |
+| D2 创建（dir 存在/不存在/已注册/name 缺失/.claude_proxy 复用） | 5 | ✅ |
+| D3 删除（存在/不存在/磁盘保留） | 2 | ✅ |
+| D4 路径归一化（尾斜杠/分隔符/相对/根目录边界） | 3 + S1 | ✅ |
+| D5 management API（GET/POST/DELETE/未知路由/网页/body 非法/超限） | 8 + S22/S23 | ✅ |
+| D6 id 生成（格式/唯一） | 2 | ✅ |
+| D7 索引并发写（原子写不丢/链断裂防护/混合并发） | 1 + S5/S5b/S5c/S7b/S21 | ✅ |
+| managementPort 端口策略 | 3 | ✅ |
+
+## 关键设计决策
+
+- **management API 监听单独端口**（proxy+100）：不污染 proxy/server.js 转发核心。proxy 管转发，management 管 workspace CRUD，职责分离。
+- **读-改-写 `_transaction` 串行化 + 链断裂防护**：Promise 链吞错保链继续（防 fn 抛错后链 reject 致后续静默失败），单独闭包变量记录错误返调用方。
+- **normalizeDir 路径归一化**：resolve + POSIX 分隔符 + 去尾斜杠 + Windows 小写化，保 dir↔id 一对一。
+- **删除 workspace 不删磁盘文件**：只移除索引，磁盘 .claude_proxy/ 保留。
+- **网页用 textContent/createElement**：防存储型 XSS（配置名用户可控）。
+- **复用 LocalConfigStore/LocalActiveStateStore**：纯 fs 零改，从 out/ 加载。
+
+## 结论
+
+阶段 2 通过七步流程。workspace 管理完成：
+- WorkspaceManager（CRUD + 并发安全 + 链断裂防护）工作正常。
+- management API server（workspace CRUD + 网页）可访问。
+- VS Code 形态零破坏（385 用例全绿）。
+- standalone 套件 43 测试纳入全量（428 用例）。
+
+为阶段 3（claude 二进制探测 + CLI 会话 spawn）铺好基础。
