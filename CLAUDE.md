@@ -67,18 +67,19 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 
 ## 测试与开发
 
-- **全量**（一条命令跑完所有 `node --test` 套件，约 52s）：
+- **全量**（一条命令跑完所有 `node --test` 套件，约 65s）：
   ```
-  node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/
+  node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
   ```
-  ⚠ `--test-concurrency=1` 必须加：`mock/` 套件起真代理子进程 + mock 上游，默认并发会端口抢占/资源竞争卡死。串行才稳定。
-  现状 352 tests / 350 pass / 0 fail / 2 skip（POSIX 专属在 Windows 跳过）。
+  ⚠ `--test-concurrency=1` 必须加：`mock/` + `test/standalone/` 套件起真代理子进程 + mock 上游，默认并发会端口抢占/资源竞争卡死。串行才稳定。
+  现状 385 tests / 383 pass / 0 fail / 2 skip（POSIX 专属在 Windows 跳过）。
 
 - **按目录跑**（改某块时针对性）：
   - `node --test proxy/test/` — server/config/trace 配置层 + e2e（9 文件，153 用例）
   - `node --test test/derived-logic/test.mjs` — 派生节点纯逻辑（153 用例）
   - `node --test test/mock-cli/test/` — Claude CLI 配置加载层等价重实现（11 用例）
-  - `node --test test/proxyHost/` — `cleanEnv` / `spawnProxyChild` / `healthz` / `killChild` / `forwardStdio` 控制器（4 文件，28 用例）
+  - `node --test test/proxyHost/` — `cleanEnv` / `spawnProxyChild` / `healthz` / `killChild` / `forwardStdio` / `resolveClaudeBinary` 控制器（5 文件）
+  - `node --test test/standalone/` — 独立后端入口骨架（config 初始化 / spawn 守护 / 心跳 re-spawn / 生命周期，23 用例，起真 server.js 子进程）
   - `node --test mock/` — 端到端（起真代理 + mock 上游，effort/日志/model/端口/stats/SSE，6 文件 + test.mjs）
 
 - **单文件跑**：`node --test proxy/test/server-entry-kill.test.mjs`（任意 `.test.mjs` 文件路径）。

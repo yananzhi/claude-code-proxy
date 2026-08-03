@@ -1,0 +1,96 @@
+# 阶段 1 smoke 验证存档 — 独立后端入口骨架
+
+> 日期：2026-08-03
+> 任务：阶段 1，standalone/main.js 入口骨架
+> 设计依据：docs/standalone-backend-plan.md（阶段 1）+ plan/tmp/2026-08-03-stage1-standalone-skeleton.md（正交设计）
+
+## 执行结果
+
+```
+命令：node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
+duration_ms: 64549（约 65s）
+
+# tests 385
+# pass 383
+# fail 0
+# skipped 2
+```
+
+- baseline 362（阶段 0 后）+ 新增 23（standalone）= 385
+- 2 skip 为 POSIX 专属在 Windows 跳过（已知，与本次改动无关）
+- 0 fail，VS Code 形态 362 用例零破坏 ✅
+- standalone 套件 23 全过（14 维度 + 9 子代理 TDD）
+
+## 端到端手动验证（阶段 1 设计标准）
+
+`CCP_HOME=... node standalone/main.js`：
+- ✅ 建出默认 proxy-config.json（127.0.0.1 + 平台端口 11434）+ logs/
+- ✅ spawn proxy/server.js 子进程
+- ✅ /healthz 返回 `{"ok":true,...}`
+- ✅ 浏览器访问端口返回控制台网页 `<title>LLM Gateway</title>`
+- ✅ EADDRINUSE（VS Code 形态占着同端口）时子进程退出 + 心跳 re-spawn + 退避（不崩、不无限刷）
+
+## 新增文件清单
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/main.js` | ESM JS 独立后端入口。导出 platformPort/defaultProxyConfig/resolvePaths/ensureConfig/StandaloneBackend/launchStandalone。用 createRequire 从 out/ 加载 cleanEnv/spawnProxyChild |
+| `standalone/package.json` | `{"type":"module"}`，消除 MODULE_TYPELESS 警告 |
+| `test/standalone/test.mjs` | 23 测试：D1-D6 维度 + S1-S9 子代理 TDD |
+
+## 改动文件
+
+| 文件 | 说明 |
+|---|---|
+| `CLAUDE.md` | 全量测试命令加 `test/standalone/`，按目录跑加 standalone 条目，用例数 352→385 |
+
+## 子代理 review 结论
+
+隔离上下文子代理审查 standalone/main.js + test/standalone/test.mjs，覆盖 6 高风险类别，产出 9 个疑点：
+
+| # | 类别 | 疑点 | TDD 结论 |
+|---|---|---|---|
+| S1 | 并发 | heartbeatTick healthz 期间 onExit 清 handle → NPE 竞态 | 非关键 bug，已修（handle 快照模式）→ 回归用例 |
+| S2 | 状态/一致性 | onExit 无条件清 handle（旧子进程延迟 exit 清新 handle） | **真 bug，已修**（加 child 身份守卫，与 proxyHost 一致） |
+| S3 | 类型/一致性 | readListenPort 拒绝字符串端口（用户手改 "11434" 静默失败） | **真 bug，已修**（接受数字字符串） |
+| S4 | 一致性 | platformPort 未知平台兜底与 proxyHost 不一致（11434 vs 11435） | **真 bug，已修**（改 11435） |
+| S5 | 边界/并发 | re-spawn 无限循环刷日志（端口持续被占） | **真 bug，已修**（指数退避，封顶 30s） |
+| S6 | 状态/并发 | start() 在 spawn 期间调 stop → 定时器泄漏 | **真 bug，已修**（disposed 守卫） |
+| S7 | 并发 | stop 与正在执行的 heartbeatTick 竞争 | 非 bug（disposed 检查 + killChild 幂等）→ 回归用例 |
+| S8 | 状态 | launchStandalone stop() 重入（信号 + 返回值） | 非 bug（stop 幂等）→ 回归用例 |
+| S9 | 边界 | stop 不重置 consecutiveFailures 致重启被旧退避阻塞 | 非 bug（新实例自然 0）→ 回归用例 |
+
+**真 bug：4 个（S2/S3/S4/S5/S6 实为 5 个修复）。非 bug 翻转成回归用例：4 个（S1/S7/S8/S9）。**
+
+## 维度覆盖核对
+
+| 维度 | 用例数 | 覆盖 |
+|---|---|---|
+| D1 config 初始化（不存在建/已存在不覆盖/损坏不崩） | 3 | ✅ |
+| D2 目录初始化 | 合并 D1a | ✅ |
+| D3 spawn 就绪（正常/失败不崩） | 2 | ✅ |
+| D4 心跳守护 + re-spawn（crash 恢复/disposed 不 spawn） | 2 | ✅ |
+| D5 生命周期（SIGINT→stop） | 1 | ✅ |
+| D6 平台端口 | 4 | ✅ |
+| defaultProxyConfig 结构 | 1 | ✅ |
+| resolvePaths CCP_HOME | 1 | ✅ |
+| S1-S9 子代理 TDD | 9 | ✅ |
+
+## 关键设计决策
+
+- **standalone 用 ESM JS + createRequire 复用 out/ CJS**：和 proxy/ 风格一致，不污染 tsc 输出，测试直接 import。
+- **复用 spawnProxyChild/cleanEnv/healthz**：独立形态 process.execPath 是普通 node，cleanEnv 的 Electron 净化变 no-op 但无害，三形态 spawn 路径完全统一。
+- **去掉多窗口协调**：无从机探测、无 toggle 开关；保留 spawning 重入守卫、disposed 守卫、心跳 re-spawn。
+- **加指数退避**（S5 修复）：端口持续被占时 re-spawn 退避，防刷日志。这是 VS Code 形态没有的（VS Code 靠多窗口端口单例不重试），standalone 单进程必须有。
+- **onExit child 身份守卫**（S2 修复）：与 proxyHost 模式对齐，防旧子进程延迟 exit 清新 handle。
+- **不 serve 网页**：server.js 自己 serve proxy/web/，spawn 起来浏览器访问端口即可。
+
+## 结论
+
+阶段 1 通过七步流程。独立后端入口骨架完成：
+- `node standalone/main.js` 可起代理、/healthz 通、网页可访问。
+- 单进程守护（心跳 + re-spawn + 退避）工作正常。
+- VS Code 形态零破坏（362 用例全绿）。
+- standalone 套件纳入全量测试（385 用例）。
+
+为阶段 2（WorkspaceManager + workspace 管理网页）铺好基础。
