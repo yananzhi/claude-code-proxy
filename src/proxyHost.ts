@@ -593,7 +593,12 @@ export class ProxyHost {
         }
         // 从机：探测宿主是否还在，不在就接管
         if (!(await healthz(port))) {
-            this.log('探测到代理不在，尝试接管');
+            // spawning 期间不重复打印「尝试接管」——上次 spawn 还在等就绪（如 EADDRINUSE 退化时
+            // 每次子进程 listen 失败 exit，waitForPortReady 要等满 5s 超时，期间 2s 心跳会多次
+            // 触发这里但被 tryBecomeHost 的 spawning 守卫挡住，不打印避免日志刷屏）。
+            if (!this.spawning) {
+                this.log('探测到代理不在，尝试接管');
+            }
             await this.tryBecomeHost();
         }
         this.updateStatusBar();
