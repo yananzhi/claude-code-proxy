@@ -1,14 +1,79 @@
 # Server 独立进程化 — 调研文档
 
-> 目标（第一阶段）：把 `proxy/server.js` 从「Extension Host 进程内 ESM 模块」变成「独立 Node 子进程」，主要收益是**让测试脱离 VS Code host**，可以写大量自动化用例；同时为将来脱离 VS Code 铺路。
+> 目标：把 `proxy/server.js` 从「Extension Host 进程内 ESM 模块」变成「独立 Node 子进程」，主要收益是**让测试脱离 VS Code host**，可以写大量自动化用例；同时为将来脱离 VS Code 铺路。
 >
-> 本文档只调研方案，不改代码。
+> 第 1 章是已落地的最终架构（含 commit id）；第 2 章起是调研与验证过程记录。
 
 ---
 
-## 1. 现状：Server 不是子进程，是进程内 ESM 模块
+## 1. 最终架构（已落地）
 
-### 1.1 加载方式
+> 落地提交：`46a2e2c`（feat: server 独立进程化 M1+M2+M3）+ `546c39a`（v1.3.1 + 日志去重）。版本 `1.3.1`。自动化测试 339/337 pass，手动验证（多窗口/EADDRINUSE/re-spawn 10 次）全过。
+
+### 1.1 进程关系
+
+```
+VS Code
+ └── Extension Host（Electron，进程 A）
+       └── extension.js（out/，CJS）
+             └── ProxyHost（控制器，不跑 server）
+                   │ spawn(process.execPath, [proxy/server.js], { env: cleanEnv, windowsHide })
+                   ↓
+             Independent Server Process（Node，进程 B）
+                   └── http.createServer().listen(11434)
+                   │
+   通信：扩展侧裸 net socket → 127.0.0.1:11434（通道不变，绕过宿主 http 栈吞 body）
+```
+
+- 进程 A（Extension Host）只当**控制器**：spawn 子进程、管生命周期、调代理接口（裸 socket wrapper）。
+- 进程 B（独立 Server）跑 `proxy/server.js`（ESM），监听 11434，处理转发 + API。
+- 两进程通过 **localhost HTTP** 通信（扩展侧用裸 `net` socket，因扩展宿主 http 栈对 127.0.0.1 响应 body 单向吞没）。
+
+### 1.2 最终采用的方案
+
+调研过若干候选，最终采用的方案是：
+
+| 维度 | 选型 | 否决的候选 |
+|---|---|---|
+| Node runtime | **`process.execPath`（VS Code 自带 Code.exe）** | ❌ 系统 Node（依赖用户装 Node）❌ 打包 Node 二进制（40-80MB×6 平台） |
+| Electron 当 Node 跑 | **`ELECTRON_RUN_AS_NODE=1`** | — |
+| env 处理 | **`cleanEnv()` 净化（删 NODE_OPTIONS/VSCODE_*/ELECTRON_*/CHROME_*/PIPE）** | ❌ `...process.env` 原样透传（死锁元凶） |
+| 子进程启动方式 | **`spawn`（非 `fork`）** | ❌ `fork()`（扩展宿主里也卡死，且 fork 默认透传污染 env） |
+| server.js 模块格式 | **保留 ESM（不编译 CJS）** | ❌ 编译成 CJS（改动大，ESM 本身不是元凶） |
+| 路径传参 | **`CCP_*` env（`CCP_CONFIG_PATH`/`CCP_LOGS_DIR`/`CCP_LOGS_CONFIG_PATH`）** | ❌ 命令行 argv（isMainModule 判断依赖 argv[1]） |
+| 向后兼容 | **`CONFIG_PATH` 仍认（fallback）** | mock 测试依赖它，不破坏 |
+| kill 退出 | **子进程模式 `process.exit(0)`，in-proc 测试 `server.close()`** | — |
+| 就绪检测 | **轮询 `/healthz`（裸 socket，5s 超时）** | — |
+| 多窗口单例 | **端口 bind（EADDRINUSE）+ 2s 心跳 healthz + child.on('exit') 主动 re-spawn** | — |
+
+**关键决策与死锁根因**（V1-f 验证，曾耗时定位）：
+
+`process.execPath`（Code.exe / Electron 42.7）**能**以纯 Node 模式跑 ESM server.js，但**必须净化 env**。扩展宿主 `process.env` 注入了 `NODE_OPTIONS`（含 `--require bootstrap-fork.js`）/ `VSCODE_*` IPC handle / `ELECTRON_*` / `CHROME_*` 等私货，原样透传给子进程会让 Code.exe 在等 IPC 句柄时**死锁**（子进程不 listen、不 exit、stdio 零输出）。`cleanEnv()` 删这些注入变量 + 显式设 `ELECTRON_RUN_AS_NODE=1` 后，死锁解除，子进程正常 listen。
+
+> 证伪的误判（过程记录在第 5 章 V1 验证）：曾误判 ESM Loader 死锁、Windows 路径大小写、`fork()` 是解药——对照实验均排除，真因是 env 污染。
+
+### 1.3 落地的代码结构
+
+- **`src/cleanEnv.ts`**（新）：净化 `process.env` 纯函数。删注入变量 + 设 `ELECTRON_RUN_AS_NODE=1` + `CCP_*` 路径。抽成独立文件便于单测（proxyHost.ts 顶部 import vscode，纯 Node 测试加载不了）。
+- **`src/proxyHost.ts`**：`ProxyHost` 从 in-proc 控制器变成 spawn 控制器。
+  - `tryBecomeHost`：`spawn(process.execPath, [serverPath], { env: cleanEnv(...), stdio:['ignore','pipe','pipe'], windowsHide:true })` + 轮询 `waitForPortReady`（裸 socket healthz，5s 超时）。
+  - `child.on('exit')` 主动清 handle + 下次心跳 re-spawn。
+  - `spawning` 守卫防重入 spawn 多子进程；`disposed` 守卫防 deactivate 后心跳继续 spawn（泄漏）。
+  - `killChild`：kill + 等退出 + 3s 兜底 SIGKILL（POSIX 防忽略 SIGTERM 僵死）。
+  - stdout/stderr 独立 lineBuf 行缓冲转发到 OutputChannel。
+  - `rawHttp`/`healthz`/所有 wrapper（`getModelAliases`/`setUpstream`/...）**一行不动**——通信通道不变。
+- **`proxy/server.js`**：
+  - `isMainModule` 入口认 `CCP_CONFIG_PATH`（优先）/ `CONFIG_PATH`（向后兼容）/ 默认 `./config.json`；新增 `CCP_LOGS_DIR`/`CCP_LOGS_CONFIG_PATH`。
+  - `startServer` 加 `exitOnKill` 选项：子进程模式（`true`）下 `/api/kill` 与 `/api/port POST` 触发 `process.exit(0)` 让宿主 re-spawn；in-proc 测试（不传）保持 `server.close()` 不退出进程。
+- **测试**（`node --test` 直接跑，脱离 VS Code host）：
+  - `proxy/test/server-entry-kill.test.mjs`（M1，13 用例）
+  - `test/proxyHost/cleanEnv.test.mjs`（8 用例）、`spawn-helpers.test.mjs`（10）、`stdio-forward.test.mjs`（4）
+
+---
+
+## 2. 现状：Server 不是子进程，是进程内 ESM 模块
+
+### 2.1 加载方式
 
 `src/proxyHost.ts:506` 里：
 
@@ -23,7 +88,7 @@ this.handle = await this.proxyModule.startServer({
 - `import('../proxy/server.js')` 用**相对路径**（不是 `pathToFileURL` 绝对 file://），原因是 VS Code 扩展宿主（Electron）对带 `file://` scheme 的字符串走 CJS require 拦截路径会报 `Cannot find module 'file://'`。相对路径让 Node 按 `proxy/package.json` 的 `type:module` 当 ESM 加载，三平台一致（`proxyHost.ts:496-509` 注释）。
 - `startServer()` 返回 `{ server, port, host, stop }`，`server` 是 `http.Server` 实例，**直接在 Extension Host 进程里监听端口**。
 
-### 1.2 进程关系
+### 2.2 进程关系
 
 ```
 VS Code
@@ -36,7 +101,7 @@ VS Code
 
 server 崩了 = Extension Host 崩；server 占的内存/句柄都在宿主进程里。
 
-### 1.3 与宿主的通信
+### 2.3 与宿主的通信
 
 扩展侧调代理接口**不走 http 栈**——因为扩展宿主 http 栈对 `127.0.0.1` 响应 body 单向吞没（CLAUDE.md 关键陷阱）。所有 wrapper 走**裸 `net` socket**（`proxyHost.ts:443 rawHttp`）：
 
@@ -47,7 +112,7 @@ server 崩了 = Extension Host 崩；server 占的内存/句柄都在宿主进�
 
 **关键结论**：扩展↔server 的通信通道**已经是 HTTP over localhost**，只是用裸 socket 实现。独立进程化后，这条通道**完全不用改**——子进程监听同一个端口，裸 socket 照样连得上。这是整个改造能低成本落地的核心前提。
 
-### 1.4 生命周期 & 多窗口协调
+### 2.4 生命周期 & 多窗口协调
 
 `ProxyHost` 的「宿主/从机」机制（`proxyHost.ts:81-575`）：
 
@@ -59,7 +124,7 @@ server 崩了 = Extension Host 崩；server 占的内存/句柄都在宿主进�
 
 这套机制**全是基于「端口占用 + healthz 探测」的进程间协调**，不依赖 server 在哪个进程里。所以独立进程化后，多窗口协调逻辑**天然仍然成立**——只是「宿主窗口」现在 spawn 一个子进程，而不是 in-proc 起 server。
 
-### 1.5 server.js 已有 CLI 入口
+### 2.5 server.js 已有 CLI 入口
 
 `server.js:860-868`：
 
@@ -77,7 +142,7 @@ if (isMainModule) {
 
 **`node proxy/server.js` 已经能独立跑**——这是独立进程化的另一个核心前提：server.js 本身已经设计成可独立运行，扩展只是用 `import` 复用了它的 `startServer`。
 
-### 1.6 配置/日志路径注入
+### 2.6 配置/日志路径注入
 
 扩展通过 `startServer` 参数注入三个路径（`proxyHost.ts:95-98`）：
 
@@ -89,7 +154,7 @@ if (isMainModule) {
 
 独立进程化后，这三个路径要通过 **spawn 的 env 或命令行参数**传给子进程，子进程在 `isMainModule` 入口里接收并转给 `startServer`。
 
-### 1.7 现有测试怎么起 server
+### 2.7 现有测试怎么起 server
 
 `proxy/test/server-alias-e2e.test.mjs:40-44`：
 
@@ -111,9 +176,9 @@ async function startProxy(configPath, logsDir) {
 
 ---
 
-## 2. 独立进程化方案
+## 3. 独立进程化方案
 
-### 2.1 总体架构（第一阶段目标）
+### 3.1 总体架构（第一阶段目标）
 
 ```
 VS Code
@@ -129,7 +194,7 @@ VS Code
 
 扩展侧 `ProxyHost` 从「in-proc 起 server」变成「spawn 子进程 + 管生命周期」。通信通道（裸 socket HTTP）**零改动**。
 
-### 2.2 用 VS Code 自带 Node Runtime（`process.execPath`），不打包二进制
+### 3.2 用 VS Code 自带 Node Runtime（`process.execPath`），不打包二进制
 
 调研结论与你一致：
 
@@ -138,7 +203,7 @@ VS Code
 
 > 注意一个潜在坑：`process.execPath` 在 VS Code 里**是 Electron 的可执行**，不是纯 Node。Electron 运行普通 Node 脚本时，需要 `ELECTRON_RUN_AS_NODE=1` env 才会以纯 Node 模式跑（否则可能带 Electron 运行时行为）。这是独立进程化要验证的头号风险点（见 §4.1）。如果 `process.execPath` 是 Electron，spawn 时要带 `env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }`。
 
-### 2.3 spawn 入口设计
+### 3.3 spawn 入口设计
 
 server.js 的 `isMainModule` 入口要扩展，接收扩展注入的路径。两种传参方式：
 
@@ -177,7 +242,7 @@ if (isMainModule) {
 
 缺点：要写 argv 解析；`isMainModule` 判断要小心 `argv` 偏移。不推荐。
 
-### 2.4 ProxyHost 改造点（控制器化）
+### 3.4 ProxyHost 改造点（控制器化）
 
 `ProxyHost` 内部从「持 `handle`（in-proc server 句柄）」变成「持 `child`（ChildProcess）」：
 
@@ -201,7 +266,7 @@ in-proc 时 `startServer` 返回 Promise 在 `listen` 回调里 resolve。子进
 
 **EADDRINUSE 判定**：spawn 后若端口被占（别的窗口已起），子进程会 `process.exit(1)`（`server.js:866`）。扩展侧监听 `child.on('exit')`：若在就绪前 exit 且 code=1，结合 stderr 含 `EADDRINUSE` → 当从机。这比 in-proc 时 catch EADDRINUSE 稍繁，但可行。
 
-### 2.5 多窗口协调：不变
+### 3.5 多窗口协调：不变
 
 现有「端口 bind 单例 + 心跳接管」机制完全基于进程间端口探测，独立进程化后：
 
@@ -212,14 +277,14 @@ in-proc 时 `startServer` 返回 Promise 在 `listen` 回调里 resolve。子进
 
 **唯一差别**：从机窗口现在也会 spawn 一个「立刻 exit」的短命子进程（因为 EADDRINUSE）。为避免每 2s 心跳都 spawn 一次空子进程，**从机应该先 `healthz` 探测，通了就不 spawn**（现有 `tryBecomeHost` 已经是这逻辑：`if (await healthz(port)) return;` 在 spawn 之前，`proxyHost.ts:493`）。所以从机不会反复 spawn——只在真正需要接管时才 spawn。✅
 
-### 2.6 kill / 重启语义
+### 3.6 kill / 重启语义
 
 - `POST /api/kill`（`server.js:544`）：子进程 `server.close()` 后**进程不退出**（`isMainModule` 入口里 `startServer` 的 Promise 不会因 `server.close` resolve/reject，进程空转）。这会变成「子进程活着但没监听」的僵尸态。
   - **需要改**：`/api/kill` 在独立进程模式下应该 `process.exit(0)` 让子进程退出，宿主心跳发现 healthz 不通重新 spawn。或者在 server.js 入口给 `stop()` 加一个「close 后 exit」的钩子。
   - 这是独立进程化要顺带调整的点（见 §3.2）。
 - 扩展侧 `kill()` wrapper（`proxyHost.ts:206`）调 `/api/kill` 的语义不变——让运行中的 server 停监听，宿主重起。只是「重起」从 in-proc `startServer` 变成 re-spawn。
 
-### 2.7 日志/stdout 处理
+### 3.7 日志/stdout 处理
 
 子进程 `stdio: ['ignore', 'pipe', 'pipe']`：
 
@@ -231,9 +296,9 @@ in-proc 时 `startServer` 返回 Promise 在 `listen` 回调里 resolve。子进
 
 ---
 
-## 3. 对测试的影响（第一阶段核心收益）
+## 4. 对测试的影响（第一阶段核心收益）
 
-### 3.1 现有测试分类与改造
+### 4.1 现有测试分类与改造
 
 | 测试 | 现状起 server 方式 | 独立进程化后 |
 |---|---|---|
@@ -269,7 +334,7 @@ async function startProxy(configPath, logsDir) {
 
 **推荐**：第一阶段两者并存。in-proc import 保留给快速逻辑验证（快、能直接拿 handle）；新增一个 spawn 子进程的 e2e 套件验证「独立进程启动/通信/退出」这条链路本身。这样既不破坏现有测试，又覆盖了新架构。
 
-### 3.2 新增可写的自动化用例（独立进程化解锁的）
+### 4.2 新增可写的自动化用例（独立进程化解锁的）
 
 独立进程化后，可以写一批**以前难写**的用例（因为以前 server 在 host 进程里，没法测进程级行为）：
 
@@ -284,9 +349,9 @@ async function startProxy(configPath, logsDir) {
 
 ---
 
-## 4. 风险与待验证点
+## 5. 风险与待验证点
 
-### 4.1 🔴 `process.execPath` 是 Electron 还是纯 Node（头号风险）
+### 5.1 🔴 `process.execPath` 是 Electron 还是纯 Node（头号风险）
 
 VS Code 的 `process.execPath` 通常是 Electron 可执行。Electron 跑普通 Node 脚本需 `ELECTRON_RUN_AS_NODE=1`，否则可能：
 - 带 Electron 运行时（GPU、窗口初始化开销）。
@@ -297,38 +362,38 @@ VS Code 的 `process.execPath` 通常是 Electron 可执行。Electron 跑普通
 
 > 备选：若 Electron 作 Node 跑 ESM 有问题，可用 `process.execPath` + `--experimental-vm-modules` 或退而求其次用系统 Node 探测。但首选 `ELECTRON_RUN_AS_NODE`，最稳。
 
-### 4.2 🟡 ESM 在子进程的加载
+### 5.2 🟡 ESM 在子进程的加载
 
 `server.js` 是 ESM（`proxy/package.json` `type:module`）。子进程 `node proxy/server.js`：
 - 普通 Node 直接跑 ESM 文件**没问题**（Node ≥ 14 原生支持，工程要求 `@types/node ^20`）。
 - 但若 `process.execPath` 是 Electron + `ELECTRON_RUN_AS_NODE`，要验证 Electron 版本的 Node 是否支持 ESM。VS Code 1.80+ 的 Electron 应该够新，但需实测。
 - `isMainModule` 判断（`pathToFileURL(process.argv[1]).href === import.meta.url`）在子进程里要确认 `process.argv[1]` 是绝对路径（spawn 传绝对路径即可）。
 
-### 4.3 🟡 `/api/kill` 后子进程不退出
+### 5.3 🟡 `/api/kill` 后子进程不退出
 
 见 §2.6。`server.close()` 只关监听，进程空转。独立进程模式下需要 `/api/kill` 触发 `process.exit`，否则宿主心跳永远探测不通、但子进程还活着占内存。
 
 **改法**（实施阶段）：`server.js` 入口里给 `startServer` 返回的 `stop()` 加一个「close 后 process.exit(0)」选项，或 `/api/kill` handler 里 `setImmediate(() => process.exit(0))`。要区分「扩展调 kill 想重起」vs「deactivate 想彻底停」——前者靠宿主 re-spawn，后者靠 `child.kill()`。
 
-### 4.4 🟡 stderr 解析 EADDRINUSE
+### 5.4 🟡 stderr 解析 EADDRINUSE
 
 in-proc 时 `startServer` reject `EADDRINUSE` 是结构化错误（`err.code`）。子进程化后只能从 stderr 文本解析，或靠「exit code=1 + 端口被占」推断。稍脆但可接受——其实从机化判定可以**不靠 stderr**：spawn 后轮询 healthz，若 **别的进程**已 healthz 通 → 当从机；若自己 listen 成功 → 宿主。EADDRINUSE 时自己的子进程 exit、别的窗口 healthz 通，自然判为从机。stderr 只作日志。
 
-### 4.5 🟢 通信通道不变
+### 5.5 🟢 通信通道不变
 
 裸 socket HTTP 通道（`rawHttp` / `healthz`）**完全不受影响**——子进程监听同端口，裸 socket 照连。这是改造最大保险。
 
-### 4.6 🟢 配置/日志路径注入
+### 5.6 🟢 配置/日志路径注入
 
 靠 env 传三个路径（§2.3），子进程入口接收。和 in-proc 参数注入等价，无风险。
 
-### 4.7 🟡 Windows 子进程清理
+### 5.7 🟡 Windows 子进程清理
 
 Windows 上 `child.kill()` 默认发 SIGTERM 但 Windows 无信号，Node 会 `TerminateProcess`。`deactivate` 时要确保子进程被 kill，否则残留进程占端口。`server.js` 的 `openInFileManager` 用 `detached:true` + `unref()`（`server.js:568`）——那是给资源管理器用的，server 子进程**不要** detached，要跟着宿主生命周期。
 
 ---
 
-## 5. 实施阶段建议步骤（仅规划，不在本次执行）
+## 6. 实施阶段建议步骤（调研期规划，已全部落地）
 
 1. **验证 §4.1**：扩展里打印 `process.execPath` / `process.versions.electron`，确定是否需要 `ELECTRON_RUN_AS_NODE`。
 2. **扩展 server.js 入口**：`isMainModule` 接收 env 路径参数；`/api/kill` 触发 `process.exit`（§4.3）。
@@ -340,7 +405,7 @@ Windows 上 `child.kill()` 默认发 SIGTERM 但 Windows 无信号，Node 会 `T
 
 ---
 
-## 6. 一句话结论
+## 7. 一句话结论
 
 **独立进程化成本可控**：server.js 已有 CLI 入口、扩展↔server 通信已是裸 socket HTTP（不依赖 in-proc）、多窗口协调已基于端口探测。核心改造是把 `ProxyHost` 的 `import + startServer` 换成 `spawn + healthz 轮询就绪 + child 生命周期管理`，通信层零改动。头号风险是 `process.execPath` 的 Electron/Node 身份（§4.1），需先验证。测试收益：纯逻辑单测本就脱离 host；独立进程化后新增 spawn 模式 e2e + 进程级行为（崩溃恢复/从机化/kill 重启）用例，把 server 当黑盒进程测，是「脱离 VS Code」最直接的验证。
 
