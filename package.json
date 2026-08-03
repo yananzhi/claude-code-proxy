@@ -18,6 +18,22 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
+  "bin": {
+    "claude-code-proxy": "./standalone/cli.js"
+  },
+  "files": [
+    "out/",
+    "standalone/",
+    "proxy/server.js",
+    "proxy/config-store.js",
+    "proxy/trace-store.js",
+    "proxy/logger.js",
+    "proxy/package.json",
+    "proxy/web/",
+    "package.json",
+    "standalone/package.json",
+    "README.md"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -290,6 +306,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
+    "prepublishOnly": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",

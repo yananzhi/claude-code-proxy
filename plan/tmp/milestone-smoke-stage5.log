@@ -1,0 +1,91 @@
+# 阶段 5 smoke 验证存档 — npm 全局包打包
+
+> 日期：2026-08-04
+> 任务：阶段 5，npm 全局包打包
+> 设计依据：docs/standalone-backend-plan.md（阶段 5）+ plan/tmp/2026-08-03-stage5-npm-package.md（正交设计）
+
+## 执行结果
+
+```
+命令：node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
+duration_ms: 73190（约 73s）
+
+# tests 518
+# pass 516
+# fail 0
+# skipped 2
+```
+
+- baseline 499（阶段 4 后）+ 新增 19（npm-package：12 维度 + 7 子代理 REVIEW）= 518
+- 2 skip 为 POSIX 专属在 Windows 跳过（已知，与本次改动无关）
+- 0 fail，VS Code 形态 499 用例零破坏 ✅
+- standalone 套件 133 全过
+
+## 端到端手动验证
+
+`node standalone/cli.js`（带 CCP_HOME）：
+- ✅ 起代理（healthz 通）
+- ✅ management API + 网页可访问
+- ✅ CCP_HOME 覆盖默认 home
+- ✅ `npm pack --dry-run` 含 out/ + standalone/ + proxy 核心文件，不含 logs/test
+
+## 新增文件清单
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/cli.js` | bin 入口，shebang `#!/usr/bin/env node`，import main.js 调 launchStandalone |
+| `test/standalone/npm-package.test.mjs` | 19 测试：D1-D4 维度 + 7 REVIEW |
+
+## 改动文件
+
+| 文件 | 说明 |
+|---|---|
+| `package.json` | 加 `bin: {"claude-code-proxy": "./standalone/cli.js"}`、`files` 白名单（out/ + standalone/ + proxy 具体文件 + web/）、`scripts.prepublishOnly: "npm run compile"` |
+| `CLAUDE.md` | 用例数 499→518，standalone 套件描述加 npm 打包 |
+
+## 子代理 review 结论
+
+隔离上下文子代理审查 cli.js + package.json + 测试，覆盖 6 高风险类别，产出 7 个疑点：
+
+| # | 类别 | 疑点 | TDD 结论 |
+|---|---|---|---|
+| Bug1 | 安全/边界 | `files: ["proxy/"]` 递归含 proxy/logs/（trace 日志可能含 API token）+ proxy/test/，发布 npm 凭据泄露 | **真 bug，已修**（files 拆 proxy 具体文件：server.js/config-store.js/trace-store.js/logger.js/package.json/web/） |
+| S1 | 一致性 | shebang + ESM（Node 20 是否跳过首行 shebang） | 非 bug → 回归用例（D1c healthz 验证） |
+| S2 | 一致性 | main.js isMain 防护（cli.js 执行时不重复触发 launchStandalone） | 非 bug → 回归用例 |
+| S3 | 边界 | PROJECT_ROOT 解析（全局安装后路径） | 非 bug → 回归用例 |
+| S4 | 边界 | node_modules 不打包（安装时解析依赖） | 非 bug → 回归用例 |
+| S5 | 边界 | out/ 在 .gitignore（github 源码安装缺 out/） | 非 bug，留后续（prepublishOnly 保证 npm 包完整） |
+| S6 | 一致性 | Windows .cmd shim 自动生成 | 非 bug → 回归用例 |
+| D5/D6 | 一致性 | .vscodeignore 与 files 独立 + standalone/ 进 VSIX | 非 bug → 回归用例（D5a-e 泄露预防 + D6a-b） |
+
+**真 bug：1 个（logs/test 泄露，严重）。非 bug 翻转成回归用例：6 个。新增 REVIEW 用例 7 个。**
+
+## 维度覆盖核对
+
+| 维度 | 用例数 | 覆盖 |
+|---|---|---|
+| D1 bin 入口（shebang/import/可执行/CCP_HOME） | 4 | ✅ |
+| D2 package.json 字段（bin/files/prepublishOnly/VS Code 保留） | 4 | ✅ |
+| D3 out/ 发布（编译产物存在/目录完整/type:module） | 3 | ✅ |
+| D4 npm pack 验证（含 out/standalone/proxy） | 1 | ✅ |
+| D5 泄露预防（无 logs/test，含 web） | 5（REVIEW） | ✅ |
+| D6 .vscodeignore 回归 | 2（REVIEW） | ✅ |
+
+## 关键设计决策
+
+- **bin 入口 standalone/cli.js wrapper**：不直接用 main.js（isMain 判断在 bin shim 下不稳定），cli.js 带 shebang import main.js 调 launchStandalone。
+- **bin 名 claude-code-proxy**：与 npm 包名一致，不与 VS Code 命令冲突。
+- **files 白名单 + prepublishOnly**：确保 out/ + standalone/ + proxy 核心文件随包发布，prepublishOnly 编译保证 out/ 存在。
+- **proxy/ 拆具体文件**：避免 proxy/logs/（含 trace + 可能的 token）+ proxy/test/ 泄露进 npm 包。
+- **bin 与 main 共存**：VS Code 读 main（out/extension.js），npm 读 bin（standalone/cli.js），不冲突。
+- **首版支持 npm install -g . + npm link**：github 源码安装的 postinstall 编译留后续（需用户有 tsc 或预编译发布）。
+
+## 结论
+
+阶段 5 通过七步流程。npm 全局包打包完成：
+- `claude-code-proxy` bin 命令可起独立后端。
+- npm pack 包含 out/ + standalone/ + proxy 核心文件，不含 logs/test（无凭据泄露）。
+- VS Code 形态零破坏（499 用例全绿，main/engines.vscode/contributes 保留）。
+- standalone 套件 133 测试纳入全量（518 用例）。
+
+设计文档 6 阶段（0-5）全部完成。独立后端形态可打包发布。
