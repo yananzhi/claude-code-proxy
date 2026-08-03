@@ -1,0 +1,78 @@
+# 阶段 0 smoke 验证存档 — 共享核心下沉（不改行为）
+
+> 日期：2026-08-03
+> 任务：阶段 0，共享核心下沉（host-agnostic 抽取）
+> 设计依据：docs/standalone-backend-plan.md（阶段 0）+ plan/tmp/2026-08-03-stage0-core-extraction.md（正交设计）
+
+## 执行结果
+
+```
+命令：node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/
+duration_ms: 59339（约 59s）
+
+# tests 362
+# pass 360
+# fail 0
+# skipped 2
+```
+
+- baseline 352 + 新增 10（9 个 resolveClaudeBinary + 1 个子代理回归）= 362
+- 2 skip 为 POSIX 专属在 Windows 跳过（已知，与本次改动无关）
+- 0 fail，VS Code 形态原有用例零破坏 ✅
+
+## 改动文件清单
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `src/claudeBinary.ts` | **新增** | `resolveClaudeBinary()` 纯函数 + `NATIVE_BINARY_SUBDIR` 常量，不 import vscode（host-agnostic） |
+| `src/claudeLauncher.ts` | 修改 | 删内联 `resolveClaudeBinary`，改 `import { resolveClaudeBinary } from './claudeBinary'`；`resolveBinaryPath()` 委托纯函数 |
+| `src/configStore.ts` | 修改 | 构造参数 `vscode.Uri` → `string`，删 `import vscode` |
+| `src/activeState.ts` | 修改 | 同上 |
+| `src/extension.ts:35-36` | 修改 | 调用处 `context.globalStorageUri` → `context.globalStorageUri.fsPath` |
+| `src/proxyToggle.ts` | 修改 | 删无用 `import vscode`（类体零引用） |
+| `test/proxyHost/resolveClaudeBinary.test.mjs` | **新增** | 9 维度用例 + 1 回归用例 |
+
+## 范围收缩记录
+
+原设计阶段 0 含"CLI 启动核心 spawn 化"。读 `claudeLauncher.ts` 全文后发现 `createTerminal` 与配置准备逻辑交织，抽 spawn 化会动 `launch()` 主干，超出"不改行为"边界。故阶段 0 的 `claudeLauncher` 部分收缩为**只抽 `resolveClaudeBinary` 纯函数**，CLI 启动 spawn 化推迟到阶段 3。
+
+## 子代理 review 结论
+
+隔离上下文子代理审查 7 个改动文件，覆盖 6 高风险类别，产出 10 个疑点：
+
+| # | 类别 | 疑点 | TDD 结论 |
+|---|---|---|---|
+| 1 | 边界 | 空串 extensionPath 行为差异（原 `if(!ext)` 判对象 vs 新 `if(vscodeExtensionPath)` 判字符串） | 非 bug，良性差异，已加回归用例固化 |
+| 2 | 边界 | path.join(Uri.fsPath vs string) 路径分隔符/尾斜杠 | 非 bug，验证一致 |
+| 3 | 异常 | 急切调 getExtension vs 原懒加载 | 非 bug，无副作用只读查询 |
+| 4 | 类型 | userOverride 的 undefined 处理 | 非 bug，已有用例覆盖 |
+| 5 | 状态 | resolveClaudeBinary 纯度 | 非 bug，无可变状态 |
+| 6 | 并发 | 文件系统竞态 | 非 bug，同步 fs.existsSync，与原一致 |
+| 7 | 一致性 | 删 import 后残留引用 / fs/path 是否成无用 | 非 bug，验证无残留 |
+| 8 | 一致性 | 三条日志文案是否逐字一致 | 非 bug，验证一致 |
+| 9 | 一致性 | 加载 claudeBinary.js 是否传递性引入 vscode | 非 bug，仅 fs/path |
+| 10 | 边界 | path.join 空/undefined storageDir | 非 bug，类型为 string，调用方传非空 |
+
+**真 bug：0 个。非 bug 翻转成回归用例：1 个**（疑点 #1，固化空串 extensionPath 视为未安装扩展的行为）。
+
+## 维度覆盖核对
+
+| 维度 | 用例数 | 覆盖 |
+|---|---|---|
+| A1 configStore/activeState 路径拼接 | 现有用例继承 | ✅（改类型后 352 用例跑通即验证） |
+| B1 探测来源优先级 | 3 | 用户覆盖 > 扩展 > null，两两组合 |
+| B2 平台二进制名 | 2 | win32→claude.exe / linux→claude |
+| B3 路径不存在降级 | 2 | 用户覆盖降级 / 扩展二进制缺失 |
+| B4 空覆盖 | 1（含空串/空白/tab/undefined） | ✅ |
+| B5 undefined 扩展路径 | 1（合并在 B5+6） | ✅ |
+| B6 无 log 回调 | 1（合并在 B5+6） | ✅ |
+| 回归：空串 extensionPath | 1 | 固化良性差异 |
+
+## 结论
+
+阶段 0 通过七步流程。VS Code 形态行为零变化（352 用例全绿），共享核心下沉完成：
+- `resolveClaudeBinary` 纯函数已独立到 `claudeBinary.ts`，可纯 Node 测试 + 独立形态复用。
+- `configStore`/`activeState` 脱离 vscode.Uri，接 string 路径。
+- `proxyToggle` 清理死 import。
+
+为阶段 1（独立后端入口骨架）铺好基础。

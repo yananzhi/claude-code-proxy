@@ -1,6 +1,5 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as vscode from 'vscode';
 import type { LLMConfig } from './types';
 
 /**
@@ -12,8 +11,8 @@ export class ConfigStore {
     private readonly filePath: string;
     private cache: LLMConfig[] | undefined;
 
-    constructor(storageDir: vscode.Uri) {
-        this.filePath = path.join(storageDir.fsPath, 'configs.json');
+    constructor(storageDir: string) {
+        this.filePath = path.join(storageDir, 'configs.json');
     }
 
     async load(): Promise<LLMConfig[]> {

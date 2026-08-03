@@ -7,11 +7,10 @@ import { ProxyHost, UpstreamEnv } from './proxyHost';
 import { writeSettings } from './claudeConfig';
 import { extractUpstream, synthesizeProxySettings } from './upstream';
 import { resolveDerivedUpstream, computeAliasSyncActions, buildAliasEnv } from './derivedLogic';
+import { resolveClaudeBinary } from './claudeBinary';
 
 /** 官方 Claude Code 扩展 ID（publisher.name，不含版本号，升级后仍有效）。 */
 const OFFICIAL_EXTENSION_ID = 'anthropic.claude-code';
-/** 扩展安装目录下二进制的相对子路径（各平台一致）。 */
-const NATIVE_BINARY_SUBDIR = path.join('resources', 'native-binary');
 /** workspace 下独立配置目录名。 */
 const WORKSPACE_CONFIG_DIR = '.claude_proxy';
 
@@ -41,30 +40,15 @@ export class ClaudeLauncher {
 
     /** 解析 claude 二进制完整路径：用户设置覆盖 → 官方扩展自动探测。失败返回 null。 */
     private resolveBinaryPath(): string | null {
-        // 1) 用户设置覆盖
-        const override = vscode.workspace
+        const userOverride = vscode.workspace
             .getConfiguration('claude-code-proxy')
             .get<string>('claudeBinaryPath') ?? '';
-        if (override.trim()) {
-            if (fs.existsSync(override)) {
-                return override;
-            }
-            this.output.appendLine(`[launcher] 设置的 claudeBinaryPath 不存在: ${override}`);
-        }
-
-        // 2) 官方扩展自动探测
         const ext = vscode.extensions.getExtension(OFFICIAL_EXTENSION_ID);
-        if (!ext) {
-            this.output.appendLine('[launcher] 未找到官方 anthropic.claude-code 扩展');
-            return null;
-        }
-        const binaryName = process.platform === 'win32' ? 'claude.exe' : 'claude';
-        const candidate = path.join(ext.extensionPath, NATIVE_BINARY_SUBDIR, binaryName);
-        if (!fs.existsSync(candidate)) {
-            this.output.appendLine(`[launcher] 官方扩展已装但二进制缺失: ${candidate}`);
-            return null;
-        }
-        return candidate;
+        return resolveClaudeBinary({
+            userOverride,
+            vscodeExtensionPath: ext?.extensionPath,
+            log: (msg) => this.output.appendLine(msg),
+        });
     }
 
     /**

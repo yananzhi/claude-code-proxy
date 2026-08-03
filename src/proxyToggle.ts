@@ -1,5 +1,3 @@
-import * as vscode from 'vscode';
-
 /**
  * 记录「本窗口是否允许开启 backup proxy 进程」的开关状态。纯内存态，不持久化。
  *

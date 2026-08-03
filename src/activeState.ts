@@ -1,6 +1,5 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as vscode from 'vscode';
 import type { ActiveState, ConfigMode } from './types';
 
 /**
@@ -12,8 +11,8 @@ export class ActiveStateStore {
     private readonly filePath: string;
     private cache: ActiveState | null | undefined;
 
-    constructor(storageDir: vscode.Uri) {
-        this.filePath = path.join(storageDir.fsPath, 'active.json');
+    constructor(storageDir: string) {
+        this.filePath = path.join(storageDir, 'active.json');
     }
 
     async load(): Promise<ActiveState | null> {

@@ -32,8 +32,8 @@ export function activate(context: vscode.ExtensionContext): void {
         console.log('[claude-code-proxy] 已从旧 cc-switch 命名空间迁移 configs.json + active.json');
     }
 
-    const store = new ConfigStore(context.globalStorageUri);
-    const activeState = new ActiveStateStore(context.globalStorageUri);
+    const store = new ConfigStore(context.globalStorageUri.fsPath);
+    const activeState = new ActiveStateStore(context.globalStorageUri.fsPath);
     const proxyToggle = new ProxyToggleStore();
     const output = vscode.window.createOutputChannel('Claude Code Proxy');
     context.subscriptions.push(output);

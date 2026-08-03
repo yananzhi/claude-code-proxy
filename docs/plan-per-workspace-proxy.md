@@ -1,5 +1,12 @@
 # Per-Workspace 独立代理实例 — 调研与实施计划
 
+> ⚠️ **已作废（2026-08-03）**：本篇方向已被 `docs/standalone-backend-plan.md` 反转。
+> 本篇要解决的"全局 upstream last-write-wins 串味"问题，在新方向下不是缺陷——
+> 新方向定 proxy-config 为公共一份、所有 workspace 共用同一 upstream，是设计意图。
+> 本篇方案不实施。如未来确需 per-workspace upstream 隔离，另起方案。
+>
+> 以下原文保留作历史记录。
+>
 > 生成时间：2026-07-21
 > 状态：Plan 已完成，待实施
 > Plan 文件：`.claude_proxy/plans/eventual-sparking-pumpkin.md`
