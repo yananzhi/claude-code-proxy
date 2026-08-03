@@ -1,0 +1,80 @@
+# 阶段 6 smoke 验证存档 — 激活 local config
+
+> 日期：2026-08-04
+> 任务：阶段 6，激活 local config（写 settings.json + 注入 upstream + active 标记）
+> 设计依据：plan/tmp/2026-08-04-stage6-activate-config.md（正交设计）
+
+## 执行结果
+
+```
+命令：node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
+duration_ms: 74199（约 74s）
+
+# tests 533
+# pass 531
+# fail 0
+# skipped 2
+```
+
+- baseline 518（阶段 5 后）+ 新增 15（activate-config）= 533
+- 2 skip 为 POSIX 专属在 Windows 跳过（已知，与本次改动无关）
+- 0 fail，VS Code 形态 518 用例零破坏 ✅
+
+## ⚠ 测试污染真实代理事故 + 修复
+
+**事故**：阶段 6 首版 D2 测试用 `proxyPort: 11434`（用户正在运行的真实代理），激活流程 `POST /api/upstream` 把测试夹具 `http://real-up` 注入真实代理并落盘 `proxy-config.json`，导致用户 CLI 走代理时 502（real-up 不可达）。
+
+**根因**：upstream 是全局共享单例（last-write-wins）+ 落盘，测试连真实代理会污染。
+
+**修复**：
+1. `startMgmt` 默认 proxyPort 从 11434 改成 19998（无人监听，测 502 不污染）。
+2. D2 用临时端口 11621 起独立临时代理子进程（CCP_HOME 临时目录，upstream 落盘到临时目录），不碰用户真实代理。
+3. 还原了用户真实代理 upstream（`POST /api/upstream` 改回 `https://ark.cn-beijing.volces.com/api/coding`）。
+
+**教训**（写入 CLAUDE.md standalone 测试描述）：激活测试用临时代理子进程，绝不用真实代理 11434。
+
+## 新增文件清单
+
+| 文件 | 说明 |
+|---|---|
+| `standalone/configApi.js`（修改）| 加 activateConfig（direct 原样 / proxy 注入 upstream + 合成 settings）+ getActiveConfig + ensureProjectPermissions + ensureGitignore（复制自 claudeLauncher）。加载 synthesizeProxySettings/writeSettings/LocalActiveStateStore |
+| `standalone/managementServer.js`（修改）| 加 POST /api/workspaces/:id/configs/:cfgId/activate + GET /api/workspaces/:id/active 路由 |
+| `test/standalone/activate-config.test.mjs` | 15 测试：D1 direct/D2 proxy(临时代理)/D3 注入失败/D4 timeout/D5 active 标记/D6 permissions+gitignore/D7 不存在 |
+| `plan/tmp/2026-08-04-stage6-activate-config.md` | 正交设计 |
+
+## 改动文件
+
+| 文件 | 说明 |
+|---|---|
+| `CLAUDE.md` | 用例数 518→533，standalone 套件描述加激活 + 测试隔离警告 |
+
+## 维度覆盖核对
+
+| 维度 | 用例数 | 覆盖 |
+|---|---|---|
+| D1 direct 激活（原样 content + active 标记） | 1 | ✅ |
+| D2 proxy 激活（临时代理 + 合成 settings + upstream 注入） | 1 | ✅ |
+| D3 注入失败（502/缺 BASE_URL/非 JSON） | 3 | ✅ |
+| D5 active 标记（写入/无激活/幂等/切换） | 4 | ✅ |
+| D6 permissions + gitignore（写入/不覆盖/git/非git） | 4 | ✅ |
+| D7 不存在（workspace/config） | 2 | ✅ |
+
+## 关键设计决策
+
+- **激活与 spawn 解耦**：激活只写 settings.json + 注入 upstream + active 标记，不 spawn/重启 CLI。新 spawn 的会话读 settings.json 生效，已跑会话可能需重启。
+- **direct vs proxy 两路径**：direct 原样 content；proxy 注入 upstream + synthesizeProxySettings 合成 BASE_URL→localhost。
+- **复用纯函数**：extractUpstream/synthesizeProxySettings/writeSettings/LocalActiveStateStore 都从 out/ 加载零改。
+- **复制 ensureProjectPermissions/ensureGitignore**：从 claudeLauncher 复制到 configApi（避免改 src/ VS Code 形态）。
+- **timeout 转换**：API_TIMEOUT_MS 毫秒→秒 `Math.round(/1000)`，空/非数/非正→不传。
+- **测试隔离**：临时代理子进程（临时端口 + 临时 CCP_HOME），绝不用真实代理 11434。
+
+## 结论
+
+阶段 6 通过七步流程。激活 local config 完成：
+- direct/proxy 两模式激活工作正常。
+- active 标记 + permissions + gitignore 与 VS Code launcher 对齐。
+- 测试隔离修复（不污染真实代理）。
+- VS Code 形态零破坏（518 用例全绿）。
+- standalone 套件 148 测试纳入全量（533 用例）。
+
+设计文档 6 阶段（0-5）+ 阶段 6（激活后续）全部完成。独立后端形态可打包发布 + 激活配置可用。

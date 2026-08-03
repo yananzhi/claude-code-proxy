@@ -15,17 +15,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 const require = createRequire(import.meta.url);
-let LocalConfigStore, newId;
+let LocalConfigStore, LocalActiveStateStore, newId;
 let aggregateModelCatalog, inheritAliasesFromParent, inheritSessionContext1m, normalizeSessionContext1m;
-let extractUpstream;
+let extractUpstream, synthesizeProxySettings;
+let writeSettings;
 try {
-    ({ LocalConfigStore, newId } = require(path.join(PROJECT_ROOT, 'out', 'localConfigStore.js')));
+    ({ LocalConfigStore, LocalActiveStateStore, newId } = require(path.join(PROJECT_ROOT, 'out', 'localConfigStore.js')));
     // newId 实际从 configStore 导出，localConfigStore re-export 了
     // derivedLogic 纯函数
     const derivedLogic = require(path.join(PROJECT_ROOT, 'out', 'derivedLogic.js'));
     ({ aggregateModelCatalog, inheritAliasesFromParent, inheritSessionContext1m, normalizeSessionContext1m } = derivedLogic);
     const upstreamMod = require(path.join(PROJECT_ROOT, 'out', 'upstream.js'));
-    ({ extractUpstream } = upstreamMod);
+    ({ extractUpstream, synthesizeProxySettings } = upstreamMod);
+    const claudeConfig = require(path.join(PROJECT_ROOT, 'out', 'claudeConfig.js'));
+    ({ writeSettings } = claudeConfig);
 } catch (e) {
     console.error('[configApi] 加载 out/ 模块失败，请先 npm run compile:', e.message);
     process.exit(1);
@@ -182,7 +185,153 @@ export async function getModelCatalog(manager, workspaceId) {
 }
 
 /**
- * 转发请求到 proxy（别名即时生效）。
+ * 往项目级 `.claude/settings.local.json` 合并 `permissions.defaultMode = bypassPermissions`。
+ * 复制自 claudeLauncher.ts（避免改 src/ VS Code 形态）。已设别的 defaultMode 则尊重不覆盖。
+ */
+export async function ensureProjectPermissions(workspaceRoot, log = () => {}) {
+    const projectClaudeDir = path.join(workspaceRoot, '.claude');
+    const localSettingsPath = path.join(projectClaudeDir, 'settings.local.json');
+    let obj = {};
+    try {
+        const raw = await fs.promises.readFile(localSettingsPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            obj = parsed;
+        }
+    } catch (err) {
+        if (err.code !== 'ENOENT') {
+            log(`[activate] ${localSettingsPath} 解析失败，跳过 permissions 写入: ${err.message}`);
+            return;
+        }
+    }
+    const perms = (obj.permissions && typeof obj.permissions === 'object' && !Array.isArray(obj.permissions))
+        ? obj.permissions : {};
+    if (perms.defaultMode === 'bypassPermissions') return;
+    if (perms.defaultMode !== undefined) {
+        log(`[activate] ${localSettingsPath} 已设 permissions.defaultMode=${perms.defaultMode}，保留用户选择`);
+        return;
+    }
+    perms.defaultMode = 'bypassPermissions';
+    obj.permissions = perms;
+    await fs.promises.mkdir(projectClaudeDir, { recursive: true });
+    await fs.promises.writeFile(localSettingsPath, JSON.stringify(obj, null, 2), 'utf8');
+}
+
+/**
+ * 若 workspace 是 git 仓库且 .gitignore 未忽略 .claude_proxy/，则追加。
+ * 复制自 claudeLauncher.ts。非 git 仓库不创建 .gitignore。
+ */
+export async function ensureGitignore(workspaceRoot, log = () => {}) {
+    try {
+        if (!fs.existsSync(path.join(workspaceRoot, '.git'))) return;
+        const gitignorePath = path.join(workspaceRoot, '.gitignore');
+        let existing = '';
+        try {
+            existing = await fs.promises.readFile(gitignorePath, 'utf8');
+        } catch (err) {
+            if (err.code !== 'ENOENT') throw err;
+        }
+        const normalize = (s) => s.trim().replace(/\/+$/, '').replace(/^\.\//, '');
+        const target = normalize('.claude_proxy/');
+        const present = existing.split(/\r?\n/).some(l => normalize(l) === target);
+        if (present) return;
+        const prefix = (existing.length > 0 && !existing.endsWith('\n')) ? '\n' : '';
+        await fs.promises.writeFile(gitignorePath, `${existing}${prefix}.claude_proxy/\n`, 'utf8');
+    } catch (err) {
+        log(`[activate] 写 .gitignore 失败（忽略）: ${err.message}`);
+    }
+}
+
+/**
+ * 激活某 workspace 的某 local config：写 .claude_proxy/settings.json + （proxy 模式）注入 upstream + active 标记。
+ *
+ * - direct 模式：writeSettings 原样 content。
+ * - proxy 模式：extractUpstream → 校验 baseUrl/token → proxyForward 注入 upstream → synthesizeProxySettings → writeSettings。
+ * - 写 LocalActiveStateStore 标记 + ensureProjectPermissions + ensureGitignore。
+ *
+ * @returns {Promise<{activated: true, mode, settingsPath, note}>}
+ * @throws {NotFoundError} workspace/config 不存在
+ * @throws {ValidationError} proxy 模式缺 baseUrl/token、content 非法
+ * @throws {ProxyUnavailableError} upstream 注入失败
+ */
+export async function activateConfig(manager, proxyPort, workspaceId, cfgId, opts = {}) {
+    const log = opts.log || (() => {});
+    const ws = await manager.get(workspaceId);
+    if (!ws) throw new NotFoundError(`workspace 不存在: ${workspaceId}`);
+    const store = new LocalConfigStore(ws.dir);
+    const cfg = await store.get(cfgId);
+    if (!cfg) throw new NotFoundError(`config 不存在: ${cfgId}`);
+
+    const configDir = path.join(ws.dir, WORKSPACE_CONFIG_DIR);
+    const settingsPath = path.join(configDir, 'settings.json');
+    const mode = cfg.mode === 'proxy' ? 'proxy' : 'direct';
+    let note = '';
+
+    if (mode === 'direct') {
+        // direct：原样 content
+        await writeSettings(settingsPath, cfg.content);
+    } else {
+        // proxy：注入 upstream + 合成 settings
+        const parsed = extractUpstream(cfg.content);
+        if (!parsed) throw new ValidationError('config content 不是有效 JSON，无法解析 upstream');
+        const baseUrl = parsed.env.ANTHROPIC_BASE_URL;
+        const token = parsed.env.ANTHROPIC_AUTH_TOKEN;
+        if (!baseUrl || !token) {
+            throw new ValidationError('proxy 模式 config 缺少 env.ANTHROPIC_BASE_URL 或 ANTHROPIC_AUTH_TOKEN');
+        }
+        // timeoutSec：API_TIMEOUT_MS 毫秒→秒，空/非数/非正→不传
+        const timeoutRaw = parsed.env.API_TIMEOUT_MS;
+        let timeoutSec;
+        const tNum = Number(timeoutRaw);
+        if (Number.isFinite(tNum) && tNum > 0) timeoutSec = Math.round(tNum / 1000);
+
+        // upstream 全局共享单例（last-write-wins），并发激活不同上游会串味——记警告
+        log(`[activate] 注入代理上游: baseUrl=${baseUrl}（代理进程全局共享，并发不同上游会串味）`);
+
+        const upstream = { baseUrl, token };
+        if (parsed.env.ANTHROPIC_MODEL) upstream.model = parsed.env.ANTHROPIC_MODEL;
+        if (parsed.env.ANTHROPIC_SMALL_FAST_MODEL) upstream.smallFastModel = parsed.env.ANTHROPIC_SMALL_FAST_MODEL;
+        if (timeoutSec != null) upstream.timeoutSec = timeoutSec;
+
+        // 注入 upstream（proxy 不在→抛 ProxyUnavailableError → 502）
+        await proxyForward(proxyPort, '/api/upstream', 'POST', { upstream });
+
+        // 合成指向 localhost:proxyPort 的 settings
+        const synthesized = synthesizeProxySettings(cfg.content, proxyPort);
+        if (!synthesized) throw new ValidationError('config content 无法合成代理 settings');
+        await writeSettings(settingsPath, synthesized);
+        note = `upstream 已注入代理，CLI BASE_URL 指向 http://127.0.0.1:${proxyPort}`;
+    }
+
+    // active 标记
+    const activeStore = new LocalActiveStateStore(ws.dir);
+    await activeStore.write(cfgId, mode);
+
+    // permissions + gitignore（与 VS Code launcher 对齐）
+    await ensureProjectPermissions(ws.dir, log);
+    await ensureGitignore(ws.dir, log);
+
+    note = note || (mode === 'direct' ? '直连模式，CLI 直连上游' : '');
+    return {
+        activated: true,
+        mode,
+        settingsPath,
+        note: note + '（新 spawn 或重启的 CLI 会话读 settings.json 生效）',
+    };
+}
+
+/** 读某 workspace 的 active 标记。无 → null。 */
+export async function getActiveConfig(manager, workspaceId) {
+    const ws = await manager.get(workspaceId);
+    if (!ws) return null;
+    const activeStore = new LocalActiveStateStore(ws.dir);
+    const active = await activeStore.load();
+    if (!active) return null;
+    return active;
+}
+
+/**
+ * 转发请求到 proxy（别名即时生效 / upstream 注入）。
  * @param proxyPort proxy 端口
  * @param proxyPath 路径（如 /api/model-alias）
  * @param method HTTP method

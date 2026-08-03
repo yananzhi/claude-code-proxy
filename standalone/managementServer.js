@@ -17,7 +17,8 @@ import { ClaudeSessionManager } from './claudeSession.js';
 import { resolveClaudeBinaryStandalone } from './claudeBinaryStandalone.js';
 import {
     createLocalConfig, updateLocalConfig, deleteLocalConfig, getModelCatalog,
-    proxyForward, ValidationError, NotFoundError, ProxyUnavailableError,
+    proxyForward, activateConfig, getActiveConfig,
+    ValidationError, NotFoundError, ProxyUnavailableError,
 } from './configApi.js';
 import { managementPort } from './ports.js';
 import { buildWorkspacesHtml, buildTerminalHtml, buildConfigEditorHtml } from './web/workspaces-html.js';
@@ -223,6 +224,27 @@ export async function startManagementServer(opts = {}) {
                 const r = await proxyForward(opts.proxyPort, '/api/model-alias/next-id', 'GET');
                 res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
                 res.end(JSON.stringify(r.body));
+                return;
+            }
+
+            // POST /api/workspaces/:id/configs/:cfgId/activate → 激活 config（阶段 6）
+            const mActivate = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/activate$/);
+            if (method === 'POST' && mActivate) {
+                const id = decodeURIComponent(mActivate[1]);
+                const cfgId = decodeURIComponent(mActivate[2]);
+                const result = await activateConfig(manager, opts.proxyPort, id, cfgId, { log: opts.log });
+                sendJson(res, 200, result);
+                return;
+            }
+
+            // GET /api/workspaces/:id/active → 读当前激活的 config
+            const mActive = pathname.match(/^\/api\/workspaces\/([^/]+)\/active$/);
+            if (method === 'GET' && mActive) {
+                const id = decodeURIComponent(mActive[1]);
+                const ws = await manager.get(id);
+                if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
+                const active = await getActiveConfig(manager, id);
+                sendJson(res, 200, { active });
                 return;
             }
 

@@ -72,14 +72,14 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
   node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
   ```
   ⚠ `--test-concurrency=1` 必须加：`mock/` + `test/standalone/` 套件起真代理子进程 + mock 上游，默认并发会端口抢占/资源竞争卡死。串行才稳定。
-  现状 518 tests / 516 pass / 0 fail / 2 skip（POSIX 专属在 Windows 跳过）。
+  现状 533 tests / 531 pass / 0 fail / 2 skip（POSIX 专属在 Windows 跳过）。
 
 - **按目录跑**（改某块时针对性）：
   - `node --test proxy/test/` — server/config/trace 配置层 + e2e（9 文件，153 用例）
   - `node --test test/derived-logic/test.mjs` — 派生节点纯逻辑（153 用例）
   - `node --test test/mock-cli/test/` — Claude CLI 配置加载层等价重实现（11 用例）
   - `node --test test/proxyHost/` — `cleanEnv` / `spawnProxyChild` / `healthz` / `killChild` / `forwardStdio` / `resolveClaudeBinary` 控制器（5 文件）
-  - `node --test test/standalone/` — 独立后端入口骨架 + workspace 管理 + CLI 会话 + 配置编辑 + npm 打包（config 初始化 / spawn 守护 / 心跳 re-spawn / 生命周期 / workspace CRUD / management API / 二进制探测 / PTY 会话 / WebSocket / local config CRUD / derived 创建 / 别名编辑 / 配置编辑网页 / bin 入口 / files 白名单，133 用例，起真 server.js 子进程；真实 PTY/conpty 集成手动验证不进套件）
+  - `node --test test/standalone/` — 独立后端入口骨架 + workspace 管理 + CLI 会话 + 配置编辑 + npm 打包 + 激活（config 初始化 / spawn 守护 / 心跳 re-spawn / 生命周期 / workspace CRUD / management API / 二进制探测 / PTY 会话 / WebSocket / local config CRUD / derived 创建 / 别名编辑 / 配置编辑网页 / bin 入口 / files 白名单 / config 激活写 settings.json + 注入 upstream，148 用例，起真 server.js 子进程；真实 PTY/conpty 集成手动验证不进套件；激活测试用临时代理子进程，绝不用真实代理 11434）
   - `node --test mock/` — 端到端（起真代理 + mock 上游，effort/日志/model/端口/stats/SSE，6 文件 + test.mjs）
 
 - **单文件跑**：`node --test proxy/test/server-entry-kill.test.mjs`（任意 `.test.mjs` 文件路径）。
