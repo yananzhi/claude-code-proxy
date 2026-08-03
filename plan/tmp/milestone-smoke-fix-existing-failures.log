@@ -1,0 +1,2119 @@
+TAP version 13
+# Subtest: effort 改写：9 场景（high→max / 热重载 / 非法值拒绝）
+ok 1 - effort 改写：9 场景（high→max / 热重载 / 非法值拒绝）
+  ---
+  duration_ms: 2382.8338
+  ...
+# Subtest: 日志目录可配置 + 四档过滤 + attempts 摘要 + kill
+ok 2 - 日志目录可配置 + 四档过滤 + attempts 摘要 + kill
+  ---
+  duration_ms: 2705.9653
+  ...
+# Subtest: trace 的 model 字段提取：7 场景（正常/无model/非JSON/坏JSON/count_tokens/effort共存）
+ok 3 - trace 的 model 字段提取：7 场景（正常/无model/非JSON/坏JSON/count_tokens/effort共存）
+  ---
+  duration_ms: 2391.6742
+  ...
+# Subtest: 端口可配置 + 平台默认 + kill
+ok 4 - 端口可配置 + 平台默认 + kill
+  ---
+  duration_ms: 573.5088
+  ...
+# [2026-08-03 14:27:38.207 +08:00] proxy listening on http://127.0.0.1:11514
+# [2026-08-03 14:27:38.208 +08:00]   web UI     : http://127.0.0.1:11514/
+# [2026-08-03 14:27:38.208 +08:00]   upstream   : undefined (http)
+# [2026-08-03 14:27:38.208 +08:00]   model      : (unset)
+# [2026-08-03 14:27:38.208 +08:00]   token      : ***
+# [2026-08-03 14:27:38.209 +08:00]   retry      : maxAttempts=5 backoffSec=1 backoffMaxSec=16 rules=[{"status":503,"code":10310},{"status":200,"code":10310}]
+# [2026-08-03 14:27:38.209 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:27:38.209 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:38.209 +08:00]   detail log : <default>  (时间均为中国时间 +08:00)
+# Subtest: /api/stats 与 /api/traces 集成（窗口/去重/DoS 防护 + web UI 对齐）
+ok 5 - /api/stats 与 /api/traces 集成（窗口/去重/DoS 防护 + web UI 对齐）
+  ---
+  duration_ms: 78.6435
+  ...
+# Subtest: SSE 流式增量转发（mock 每 300ms 发一个 chunk，代理应多次到达非缓冲）
+ok 6 - SSE 流式增量转发（mock 每 300ms 发一个 chunk，代理应多次到达非缓冲）
+  ---
+  duration_ms: 2297.8201
+  ...
+# Starting mock server...
+# Starting proxy (test config)...
+# Both ready. Running scenarios...
+# Results:
+#   PASS  A 503,503,success (non-stream): status=200  got 200
+#   PASS  A 503,503,success (non-stream): body contains ""content""  got: {"id":"msg_mock_3","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"Hello from
+#   PASS  A 503,503,success (non-stream): attempts=3  got 3
+#   PASS  B 200-busy,200-busy,success (non-stream): status=200  got 200
+#   PASS  B 200-busy,200-busy,success (non-stream): body contains ""content""  got: {"id":"msg_mock_6","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"Hello from
+#   PASS  B 200-busy,200-busy,success (non-stream): attempts=3  got 3
+#   PASS  C 503,200-busy,success (mixed): status=200  got 200
+#   PASS  C 503,200-busy,success (mixed): body contains ""content""  got: {"id":"msg_mock_9","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"Hello from
+#   PASS  C 503,200-busy,success (mixed): attempts=3  got 3
+#   PASS  D 404 (pass-through): status=404  got 404
+#   PASS  D 404 (pass-through): body contains "no any schema route found"  got: {"message":"no any schema route found","sid":"ase_mock_10"}
+#   PASS  D 404 (pass-through): attempts=1  got 1
+#   PASS  E 400 (pass-through): status=400  got 400
+#   PASS  E 400 (pass-through): body contains "invalid_request_error"  got: {"type":"error","error":{"type":"invalid_request_error","message":"mock: bad request"}}
+#   PASS  E 400 (pass-through): attempts=1  got 1
+#   PASS  F timeout (pass-through, not retried): status=502  got 502
+#   PASS  F timeout (pass-through, not retried): body contains "upstream_unreachable"  got: {"type":"error","error":{"type":"upstream_unreachable","message":"upstream http://127.0.0.1:8787 unreachable (timeout (3
+#   PASS  F timeout (pass-through, not retried): attempts=1  got 1
+#   PASS  G drop (pass-through, not retried): status=502  got 502
+#   PASS  G drop (pass-through, not retried): body contains "upstream_unreachable"  got: {"type":"error","error":{"type":"upstream_unreachable","message":"upstream http://127.0.0.1:8787 unreachable (response s
+#   PASS  G drop (pass-through, not retried): attempts=1  got 1
+#   PASS  H 503,success (stream): status=200  got 200
+#   PASS  H 503,success (stream): body contains "message_stop"  got: event: message_start
+# data: {"type":"message_start","message":{"id":"msg_mock_15","type":"message","role":"assistant","mo
+#   PASS  H 503,success (stream): attempts=2  got 2
+#   PASS  I 503×5 (exhausted): status=503  got 503
+#   PASS  I 503×5 (exhausted): body contains "system is busy"  got: {"error":{"code":10310,"message":"The system is busy, please try again later.","type":"api_error"},"id":"cht_mock_20","t
+#   PASS  I 503×5 (exhausted): attempts=5  got 5
+#   PASS  J 503-other (pass-through, not retried): status=503  got 503
+#   PASS  J 503-other (pass-through, not retried): body contains "non-10310"  got: {"error":{"code":50399,"message":"other 503 (non-10310, Claude Code can handle)","type":"api_error"},"id":"cht_mock_21",
+#   PASS  J 503-other (pass-through, not retried): attempts=1  got 1
+#   PASS  K 429 (pass-through, not retried): status=429  got 429
+#   PASS  K 429 (pass-through, not retried): body contains "Claude Code can handle"  got: {"type":"error","error":{"type":"api_error","message":"mock: 429 (non-10310, Claude Code can handle)"},"id":"cht_mock_22
+#   PASS  K 429 (pass-through, not retried): attempts=1  got 1
+#   PASS  L 500 (pass-through, not retried): status=500  got 500
+#   PASS  L 500 (pass-through, not retried): body contains "Claude Code can handle"  got: {"type":"error","error":{"type":"api_error","message":"mock: 500 (non-10310, Claude Code can handle)"},"id":"cht_mock_23
+#   PASS  L 500 (pass-through, not retried): attempts=1  got 1
+#   PASS  M 502 (pass-through, not retried): status=502  got 502
+#   PASS  M 502 (pass-through, not retried): body contains "Claude Code can handle"  got: {"type":"error","error":{"type":"api_error","message":"mock: 502 (non-10310, Claude Code can handle)"},"id":"cht_mock_24
+#   PASS  M 502 (pass-through, not retried): attempts=1  got 1
+#   PASS  N 504 (pass-through, not retried): status=504  got 504
+#   PASS  N 504 (pass-through, not retried): body contains "Claude Code can handle"  got: {"type":"error","error":{"type":"api_error","message":"mock: 504 (non-10310, Claude Code can handle)"},"id":"cht_mock_25
+#   PASS  N 504 (pass-through, not retried): attempts=1  got 1
+# 42 passed, 0 failed
+# Subtest: D:\\work_dir\\claude-code-proxy\\mock\\test.mjs
+ok 7 - D:\\work_dir\\claude-code-proxy\\mock\\test.mjs
+  ---
+  duration_ms: 8441.6549
+  ...
+# Subtest: S1. fromTs calculation uses non-integer intermediate product (1.1h)
+ok 8 - S1. fromTs calculation uses non-integer intermediate product (1.1h)
+  ---
+  duration_ms: 2.9902
+  ...
+# Subtest: S2. Dedup key Math.round(h*1000) incorrectly dedupes small different hours
+ok 9 - S2. Dedup key Math.round(h*1000) incorrectly dedupes small different hours
+  ---
+  duration_ms: 1.0218
+  ...
+# Subtest: S3. stats() clamps >168h windows to 168 instead of rejecting them
+ok 10 - S3. stats() clamps >168h windows to 168 instead of rejecting them
+  ---
+  duration_ms: 2.2279
+  ...
+# Subtest: S4. Dedup after clamp: windows=[168, 170] silently loses one window
+ok 11 - S4. Dedup after clamp: windows=[168, 170] silently loses one window
+  ---
+  duration_ms: 2.1781
+  ...
+# Subtest: S5. Server MAX_HOURS (168) vs trace-store MAX_HOURS (RETENTION_DAYS*24) — must match
+ok 12 - S5. Server MAX_HOURS (168) vs trace-store MAX_HOURS (RETENTION_DAYS*24) — must match
+  ---
+  duration_ms: 1.9785
+  ...
+# Subtest: S6. stats() now field is stale: captured before async scan, not updated after
+ok 13 - S6. stats() now field is stale: captured before async scan, not updated after
+  ---
+  duration_ms: 16.1099
+  ...
+# Subtest: S7. stats() silently skips traces with invalid/missing startedAt — count mismatch with list()
+ok 14 - S7. stats() silently skips traces with invalid/missing startedAt — count mismatch with list()
+  ---
+  duration_ms: 11.8591
+  ...
+# Subtest: S8. stats() inclusive bounds: fromTs is >= and nowMs is <=, verifying with interior trace
+ok 15 - S8. stats() inclusive bounds: fromTs is >= and nowMs is <=, verifying with interior trace
+  ---
+  duration_ms: 5.5832
+  ...
+# Subtest: S9. Server Number() accepts hex/sci-notation windows — unexpected values
+ok 16 - S9. Server Number() accepts hex/sci-notation windows — unexpected values
+  ---
+  duration_ms: 0.7068
+  ...
+# Subtest: S10. stats() day-boundary: +1 day buffer prevents under-scan at China-day boundary
+ok 17 - S10. stats() day-boundary: +1 day buffer prevents under-scan at China-day boundary
+  ---
+  duration_ms: 4.6212
+  ...
+# Subtest: S11. UI bug: clamped hours create unremovable stats windows
+ok 18 - S11. UI bug: clamped hours create unremovable stats windows
+  ---
+  duration_ms: 2.0463
+  ...
+# Subtest: S12. stats() counts non-integer finalStatus (e.g., 200.5) as success
+ok 19 - S12. stats() counts non-integer finalStatus (e.g., 200.5) as success
+  ---
+  duration_ms: 4.9535
+  ...
+# Subtest: S13. stats() returns empty windows array when all windows are invalid — no fallback
+ok 20 - S13. stats() returns empty windows array when all windows are invalid — no fallback
+  ---
+  duration_ms: 1.1487
+  ...
+# Subtest: S14. stats() near-duplicate hours create nearly-identical stat cards
+ok 21 - S14. stats() near-duplicate hours create nearly-identical stat cards
+  ---
+  duration_ms: 0.8583
+  ...
+# Subtest: S15. stats() timezone consistency: China-day shards cover UTC time window
+ok 22 - S15. stats() timezone consistency: China-day shards cover UTC time window
+  ---
+  duration_ms: 3.0495
+  ...
+# Subtest: BONUS. stats() cleanupOld() can race with concurrent scan — data loss
+ok 23 - BONUS. stats() cleanupOld() can race with concurrent scan — data loss
+  ---
+  duration_ms: 2.7304
+  ...
+# [2026-08-03 14:27:49.365 +08:00] MODEL REWRITE \#rid1: ccp-sonnet-1 → claude-sonnet-5 (38 → 41 bytes)
+# [2026-08-03 14:27:49.370 +08:00] MODEL REWRITE \#rid3: ccp-sonnet-1[1m] → claude-sonnet-5 (28 → 27 bytes)
+# [2026-08-03 14:27:49.384 +08:00] MODEL REWRITE \#rid: ccp-main-1 → glm-5.2 (36 → 33 bytes)
+# [2026-08-03 14:27:49.386 +08:00] MODEL REWRITE \#rid: ccp-main-1[1m] → glm-5.2 (26 → 19 bytes)
+# [2026-08-03 14:27:49.396 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1[1M] → claude-sonnet-5 (28 → 27 bytes)
+# [2026-08-03 14:27:49.403 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1[1m][1m] → claude-sonnet-5 (32 → 27 bytes)
+# [2026-08-03 14:27:49.415 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1 → a (24 → 13 bytes)
+# Subtest: D1a: 老配置无 modelAliases → getModelAliases 返 {}
+ok 24 - D1a: 老配置无 modelAliases → getModelAliases 返 {}
+  ---
+  duration_ms: 4.3488
+  ...
+# Subtest: D1b: updateModelAlias 加一条 → 表里多一项 + persist 落盘
+ok 25 - D1b: updateModelAlias 加一条 → 表里多一项 + persist 落盘
+  ---
+  duration_ms: 2.4853
+  ...
+# Subtest: D1c: updateModelAlias 同 alias 不同 model → 覆盖
+ok 26 - D1c: updateModelAlias 同 alias 不同 model → 覆盖
+  ---
+  duration_ms: 3.0121
+  ...
+# Subtest: D1d: removeModelAlias 删一条 → 表少一项 + persist
+ok 27 - D1d: removeModelAlias 删一条 → 表少一项 + persist
+  ---
+  duration_ms: 2.5167
+  ...
+# Subtest: D1e: removeModelAlias 删不存在 → 无害幂等
+ok 28 - D1e: removeModelAlias 删不存在 → 无害幂等
+  ---
+  duration_ms: 2.3739
+  ...
+# Subtest: D2a: model 命中别名 → 替换为真实模型
+ok 29 - D2a: model 命中别名 → 替换为真实模型
+  ---
+  duration_ms: 3.8022
+  ...
+# Subtest: D2b: model 不命中别名 → 原样透传
+ok 30 - D2b: model 不命中别名 → 原样透传
+  ---
+  duration_ms: 1.5095
+  ...
+# Subtest: D2c: model 带 [1m] 命中 → 剥离后查表替换 base（不带后缀）
+ok 31 - D2c: model 带 [1m] 命中 → 剥离后查表替换 base（不带后缀）
+  ---
+  duration_ms: 1.408
+  ...
+# Subtest: D2d: model 带 [1m] 但 base 不命中 → 原样透传含 [1m]
+ok 32 - D2d: model 带 [1m] 但 base 不命中 → 原样透传含 [1m]
+  ---
+  duration_ms: 1.4756
+  ...
+# Subtest: D2e: 空 model → 不改
+ok 33 - D2e: 空 model → 不改
+  ---
+  duration_ms: 1.386
+  ...
+# Subtest: D2f: model 字段缺失 → 不改
+ok 34 - D2f: model 字段缺失 → 不改
+  ---
+  duration_ms: 1.3687
+  ...
+# Subtest: D2g: 非 JSON body → 原样返回
+ok 35 - D2g: 非 JSON body → 原样返回
+  ---
+  duration_ms: 1.0801
+  ...
+# Subtest: D7a: 老配置无 nextAliasId → init 兜底 0
+ok 36 - D7a: 老配置无 nextAliasId → init 兜底 0
+  ---
+  duration_ms: 1.3988
+  ...
+# Subtest: D7b: nextAliasId 递增 + persist
+ok 37 - D7b: nextAliasId 递增 + persist
+  ---
+  duration_ms: 1.8276
+  ...
+# Subtest: D7c: 启动校正 — 已存 ccp-sonnet-5 但 nextAliasId=0 → 抬到 5，下个 id=6
+ok 38 - D7c: 启动校正 — 已存 ccp-sonnet-5 但 nextAliasId=0 → 抬到 5，下个 id=6
+  ---
+  duration_ms: 1.5707
+  ...
+# Subtest: D2附加: rawModel 已等于真实模型 → 不改写（rewritten=false）
+ok 39 - D2附加: rawModel 已等于真实模型 → 不改写（rewritten=false）
+  ---
+  duration_ms: 1.8248
+  ...
+# Subtest: 优化2: ccp-main-1 命中 → 替换为真实模型
+ok 40 - 优化2: ccp-main-1 命中 → 替换为真实模型
+  ---
+  duration_ms: 1.4367
+  ...
+# Subtest: 优化2: ccp-main-1[1m] 剥后缀查表命中 → 替换 base
+ok 41 - 优化2: ccp-main-1[1m] 剥后缀查表命中 → 替换 base
+  ---
+  duration_ms: 1.5065
+  ...
+# Subtest: 优化2: ccp-main-7 残留 + nextAliasId=0 → 启动校正抬到 7
+ok 42 - 优化2: ccp-main-7 残留 + nextAliasId=0 → 启动校正抬到 7
+  ---
+  duration_ms: 1.4407
+  ...
+# Subtest: RV1: nextAliasId=-5 → 校正逻辑兜底为 0（0 > -5 恒真）[翻转回归]
+ok 43 - RV1: nextAliasId=-5 → 校正逻辑兜底为 0（0 > -5 恒真）[翻转回归]
+  ---
+  duration_ms: 1.7261
+  ...
+# Subtest: RV2: nextAliasId=0.5 → 应兜底为 0，实际保留 0.5 [真bug，待人工修复]
+ok 44 - RV2: nextAliasId=0.5 → 应兜底为 0，实际保留 0.5 [真bug，待人工修复]
+  ---
+  duration_ms: 1.3178
+  ...
+# Subtest: RV3: modelAliases 值为数字 5 → 应跳过非字符串值，实际替换为数字 [真bug，待人工修复]
+ok 45 - RV3: modelAliases 值为数字 5 → 应跳过非字符串值，实际替换为数字 [真bug，待人工修复]
+  ---
+  duration_ms: 1.2886
+  ...
+# Subtest: RV3b: modelAliases 值为 null → 应跳过 null 值，实际替换为 null [真bug，待人工修复]
+ok 46 - RV3b: modelAliases 值为 null → 应跳过 null 值，实际替换为 null [真bug，待人工修复]
+  ---
+  duration_ms: 1.1515
+  ...
+# Subtest: RV4: modelAliases 值为布尔 false → 应跳过布尔值，实际替换为 false [真bug，待人工修复]
+ok 47 - RV4: modelAliases 值为布尔 false → 应跳过布尔值，实际替换为 false [真bug，待人工修复]
+  ---
+  duration_ms: 1.3999
+  ...
+# Subtest: RV5: rewriteModel 剥离 [1M]（大写）与 CLI /[1m]/i 一致 [翻转回归]
+ok 48 - RV5: rewriteModel 剥离 [1M]（大写）与 CLI /[1m]/i 一致 [翻转回归]
+  ---
+  duration_ms: 1.4497
+  ...
+# Subtest: RV6: config.json 损坏（非法 JSON）→ init 抛 SyntaxError（无容错）[防护缺失，待人工评估]
+ok 49 - RV6: config.json 损坏（非法 JSON）→ init 抛 SyntaxError（无容错）[防护缺失，待人工评估]
+  ---
+  duration_ms: 1.5834
+  ...
+# Subtest: RV7: modelAliases 值为对象 → 应跳过对象值，实际替换为对象 [真bug，待人工修复]
+ok 50 - RV7: modelAliases 值为对象 → 应跳过对象值，实际替换为对象 [真bug，待人工修复]
+  ---
+  duration_ms: 1.6166
+  ...
+# Subtest: RV8: nextAliasId=NaN → 兜底为 0（Number.isFinite 守卫生效）[翻转回归]
+ok 51 - RV8: nextAliasId=NaN → 兜底为 0（Number.isFinite 守卫生效）[翻转回归]
+  ---
+  duration_ms: 1.394
+  ...
+# Subtest: RV9: nextAliasId=Infinity → 兜底为 0 [翻转回归]
+ok 52 - RV9: nextAliasId=Infinity → 兜底为 0 [翻转回归]
+  ---
+  duration_ms: 1.1333
+  ...
+# Subtest: RV10: rawModel 带 [1m][1m] 双后缀 → 全剥后命中 [翻转回归]
+ok 53 - RV10: rawModel 带 [1m][1m] 双后缀 → 全剥后命中 [翻转回归]
+  ---
+  duration_ms: 2.0739
+  ...
+# Subtest: RV11: [2M] 大写也不被剥离（只剥 [1m]，约束 3）[翻转回归]
+ok 54 - RV11: [2M] 大写也不被剥离（只剥 [1m]，约束 3）[翻转回归]
+  ---
+  duration_ms: 2.0575
+  ...
+# Subtest: RV12: removeModelAlias 删不存在 → 返回 removed:true（语义不一致但幂等）[翻转回归]
+ok 55 - RV12: removeModelAlias 删不存在 → 返回 removed:true（语义不一致但幂等）[翻转回归]
+  ---
+  duration_ms: 1.4608
+  ...
+# Subtest: RV13: updateModelAlias alias 含换行符 → 不校验（防护缺失，低风险）[翻转回归]
+ok 56 - RV13: updateModelAlias alias 含换行符 → 不校验（防护缺失，低风险）[翻转回归]
+  ---
+  duration_ms: 1.4294
+  ...
+# Subtest: RV14: 超大数字别名 → Number() 精度丢失 [防护缺失，极低概率]
+ok 57 - RV14: 超大数字别名 → Number() 精度丢失 [防护缺失，极低概率]
+  ---
+  duration_ms: 1.0919
+  ...
+# Subtest: RV15: 自引用带 [1m] 映射 → 短路不替换，body 保留 [1m] [翻转回归，边界行为]
+ok 58 - RV15: 自引用带 [1m] 映射 → 短路不替换，body 保留 [1m] [翻转回归，边界行为]
+  ---
+  duration_ms: 1.5174
+  ...
+# Subtest: RV16: updateModelAlias model 纯空格 → store 层 trim 拦截 [翻转回归]
+ok 59 - RV16: updateModelAlias model 纯空格 → store 层 trim 拦截 [翻转回归]
+  ---
+  duration_ms: 1.7062
+  ...
+# Subtest: RV17: rewriteModel 同步无 await → 无并发竞态 [翻转回归]
+ok 60 - RV17: rewriteModel 同步无 await → 无并发竞态 [翻转回归]
+  ---
+  duration_ms: 1.6442
+  ...
+# Subtest: RV19: model 是空字符串 → 不改写，resolvedModel="" [翻转回归]
+ok 61 - RV19: model 是空字符串 → 不改写，resolvedModel="" [翻转回归]
+  ---
+  duration_ms: 1.3438
+  ...
+# Subtest: RV20: 别名 key="__proto__-5" → init 校正正则匹配 N=5 [翻转回归，边界]
+ok 62 - RV20: 别名 key="__proto__-5" → init 校正正则匹配 N=5 [翻转回归，边界]
+  ---
+  duration_ms: 1.0554
+  ...
+# Subtest: D7a: 老配置无 proxy 段 → getView 返默认 retryRules（503+10310, 200+10310）
+ok 63 - D7a: 老配置无 proxy 段 → getView 返默认 retryRules（503+10310, 200+10310）
+  ---
+  duration_ms: 4.7333
+  ...
+# Subtest: D7b: updateProxy 改 retryRules → getProxy 生效 + 落盘
+ok 64 - D7b: updateProxy 改 retryRules → getProxy 生效 + 落盘
+  ---
+  duration_ms: 2.3078
+  ...
+# Subtest: D7c1: retryRules status 非数字 → 抛错
+ok 65 - D7c1: retryRules status 非数字 → 抛错
+  ---
+  duration_ms: 1.8987
+  ...
+# Subtest: D7c2: retryRules status 越界（99）→ 抛错
+ok 66 - D7c2: retryRules status 越界（99）→ 抛错
+  ---
+  duration_ms: 1.2291
+  ...
+# Subtest: D7c3: retryRules status 越界（600）→ 抛错
+ok 67 - D7c3: retryRules status 越界（600）→ 抛错
+  ---
+  duration_ms: 2.0007
+  ...
+# Subtest: D7c4: retryRules code 非法字符串 → 抛错
+ok 68 - D7c4: retryRules code 非法字符串 → 抛错
+  ---
+  duration_ms: 1.4973
+  ...
+# Subtest: D7c5: retryRules 非数组 → 抛错
+ok 69 - D7c5: retryRules 非数组 → 抛错
+  ---
+  duration_ms: 1.6775
+  ...
+# Subtest: D7c6: retryRules 元素缺 status → 抛错
+ok 70 - D7c6: retryRules 元素缺 status → 抛错
+  ---
+  duration_ms: 1.5111
+  ...
+# Subtest: D1b: retryRules status="*" 通配 → 合法接受
+ok 71 - D1b: retryRules status="*" 通配 → 合法接受
+  ---
+  duration_ms: 1.7701
+  ...
+# Subtest: D2b: retryRules code="all" 通配 → 合法接受
+ok 72 - D2b: retryRules code="all" 通配 → 合法接受
+  ---
+  duration_ms: 1.6036
+  ...
+# Subtest: D7d1: 老配置 retryOnStatus:[503] → 迁移成 {status:503, code:"all"}
+ok 73 - D7d1: 老配置 retryOnStatus:[503] → 迁移成 {status:503, code:"all"}
+  ---
+  duration_ms: 1.4289
+  ...
+# Subtest: D7d2: 老配置 retryOnBodyErrorCode:[10310] → 迁移成 {status:"*", code:10310}
+ok 74 - D7d2: 老配置 retryOnBodyErrorCode:[10310] → 迁移成 {status:"*", code:10310}
+  ---
+  duration_ms: 1.3359
+  ...
+# Subtest: D7d3: 老配置同时含 retryOnStatus + retryOnBodyErrorCode → 都迁移
+ok 75 - D7d3: 老配置同时含 retryOnStatus + retryOnBodyErrorCode → 都迁移
+  ---
+  duration_ms: 1.3762
+  ...
+# Subtest: D7e: 迁移后 persist 落盘只写 retryRules，不写旧字段
+ok 76 - D7e: 迁移后 persist 落盘只写 retryRules，不写旧字段
+  ---
+  duration_ms: 1.7121
+  ...
+# Subtest: D7f: getView().proxy.retryRules 返回当前规则
+ok 77 - D7f: getView().proxy.retryRules 返回当前规则
+  ---
+  duration_ms: 1.5384
+  ...
+# Subtest: D7g: 空 retryRules → 合法（不重试任何）
+ok 78 - D7g: 空 retryRules → 合法（不重试任何）
+  ---
+  duration_ms: 2.0457
+  ...
+# Subtest: D7h: updateProxy 不传 retryRules → 保留现有规则
+ok 79 - D7h: updateProxy 不传 retryRules → 保留现有规则
+  ---
+  duration_ms: 1.9574
+  ...
+# Subtest: D7i: 配置已有 retryRules + 残留旧字段 → 新字段优先，旧字段忽略
+ok 80 - D7i: 配置已有 retryRules + 残留旧字段 → 新字段优先，旧字段忽略
+  ---
+  duration_ms: 1.3567
+  ...
+# [2026-08-03 14:27:49.658 +08:00] proxy listening on http://127.0.0.1:11812
+# [2026-08-03 14:27:49.659 +08:00]   web UI     : http://127.0.0.1:11812/
+# [2026-08-03 14:27:49.659 +08:00]   upstream   : http://127.0.0.1:11813 (http)
+# [2026-08-03 14:27:49.659 +08:00]   model      : (unset)
+# [2026-08-03 14:27:49.659 +08:00]   token      : ***
+# [2026-08-03 14:27:49.659 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":503,"code":"all"}]
+# [2026-08-03 14:27:49.659 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:27:49.659 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:49.659 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-rev-rev-30680-1785738469628\\logs  (时间均为中国时间 +08:00)
+# [2026-08-03 14:27:49.689 +08:00] REQ  \#ED40 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:27:49.707 +08:00]      \#ED40 attempt 1/5 → 503 (16ms)
+# [2026-08-03 14:27:49.707 +08:00]      \#ED40 RETRY (503 + rule 503+all) → waiting 50ms
+# [2026-08-03 14:27:49.760 +08:00]      \#ED40 attempt 2/5 → 503 (2ms)
+# [2026-08-03 14:27:49.760 +08:00]      \#ED40 RETRY (503 + rule 503+all) → waiting 100ms
+# [2026-08-03 14:27:49.863 +08:00]      \#ED40 attempt 3/5 → 200 (2ms [流式])
+# [2026-08-03 14:27:49.864 +08:00]      \#ED40 DONE
+# [2026-08-03 14:27:49.864 +08:00] REQ  \#ED40 delivered to client, total 177ms, 3 attempt(s), outcome=success-after-retry
+# Subtest: S1: 空 body 503 + 503+all 规则 → 应重试到成功（修复后）
+# [2026-08-03 14:27:49.889 +08:00] proxy listening on http://127.0.0.1:11814
+# [2026-08-03 14:27:49.889 +08:00]   web UI     : http://127.0.0.1:11814/
+# [2026-08-03 14:27:49.889 +08:00]   upstream   : http://127.0.0.1:11815 (http)
+# [2026-08-03 14:27:49.889 +08:00]   model      : (unset)
+# [2026-08-03 14:27:49.889 +08:00]   token      : ***
+# [2026-08-03 14:27:49.889 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":429,"code":"all"}]
+# [2026-08-03 14:27:49.889 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:27:49.889 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:49.889 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-rev-rev-30680-1785738469886\\logs  (时间均为中国时间 +08:00)
+ok 81 - S1: 空 body 503 + 503+all 规则 → 应重试到成功（修复后）
+  ---
+  duration_ms: 257.2837
+  ...
+# [2026-08-03 14:27:49.897 +08:00] REQ  \#CD3E POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:27:49.902 +08:00]      \#CD3E attempt 1/5 → 429 (4ms)
+# [2026-08-03 14:27:49.902 +08:00]      \#CD3E RETRY (429 + rule 429+all) → waiting 50ms
+# [2026-08-03 14:27:49.956 +08:00]      \#CD3E attempt 2/5 → 200 (3ms [流式])
+# [2026-08-03 14:27:49.956 +08:00]      \#CD3E DONE
+# [2026-08-03 14:27:49.956 +08:00] REQ  \#CD3E delivered to client, total 60ms, 2 attempt(s), outcome=success-after-retry
+# Subtest: S1b: 空 body 429 + 429+all 规则 → 应重试（修复后）
+# [2026-08-03 14:27:49.968 +08:00] proxy listening on http://127.0.0.1:11816
+# [2026-08-03 14:27:49.968 +08:00]   web UI     : http://127.0.0.1:11816/
+# [2026-08-03 14:27:49.968 +08:00]   upstream   : http://127.0.0.1:11817 (http)
+# [2026-08-03 14:27:49.968 +08:00]   model      : (unset)
+# [2026-08-03 14:27:49.968 +08:00]   token      : ***
+# [2026-08-03 14:27:49.968 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":200,"code":"all"}]
+# [2026-08-03 14:27:49.968 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:27:49.968 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:49.968 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-rev-rev-30680-1785738469965\\logs  (时间均为中国时间 +08:00)
+ok 82 - S1b: 空 body 429 + 429+all 规则 → 应重试（修复后）
+  ---
+  duration_ms: 79.503
+  ...
+# [2026-08-03 14:27:49.971 +08:00] REQ  \#77B7 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:27:49.975 +08:00]      \#77B7 attempt 1/5 → 200 (3ms)
+# [2026-08-03 14:27:49.976 +08:00]      \#77B7 RETRY (200 + rule 200+all) → waiting 50ms
+# [2026-08-03 14:27:50.028 +08:00]      \#77B7 attempt 2/5 → 200 (2ms)
+# [2026-08-03 14:27:50.028 +08:00]      \#77B7 RETRY (200 + rule 200+all) → waiting 100ms
+# [2026-08-03 14:27:50.133 +08:00]      \#77B7 attempt 3/5 → 200 (3ms)
+# [2026-08-03 14:27:50.133 +08:00]      \#77B7 RETRY (200 + rule 200+all) → waiting 100ms
+# [2026-08-03 14:27:50.237 +08:00]      \#77B7 attempt 4/5 → 200 (2ms)
+# [2026-08-03 14:27:50.238 +08:00]      \#77B7 RETRY (200 + rule 200+all) → waiting 100ms
+# [2026-08-03 14:27:50.341 +08:00]      \#77B7 attempt 5/5 → 200 (3ms)
+# [2026-08-03 14:27:50.341 +08:00]      \#77B7 retry budget exhausted (200 + rule 200+all)
+# [2026-08-03 14:27:50.342 +08:00] REQ  \#77B7 delivered to client, total 371ms, 5 attempt(s), outcome=failed
+# Subtest: S3: {200,all} 规则 → 真 200 成功被重试 [翻转回归，用户配置语义]
+# [2026-08-03 14:27:50.351 +08:00] proxy listening on http://127.0.0.1:11818
+# [2026-08-03 14:27:50.351 +08:00]   web UI     : http://127.0.0.1:11818/
+# [2026-08-03 14:27:50.351 +08:00]   upstream   : http://127.0.0.1:11819 (http)
+# [2026-08-03 14:27:50.351 +08:00]   model      : (unset)
+# [2026-08-03 14:27:50.351 +08:00]   token      : ***
+# [2026-08-03 14:27:50.351 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":"*","code":10310}]
+# [2026-08-03 14:27:50.351 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:27:50.351 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:50.351 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-rev-rev-30680-1785738470348\\logs  (时间均为中国时间 +08:00)
+ok 83 - S3: {200,all} 规则 → 真 200 成功被重试 [翻转回归，用户配置语义]
+  ---
+  duration_ms: 383.1787
+  ...
+# [2026-08-03 14:27:50.355 +08:00] REQ  \#4F74 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:27:50.367 +08:00]      \#4F74 attempt 1/5 → 200 (12ms)
+# [2026-08-03 14:27:50.368 +08:00]      \#4F74 RETRY (200 + rule *+10310) → waiting 50ms
+# [2026-08-03 14:27:50.421 +08:00]      \#4F74 attempt 2/5 → 200 (3ms [流式])
+# [2026-08-03 14:27:50.421 +08:00]      \#4F74 DONE
+# [2026-08-03 14:27:50.422 +08:00] REQ  \#4F74 delivered to client, total 68ms, 2 attempt(s), outcome=success-after-retry
+# Subtest: S4: {* ,10310} 规则 → 200+10310 假成功重试 [翻转回归]
+# [2026-08-03 14:27:50.432 +08:00] proxy listening on http://127.0.0.1:11820
+# [2026-08-03 14:27:50.432 +08:00]   web UI     : http://127.0.0.1:11820/
+# [2026-08-03 14:27:50.432 +08:00]   upstream   : http://127.0.0.1:11821 (http)
+# [2026-08-03 14:27:50.432 +08:00]   model      : (unset)
+# [2026-08-03 14:27:50.433 +08:00]   token      : ***
+# [2026-08-03 14:27:50.433 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":"*","code":10310}]
+# [2026-08-03 14:27:50.433 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:27:50.433 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:50.433 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-rev-rev-30680-1785738470429\\logs  (时间均为中国时间 +08:00)
+ok 84 - S4: {* ,10310} 规则 → 200+10310 假成功重试 [翻转回归]
+  ---
+  duration_ms: 80.7678
+  ...
+# [2026-08-03 14:27:50.436 +08:00] REQ  \#D7EB POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:27:50.440 +08:00]      \#D7EB attempt 1/5 → 200 (4ms [流式])
+# [2026-08-03 14:27:50.440 +08:00]      \#D7EB DONE
+# [2026-08-03 14:27:50.441 +08:00] REQ  \#D7EB delivered to client, total 6ms, 1 attempt(s), outcome=success-direct
+# Subtest: S4b: {* ,10310} 规则 + 200+11210 → 不重试（code 不匹配）[翻转回归]
+# [2026-08-03 14:27:50.450 +08:00] proxy listening on http://127.0.0.1:11822
+# [2026-08-03 14:27:50.450 +08:00]   web UI     : http://127.0.0.1:11822/
+# [2026-08-03 14:27:50.450 +08:00]   upstream   : http://127.0.0.1:11823 (http)
+# [2026-08-03 14:27:50.450 +08:00]   model      : (unset)
+# [2026-08-03 14:27:50.450 +08:00]   token      : ***
+# [2026-08-03 14:27:50.450 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":503,"code":"all"},{"status":503,"code":10310}]
+# [2026-08-03 14:27:50.450 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:27:50.450 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:50.450 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-rev-rev-30680-1785738470448\\logs  (时间均为中国时间 +08:00)
+ok 85 - S4b: {* ,10310} 规则 + 200+11210 → 不重试（code 不匹配）[翻转回归]
+  ---
+  duration_ms: 18.2557
+  ...
+# [2026-08-03 14:27:50.454 +08:00] REQ  \#6B9F POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:27:50.458 +08:00]      \#6B9F attempt 1/5 → 503 (4ms)
+# [2026-08-03 14:27:50.458 +08:00]      \#6B9F RETRY (503 + rule 503+all) → waiting 50ms
+# [2026-08-03 14:27:50.510 +08:00]      \#6B9F attempt 2/5 → 200 (2ms [流式])
+# [2026-08-03 14:27:50.510 +08:00]      \#6B9F DONE
+# [2026-08-03 14:27:50.510 +08:00] REQ  \#6B9F delivered to client, total 57ms, 2 attempt(s), outcome=success-after-retry
+# Subtest: S6: 多条规则同时命中（503+all + 503+10310）→ 仍重试一次 [边界]
+ok 86 - S6: 多条规则同时命中（503+all + 503+10310）→ 仍重试一次 [边界]
+  ---
+  duration_ms: 68.6845
+  ...
+# [2026-08-03 14:27:50.592 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1[1m] → claude-sonnet-5 (28 → 27 bytes)
+# [2026-08-03 14:27:50.646 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1 → a (24 → 13 bytes)
+# [2026-08-03 14:27:50.646 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1 → b (24 → 13 bytes)
+# [2026-08-03 14:27:50.650 +08:00] MODEL REWRITE \#rid: ccp-sonnet-1 → real (58 → 50 bytes)
+# Subtest: C1-1: rewriteModel 不剥离 [2m]（已修：只剥 [1m]，与 CLI 一致）[已修-回归]
+ok 87 - C1-1: rewriteModel 不剥离 [2m]（已修：只剥 [1m]，与 CLI 一致）[已修-回归]
+  ---
+  duration_ms: 4.9843
+  ...
+# Subtest: C1-1b: rewriteModel 仍剥离 [1m]（修 [2m] 未误伤 [1m]）[回归]
+ok 88 - C1-1b: rewriteModel 仍剥离 [1m]（修 [2m] 未误伤 [1m]）[回归]
+  ---
+  duration_ms: 3.3206
+  ...
+# Subtest: C1-2: 不命中时 resolvedModel=rawModel（含后缀）——语义正确（上游收到的就是 rawModel）[非BUG]
+ok 89 - C1-2: 不命中时 resolvedModel=rawModel（含后缀）——语义正确（上游收到的就是 rawModel）[非BUG]
+  ---
+  duration_ms: 2.5144
+  ...
+# Subtest: C1-3: init 校正正则不约束前缀 —— ccp-sonnet-foo-1 也被抬，但方向安全（跳号不重号）[非BUG]
+ok 90 - C1-3: init 校正正则不约束前缀 —— ccp-sonnet-foo-1 也被抬，但方向安全（跳号不重号）[非BUG]
+  ---
+  duration_ms: 1.5295
+  ...
+# Subtest: C1-4: parsed.model 为数字 0 时不命中（类型守卫）[非BUG]
+ok 91 - C1-4: parsed.model 为数字 0 时不命中（类型守卫）[非BUG]
+  ---
+  duration_ms: 1.4924
+  ...
+# Subtest: C2-1: updateModelAlias(alias="__proto__") 不污染原型（计算属性语法安全）[非BUG]
+ok 92 - C2-1: updateModelAlias(alias="__proto__") 不污染原型（计算属性语法安全）[非BUG]
+  ---
+  duration_ms: 1.5835
+  ...
+# Subtest: C2-2: updateModelAlias 写入含空格的 alias（trim 只校验不清洗）[味道]
+ok 93 - C2-2: updateModelAlias 写入含空格的 alias（trim 只校验不清洗）[味道]
+  ---
+  duration_ms: 1.5981
+  ...
+# Subtest: C2-3: contentType=undefined → 原样返回（非JSON处理）[非BUG]
+ok 94 - C2-3: contentType=undefined → 原样返回（非JSON处理）[非BUG]
+  ---
+  duration_ms: 1.3773
+  ...
+# Subtest: C3-1: nextAliasId 是字符串 "5" → 兜底 0（启动校正兜底）[非BUG]
+ok 95 - C3-1: nextAliasId 是字符串 "5" → 兜底 0（启动校正兜底）[非BUG]
+  ---
+  duration_ms: 1.4343
+  ...
+# Subtest: C3-2: modelAliases 是数组 → init 兜底为 {}（已修：加 Array.isArray）[已修-回归]
+ok 96 - C3-2: modelAliases 是数组 → init 兜底为 {}（已修：加 Array.isArray）[已修-回归]
+  ---
+  duration_ms: 1.8445
+  ...
+# Subtest: C3-3: body 是 JSON 数组 → 原样返回（无 model 字段）[非BUG]
+ok 97 - C3-3: body 是 JSON 数组 → 原样返回（无 model 字段）[非BUG]
+  ---
+  duration_ms: 1.3531
+  ...
+# Subtest: C4-1: 已存 ccp-sonnet-1 + nextAliasId=0 → 校正到1，下个id=2（1已占）[非BUG]
+ok 98 - C4-1: 已存 ccp-sonnet-1 + nextAliasId=0 → 校正到1，下个id=2（1已占）[非BUG]
+  ---
+  duration_ms: 1.7012
+  ...
+# Subtest: C4-2: nextAliasId 递增后 persist 写回 config.json [非BUG]
+ok 99 - C4-2: nextAliasId 递增后 persist 写回 config.json [非BUG]
+  ---
+  duration_ms: 1.5329
+  ...
+# Subtest: C4-3: removeModelAlias 后 persist 落盘（key 确实删除）[非BUG]
+ok 100 - C4-3: removeModelAlias 后 persist 落盘（key 确实删除）[非BUG]
+  ---
+  duration_ms: 1.7333
+  ...
+# Subtest: C4-4: nextAliasId=10 + maxN=1 → 不压回（安全方向：跳号不重号）[非BUG]
+ok 101 - C4-4: nextAliasId=10 + maxN=1 → 不压回（安全方向：跳号不重号）[非BUG]
+  ---
+  duration_ms: 1.5174
+  ...
+# Subtest: C5-1: 连续 nextAliasId() 不重号 [非BUG]
+ok 102 - C5-1: 连续 nextAliasId() 不重号 [非BUG]
+  ---
+  duration_ms: 28.7663
+  ...
+# Subtest: C5-2: rewriteModel 与 updateModelAlias 无竞态（单线程 + 引用替换）[非BUG]
+ok 103 - C5-2: rewriteModel 与 updateModelAlias 无竞态（单线程 + 引用替换）[非BUG]
+  ---
+  duration_ms: 1.9805
+  ...
+# Subtest: C6-1: POST /api/model-alias 纯空格 alias → store 层 trim 拦截抛错 [非BUG]
+ok 104 - C6-1: POST /api/model-alias 纯空格 alias → store 层 trim 拦截抛错 [非BUG]
+  ---
+  duration_ms: 1.7871
+  ...
+# Subtest: C6-2: rewriteEffort 返 Buffer，rewriteModel 接 Buffer，串联正确 [非BUG]
+ok 105 - C6-2: rewriteEffort 返 Buffer，rewriteModel 接 Buffer，串联正确 [非BUG]
+  ---
+  duration_ms: 1.3771
+  ...
+# Subtest: C-7: 请求无 model 字段 → resolvedModel=undefined → trace 落 "" [非BUG]
+ok 106 - C-7: 请求无 model 字段 → resolvedModel=undefined → trace 落 "" [非BUG]
+  ---
+  duration_ms: 1.5548
+  ...
+# Subtest: C-8: 空 body → JSON.parse 失败 → 原样返回 [非BUG]
+ok 107 - C-8: 空 body → JSON.parse 失败 → 原样返回 [非BUG]
+  ---
+  duration_ms: 1.7557
+  ...
+# Subtest: C-9: rawModel 已等于真实模型 → 不改写，resolvedModel=realModel [非BUG]
+ok 108 - C-9: rawModel 已等于真实模型 → 不改写，resolvedModel=realModel [非BUG]
+  ---
+  duration_ms: 1.4573
+  ...
+# [2026-08-03 14:27:50.768 +08:00] proxy listening on http://127.0.0.1:11499
+# [2026-08-03 14:27:50.769 +08:00]   web UI     : http://127.0.0.1:11499/
+# [2026-08-03 14:27:50.769 +08:00]   upstream   : http://127.0.0.1:11500 (http)
+# [2026-08-03 14:27:50.769 +08:00]   model      : (unset)
+# [2026-08-03 14:27:50.769 +08:00]   token      : ***
+# [2026-08-03 14:27:50.769 +08:00]   retry      : maxAttempts=5 backoffSec=1 backoffMaxSec=16 rules=[{"status":503,"code":10310},{"status":200,"code":10310}]
+# [2026-08-03 14:27:50.769 +08:00]   mode       : 透传（不重试，原样转发）
+# [2026-08-03 14:27:50.769 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:50.769 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\e2e-e2e-29540-1785738470740\\logs  (时间均为中国时间 +08:00)
+# [2026-08-03 14:27:50.801 +08:00] MODEL-ALIAS updated → ccp-sonnet-1=claude-sonnet-5
+# Subtest: e2e: model aliasing 全链路
+    # Subtest: D6a: POST /api/model-alias 加映射 → 200
+    ok 1 - D6a: POST /api/model-alias 加映射 → 200
+      ---
+      duration_ms: 37.4954
+      ...
+    # Subtest: D6e: GET /api/config 含 modelAliases
+    ok 2 - D6e: GET /api/config 含 modelAliases
+      ---
+      duration_ms: 4.7776
+      ...
+# [2026-08-03 14:27:50.816 +08:00] MODEL REWRITE \#F12F: ccp-sonnet-1 → claude-sonnet-5 (84 → 87 bytes)
+# [2026-08-03 14:27:50.817 +08:00] REQ  \#F12F POST /v1/messages (body 84 bytes) from 127.0.0.1 [透传] [model→claude-sonnet-5]
+# [2026-08-03 14:27:50.825 +08:00]      \#F12F attempt 1/1 → 200 (7ms) [透传，不重试，流式]
+# [2026-08-03 14:27:50.825 +08:00] REQ  \#F12F delivered to client (passthrough), total 9ms, status 200
+# [2026-08-03 14:27:50.825 +08:00] REQ  \#F12F delivered to client, total 9ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D2a/D5: /v1/messages 带 ccp-sonnet-1 → 上游收到真实模型 + trace 记别名
+    ok 3 - D2a/D5: /v1/messages 带 ccp-sonnet-1 → 上游收到真实模型 + trace 记别名
+      ---
+      duration_ms: 14.9522
+      ...
+# [2026-08-03 14:27:50.831 +08:00] MODEL REWRITE \#490E: ccp-sonnet-1[1m] → claude-sonnet-5 (88 → 87 bytes)
+# [2026-08-03 14:27:50.831 +08:00] REQ  \#490E POST /v1/messages (body 88 bytes) from 127.0.0.1 [透传] [model→claude-sonnet-5]
+# [2026-08-03 14:27:50.834 +08:00]      \#490E attempt 1/1 → 200 (3ms) [透传，不重试，流式]
+# [2026-08-03 14:27:50.834 +08:00] REQ  \#490E delivered to client (passthrough), total 4ms, status 200
+# [2026-08-03 14:27:50.834 +08:00] REQ  \#490E delivered to client, total 4ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D2c: 带 [1m] 命中 → 上游收到不带后缀的真实模型
+    ok 4 - D2c: 带 [1m] 命中 → 上游收到不带后缀的真实模型
+      ---
+      duration_ms: 8.6029
+      ...
+# [2026-08-03 14:27:50.839 +08:00] REQ  \#CB9B POST /v1/messages (body 83 bytes) from 127.0.0.1 [透传]
+# [2026-08-03 14:27:50.841 +08:00]      \#CB9B attempt 1/1 → 200 (2ms) [透传，不重试，流式]
+# [2026-08-03 14:27:50.841 +08:00] REQ  \#CB9B delivered to client (passthrough), total 2ms, status 200
+# [2026-08-03 14:27:50.841 +08:00] REQ  \#CB9B delivered to client, total 2ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D2b: 不命中的 model → 上游原样收到
+    ok 5 - D2b: 不命中的 model → 上游原样收到
+      ---
+      duration_ms: 6.7526
+      ...
+# [2026-08-03 14:27:50.845 +08:00] MODEL REWRITE \#2D73: ccp-sonnet-1 → claude-sonnet-5 (68 → 71 bytes)
+# [2026-08-03 14:27:50.845 +08:00] REQ  \#2D73 POST /v1/messages/count_tokens (body 68 bytes) from 127.0.0.1 [透传] [model→claude-sonnet-5]
+# [2026-08-03 14:27:50.848 +08:00]      \#2D73 attempt 1/1 → 200 (2ms) [透传，不重试，流式]
+# [2026-08-03 14:27:50.848 +08:00] REQ  \#2D73 delivered to client (passthrough), total 3ms, status 200
+# [2026-08-03 14:27:50.848 +08:00] REQ  \#2D73 delivered to client, total 3ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D4b: /v1/messages/count_tokens 子路径也替换
+    ok 6 - D4b: /v1/messages/count_tokens 子路径也替换
+      ---
+      duration_ms: 5.9394
+      ...
+    # Subtest: D6c: GET /api/model-alias/next-id 递增
+    ok 7 - D6c: GET /api/model-alias/next-id 递增
+      ---
+      duration_ms: 5.7675
+      ...
+    # Subtest: D6d: POST /api/model-alias 缺字段 → 400
+    ok 8 - D6d: POST /api/model-alias 缺字段 → 400
+      ---
+      duration_ms: 3.0557
+      ...
+# [2026-08-03 14:27:50.861 +08:00] MODEL-ALIAS removed → ccp-sonnet-1
+# [2026-08-03 14:27:50.864 +08:00] REQ  \#485F POST /v1/messages (body 84 bytes) from 127.0.0.1 [透传]
+# [2026-08-03 14:27:50.867 +08:00]      \#485F attempt 1/1 → 200 (2ms) [透传，不重试，流式]
+# [2026-08-03 14:27:50.867 +08:00] REQ  \#485F delivered to client (passthrough), total 3ms, status 200
+# [2026-08-03 14:27:50.867 +08:00] REQ  \#485F delivered to client, total 3ms, 1 attempt(s), outcome=passthrough
+    # Subtest: D6b: POST /api/model-alias/delete → 下个请求不替换
+    ok 9 - D6b: POST /api/model-alias/delete → 下个请求不替换
+      ---
+      duration_ms: 9.9731
+      ...
+# [2026-08-03 14:27:50.871 +08:00] MODEL-ALIAS updated → ccp-sonnet-1=claude-sonnet-5
+# [2026-08-03 14:27:50.874 +08:00] EFFORT updated → high
+# [2026-08-03 14:27:50.878 +08:00] MODEL REWRITE \#EFC2: ccp-sonnet-1 → claude-sonnet-5 (118 → 121 bytes)
+# [2026-08-03 14:27:50.878 +08:00] REQ  \#EFC2 POST /v1/messages (body 117 bytes) from 127.0.0.1 [透传] [effort→high] [model→claude-sonnet-5]
+# [2026-08-03 14:27:50.880 +08:00]      \#EFC2 attempt 1/1 → 200 (2ms) [透传，不重试，流式]
+# [2026-08-03 14:27:50.880 +08:00] REQ  \#EFC2 delivered to client (passthrough), total 3ms, status 200
+# [2026-08-03 14:27:50.880 +08:00] REQ  \#EFC2 delivered to client, total 3ms, 1 attempt(s), outcome=passthrough
+# [2026-08-03 14:27:50.889 +08:00] EFFORT updated → (不改写，原样透传)
+    # Subtest: D3/D5: effort+model 串联 + trace 记 reqModel/resolvedModel
+    ok 10 - D3/D5: effort+model 串联 + trace 记 reqModel/resolvedModel
+      ---
+      duration_ms: 20.821
+      ...
+    1..10
+ok 109 - e2e: model aliasing 全链路
+  ---
+  duration_ms: 155.2257
+  ...
+# [2026-08-03 14:27:51.002 +08:00] proxy listening on http://127.0.0.1:11481
+# [2026-08-03 14:27:51.004 +08:00]   web UI     : http://127.0.0.1:11481/
+# [2026-08-03 14:27:51.004 +08:00]   upstream   : http://127.0.0.1:8787 (http)
+# [2026-08-03 14:27:51.004 +08:00]   model      : (unset)
+# [2026-08-03 14:27:51.004 +08:00]   token      : ***
+# [2026-08-03 14:27:51.004 +08:00]   retry      : maxAttempts=5 backoffSec=1 backoffMaxSec=16 rules=[{"status":503,"code":10310},{"status":200,"code":10310}]
+# [2026-08-03 14:27:51.004 +08:00]   mode       : 透传（不重试，原样转发）
+# [2026-08-03 14:27:51.004 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:51.004 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\entry-kill-inproc-kill-1056-1785738470973\\logs  (时间均为中国时间 +08:00)
+# [2026-08-03 14:27:51.042 +08:00] KILL 收到请求，关闭代理监听（宿主心跳将自动重起）
+# [2026-08-03 14:27:51.454 +08:00] proxy listening on http://127.0.0.1:11482
+# [2026-08-03 14:27:51.454 +08:00]   web UI     : http://127.0.0.1:11482/
+# [2026-08-03 14:27:51.454 +08:00]   upstream   : http://127.0.0.1:8787 (http)
+# [2026-08-03 14:27:51.454 +08:00]   model      : (unset)
+# [2026-08-03 14:27:51.454 +08:00]   token      : ***
+# [2026-08-03 14:27:51.454 +08:00]   retry      : maxAttempts=5 backoffSec=1 backoffMaxSec=16 rules=[{"status":503,"code":10310},{"status":200,"code":10310}]
+# [2026-08-03 14:27:51.454 +08:00]   mode       : 透传（不重试，原样转发）
+# [2026-08-03 14:27:51.454 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:27:51.454 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\entry-kill-inproc-port-1056-1785738471452\\logs  (时间均为中国时间 +08:00)
+# Subtest: D2/D5: in-proc /api/kill 不退出进程（只关监听）
+ok 110 - D2/D5: in-proc /api/kill 不退出进程（只关监听）
+  ---
+  duration_ms: 478.6204
+  ...
+# [2026-08-03 14:27:51.463 +08:00] PORT changed → 11582（需重启生效，将关闭监听让心跳重起）
+# Subtest: D7: in-proc /api/port POST 不退出进程（只关监听）
+ok 111 - D7: in-proc /api/port POST 不退出进程（只关监听）
+  ---
+  duration_ms: 417.0331
+  ...
+# Subtest: D1/D4/D12: spawn 子进程 CCP_* env + /api/kill → exit(0)，且先回 200
+ok 112 - D1/D4/D12: spawn 子进程 CCP_* env + /api/kill → exit(0)，且先回 200
+  ---
+  duration_ms: 127.0787
+  ...
+# Subtest: D1/D6: spawn 子进程 + /api/port POST → exit(0)
+ok 113 - D1/D6: spawn 子进程 + /api/port POST → exit(0)
+  ---
+  duration_ms: 129.3286
+  ...
+# Subtest: D8/D11: spawn 子进程用旧 CONFIG_PATH → 仍能 listen（向后兼容）
+ok 114 - D8/D11: spawn 子进程用旧 CONFIG_PATH → 仍能 listen（向后兼容）
+  ---
+  duration_ms: 126.4361
+  ...
+# Subtest: D9: spawn 子进程不传 CCP_LOGS_DIR → listen 正常（走默认日志目录）
+ok 115 - D9: spawn 子进程不传 CCP_LOGS_DIR → listen 正常（走默认日志目录）
+  ---
+  duration_ms: 117.8999
+  ...
+# Subtest: SUSPICION-1: 先 startServer({exitOnKill:true}) 再 startServer({}) 后 kill 不应退出进程
+ok 116 - SUSPICION-1: 先 startServer({exitOnKill:true}) 再 startServer({}) 后 kill 不应退出进程
+  ---
+  duration_ms: 3414.0284
+  ...
+# Subtest: SUSPICION-3: CCP_CONFIG_PATH="" 空串应 fallback 到 CONFIG_PATH
+ok 117 - SUSPICION-3: CCP_CONFIG_PATH="" 空串应 fallback 到 CONFIG_PATH
+  ---
+  duration_ms: 116.4808
+  ...
+# Subtest: SUSPICION-4: CCP_LOGS_DIR="" 空串应等价于未设（listen 正常）
+ok 118 - SUSPICION-4: CCP_LOGS_DIR="" 空串应等价于未设（listen 正常）
+  ---
+  duration_ms: 116.4161
+  ...
+# Subtest: SUSPICION-5: 连续两次 /api/kill 子进程模式 → 第二次连接失败，进程正常 exit(0)
+ok 119 - SUSPICION-5: 连续两次 /api/kill 子进程模式 → 第二次连接失败，进程正常 exit(0)
+  ---
+  duration_ms: 131.26
+  ...
+# Subtest: SUSPICION-2: kill 时 in-flight 请求被截断（process.exit 截断流，属 kill 固有行为）
+ok 120 - SUSPICION-2: kill 时 in-flight 请求被截断（process.exit 截断流，属 kill 固有行为）
+  ---
+  duration_ms: 225.6154
+  ...
+# Subtest: SUSPICION-7: /api/port POST 改成同端口 → 仍 exit(0)（无短路，可优化）
+ok 121 - SUSPICION-7: /api/port POST 改成同端口 → 仍 exit(0)（无短路，可优化）
+  ---
+  duration_ms: 133.002
+  ...
+# Subtest: SUSPICION-6: 只读 config.json 时 /api/port POST 仍回 200 + exit(0)（persist 静默失败）
+ok 122 - SUSPICION-6: 只读 config.json 时 /api/port POST 仍回 200 + exit(0)（persist 静默失败）
+  ---
+  duration_ms: 131.3942
+  ...
+# [2026-08-03 14:28:00.483 +08:00] proxy listening on http://127.0.0.1:11512
+# [2026-08-03 14:28:00.484 +08:00]   web UI     : http://127.0.0.1:11512/
+# [2026-08-03 14:28:00.484 +08:00]   upstream   : http://127.0.0.1:11513 (http)
+# [2026-08-03 14:28:00.484 +08:00]   model      : (unset)
+# [2026-08-03 14:28:00.484 +08:00]   token      : ***
+# [2026-08-03 14:28:00.484 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":503,"code":10310},{"status":200,"code":10310}]
+# [2026-08-03 14:28:00.484 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:28:00.484 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:28:00.484 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-e2e-default-35200-1785738480454\\logs  (时间均为中国时间 +08:00)
+# [2026-08-03 14:28:00.513 +08:00] REQ  \#8237 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:00.531 +08:00]      \#8237 attempt 1/5 → 503 (18ms)
+# [2026-08-03 14:28:00.532 +08:00]      \#8237 RETRY (503 + rule 503+10310) → waiting 50ms
+# [2026-08-03 14:28:00.585 +08:00]      \#8237 attempt 2/5 → 503 (2ms)
+# [2026-08-03 14:28:00.585 +08:00]      \#8237 RETRY (503 + rule 503+10310) → waiting 100ms
+# [2026-08-03 14:28:00.688 +08:00]      \#8237 attempt 3/5 → 200 (3ms [流式])
+# [2026-08-03 14:28:00.688 +08:00]      \#8237 DONE
+# [2026-08-03 14:28:00.689 +08:00] REQ  \#8237 delivered to client, total 178ms, 3 attempt(s), outcome=success-after-retry
+# Subtest: e2e retryRules: 默认规则（503+10310 / 200+10310）
+    # Subtest: D5a: 503+10310 ×2 → success（重试后成功，attempts=3）
+    ok 1 - D5a: 503+10310 ×2 → success（重试后成功，attempts=3）
+      ---
+      duration_ms: 219.009
+      ...
+# [2026-08-03 14:28:00.707 +08:00] REQ  \#D95E POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:00.710 +08:00]      \#D95E attempt 1/5 → 200 (3ms)
+# [2026-08-03 14:28:00.710 +08:00]      \#D95E RETRY (200 + rule 200+10310) → waiting 50ms
+# [2026-08-03 14:28:00.763 +08:00]      \#D95E attempt 2/5 → 200 (3ms [流式])
+# [2026-08-03 14:28:00.764 +08:00]      \#D95E DONE
+# [2026-08-03 14:28:00.764 +08:00] REQ  \#D95E delivered to client, total 57ms, 2 attempt(s), outcome=success-after-retry
+    # Subtest: D3a: 200+10310 假成功 → 重试（默认规则含 200+10310）
+    ok 2 - D3a: 200+10310 假成功 → 重试（默认规则含 200+10310）
+      ---
+      duration_ms: 65.046
+      ...
+# [2026-08-03 14:28:00.773 +08:00] REQ  \#7EC2 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:00.775 +08:00]      \#7EC2 attempt 1/5 → 503 (2ms)
+# [2026-08-03 14:28:00.775 +08:00]      \#7EC2 RETRY (503 + rule 503+10310) → waiting 50ms
+# [2026-08-03 14:28:00.828 +08:00]      \#7EC2 attempt 2/5 → 503 (3ms)
+# [2026-08-03 14:28:00.828 +08:00]      \#7EC2 RETRY (503 + rule 503+10310) → waiting 100ms
+# [2026-08-03 14:28:00.932 +08:00]      \#7EC2 attempt 3/5 → 503 (2ms)
+# [2026-08-03 14:28:00.932 +08:00]      \#7EC2 RETRY (503 + rule 503+10310) → waiting 100ms
+# [2026-08-03 14:28:01.037 +08:00]      \#7EC2 attempt 4/5 → 503 (3ms)
+# [2026-08-03 14:28:01.037 +08:00]      \#7EC2 RETRY (503 + rule 503+10310) → waiting 100ms
+# [2026-08-03 14:28:01.140 +08:00]      \#7EC2 attempt 5/5 → 503 (2ms)
+# [2026-08-03 14:28:01.140 +08:00]      \#7EC2 retry budget exhausted (503 + rule 503+10310)
+# [2026-08-03 14:28:01.141 +08:00] REQ  \#7EC2 delivered to client, total 368ms, 5 attempt(s), outcome=failed
+    # Subtest: D5b: 503+10310 重试预算耗尽 → failed（末次透传 503）
+    ok 3 - D5b: 503+10310 重试预算耗尽 → failed（末次透传 503）
+      ---
+      duration_ms: 374.3514
+      ...
+# [2026-08-03 14:28:01.147 +08:00] REQ  \#A5BB POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:01.149 +08:00]      \#A5BB attempt 1/5 → 429 (1ms [流式])
+# [2026-08-03 14:28:01.150 +08:00]      \#A5BB DONE
+# [2026-08-03 14:28:01.150 +08:00] REQ  \#A5BB delivered to client, total 3ms, 1 attempt(s), outcome=pass-through
+    # Subtest: D2c: 普通 429（非规则 code）→ 透传不重试
+    ok 4 - D2c: 普通 429（非规则 code）→ 透传不重试
+      ---
+      duration_ms: 8.5306
+      ...
+# [2026-08-03 14:28:01.155 +08:00] REQ  \#CB98 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:01.157 +08:00]      \#CB98 attempt 1/5 → 503 (1ms [流式])
+# [2026-08-03 14:28:01.157 +08:00]      \#CB98 DONE
+# [2026-08-03 14:28:01.158 +08:00] REQ  \#CB98 delivered to client, total 3ms, 1 attempt(s), outcome=pass-through
+    # Subtest: D1c: 503 但 code 非 10310（50399）→ 不重试透传
+    ok 5 - D1c: 503 但 code 非 10310（50399）→ 不重试透传
+      ---
+      duration_ms: 8.1442
+      ...
+# [2026-08-03 14:28:01.169 +08:00] proxy listening on http://127.0.0.1:11514
+# [2026-08-03 14:28:01.169 +08:00]   web UI     : http://127.0.0.1:11514/
+# [2026-08-03 14:28:01.169 +08:00]   upstream   : http://127.0.0.1:11515 (http)
+# [2026-08-03 14:28:01.169 +08:00]   model      : (unset)
+# [2026-08-03 14:28:01.169 +08:00]   token      : ***
+# [2026-08-03 14:28:01.169 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":503,"code":10310},{"status":200,"code":10310}]
+# [2026-08-03 14:28:01.169 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:28:01.169 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:28:01.169 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-e2e-custom-35200-1785738481166\\logs  (时间均为中国时间 +08:00)
+    1..5
+ok 123 - e2e retryRules: 默认规则（503+10310 / 200+10310）
+  ---
+  duration_ms: 712.1293
+  ...
+# [2026-08-03 14:28:01.176 +08:00] CONFIG updated → maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1
+# [2026-08-03 14:28:01.178 +08:00] REQ  \#2DE5 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:01.190 +08:00]      \#2DE5 attempt 1/5 → 429 (11ms)
+# [2026-08-03 14:28:01.190 +08:00]      \#2DE5 RETRY (429 + rule 429+11210) → waiting 50ms
+# [2026-08-03 14:28:01.242 +08:00]      \#2DE5 attempt 2/5 → 429 (2ms)
+# [2026-08-03 14:28:01.243 +08:00]      \#2DE5 RETRY (429 + rule 429+11210) → waiting 100ms
+# [2026-08-03 14:28:01.345 +08:00]      \#2DE5 attempt 3/5 → 200 (2ms [流式])
+# [2026-08-03 14:28:01.345 +08:00]      \#2DE5 DONE
+# [2026-08-03 14:28:01.346 +08:00] REQ  \#2DE5 delivered to client, total 168ms, 3 attempt(s), outcome=success-after-retry
+# Subtest: e2e retryRules: 自定义规则 + 通配
+    # Subtest: D1a/D2a: 429+11210 规则 → 重试后成功
+    ok 1 - D1a/D2a: 429+11210 规则 → 重试后成功
+      ---
+      duration_ms: 181.0648
+      ...
+# [2026-08-03 14:28:01.353 +08:00] CONFIG updated → maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1
+# [2026-08-03 14:28:01.355 +08:00] REQ  \#089B POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:01.357 +08:00]      \#089B attempt 1/5 → 503 (2ms)
+# [2026-08-03 14:28:01.357 +08:00]      \#089B RETRY (503 + rule 503+all) → waiting 50ms
+# [2026-08-03 14:28:01.410 +08:00]      \#089B attempt 2/5 → 200 (2ms [流式])
+# [2026-08-03 14:28:01.410 +08:00]      \#089B DONE
+# [2026-08-03 14:28:01.410 +08:00] REQ  \#089B delivered to client, total 56ms, 2 attempt(s), outcome=success-after-retry
+    # Subtest: D2b: 503+all 规则 → 所有 503 都重试（响应头即决断，修复核心 bug）
+    ok 2 - D2b: 503+all 规则 → 所有 503 都重试（响应头即决断，修复核心 bug）
+      ---
+      duration_ms: 64.108
+      ...
+# [2026-08-03 14:28:01.416 +08:00] CONFIG updated → maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1
+# [2026-08-03 14:28:01.417 +08:00] REQ  \#4A99 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:01.419 +08:00]      \#4A99 attempt 1/5 → 429 (1ms)
+# [2026-08-03 14:28:01.419 +08:00]      \#4A99 RETRY (429 + rule *+11210) → waiting 50ms
+# [2026-08-03 14:28:01.472 +08:00]      \#4A99 attempt 2/5 → 200 (2ms [流式])
+# [2026-08-03 14:28:01.472 +08:00]      \#4A99 DONE
+# [2026-08-03 14:28:01.472 +08:00] REQ  \#4A99 delivered to client, total 55ms, 2 attempt(s), outcome=success-after-retry
+    # Subtest: D1b: status="*"+code 通配 → 任意状态码 + 该 code 都重试
+    ok 3 - D1b: status="*"+code 通配 → 任意状态码 + 该 code 都重试
+      ---
+      duration_ms: 61.0645
+      ...
+# [2026-08-03 14:28:01.479 +08:00] CONFIG updated → maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1
+# [2026-08-03 14:28:01.481 +08:00] CONFIG updated → maxAttempts=1 backoffSec=0.05 backoffMaxSec=0.1
+# [2026-08-03 14:28:01.482 +08:00] REQ  \#0284 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:01.484 +08:00]      \#0284 attempt 1/1 → 429 (2ms)
+# [2026-08-03 14:28:01.484 +08:00]      \#0284 retry budget exhausted (429 + rule 429+11210)
+# [2026-08-03 14:28:01.484 +08:00] REQ  \#0284 delivered to client, total 2ms, 1 attempt(s), outcome=failed
+# [2026-08-03 14:28:01.489 +08:00] CONFIG updated → maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1
+    # Subtest: D5c: maxAttempts=1 + 可重试规则 → 不重试直接透传
+    ok 4 - D5c: maxAttempts=1 + 可重试规则 → 不重试直接透传
+      ---
+      duration_ms: 13.4422
+      ...
+# [2026-08-03 14:28:01.494 +08:00] proxy listening on http://127.0.0.1:11516
+# [2026-08-03 14:28:01.494 +08:00]   web UI     : http://127.0.0.1:11516/
+# [2026-08-03 14:28:01.494 +08:00]   upstream   : http://127.0.0.1:11517 (http)
+# [2026-08-03 14:28:01.494 +08:00]   model      : (unset)
+# [2026-08-03 14:28:01.494 +08:00]   token      : ***
+# [2026-08-03 14:28:01.494 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[{"status":503,"code":10310},{"status":200,"code":10310}]
+# [2026-08-03 14:28:01.494 +08:00]   mode       : 透传（不重试，原样转发）
+# [2026-08-03 14:28:01.494 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:28:01.494 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-e2e-passthru-35200-1785738481492\\logs  (时间均为中国时间 +08:00)
+    1..4
+ok 124 - e2e retryRules: 自定义规则 + 通配
+  ---
+  duration_ms: 325.7229
+  ...
+# [2026-08-03 14:28:01.499 +08:00] REQ  \#89B5 POST /v1/messages (body 82 bytes) from 127.0.0.1 [透传]
+# [2026-08-03 14:28:01.503 +08:00]      \#89B5 attempt 1/1 → 503 (4ms) [透传，不重试]
+# [2026-08-03 14:28:01.503 +08:00] REQ  \#89B5 delivered to client (passthrough), total 5ms, status 503
+# [2026-08-03 14:28:01.503 +08:00] REQ  \#89B5 delivered to client, total 5ms, 1 attempt(s), outcome=passthrough
+# Subtest: e2e retryRules: 透传模式 + 空规则
+    # Subtest: D6b: 透传模式 + 503+10310 → 不重试直接透传 503
+# [2026-08-03 14:28:01.513 +08:00] proxy listening on http://127.0.0.1:11518
+# [2026-08-03 14:28:01.513 +08:00]   web UI     : http://127.0.0.1:11518/
+# [2026-08-03 14:28:01.513 +08:00]   upstream   : http://127.0.0.1:11519 (http)
+# [2026-08-03 14:28:01.513 +08:00]   model      : (unset)
+# [2026-08-03 14:28:01.513 +08:00]   token      : ***
+# [2026-08-03 14:28:01.513 +08:00]   retry      : maxAttempts=5 backoffSec=0.05 backoffMaxSec=0.1 rules=[]
+# [2026-08-03 14:28:01.513 +08:00]   mode       : 拦截重试（流式转发 + 首段 body 判错）
+# [2026-08-03 14:28:01.513 +08:00]   timeout    : 600000ms
+# [2026-08-03 14:28:01.513 +08:00]   detail log : D:\\work_dir\\claude-code-proxy\\.test-tmp\\rr-e2e-emptyrules-35200-1785738481511\\logs  (时间均为中国时间 +08:00)
+    ok 1 - D6b: 透传模式 + 503+10310 → 不重试直接透传 503
+      ---
+      duration_ms: 13.3476
+      ...
+    1..1
+ok 125 - e2e retryRules: 透传模式 + 空规则
+  ---
+  duration_ms: 18.6926
+  ...
+# [2026-08-03 14:28:01.516 +08:00] REQ  \#B442 POST /v1/messages (body 82 bytes) from 127.0.0.1 [重试]
+# [2026-08-03 14:28:01.521 +08:00]      \#B442 attempt 1/5 → 503 (4ms [流式])
+# [2026-08-03 14:28:01.521 +08:00]      \#B442 DONE
+# [2026-08-03 14:28:01.521 +08:00] REQ  \#B442 delivered to client, total 5ms, 1 attempt(s), outcome=pass-through
+# Subtest: e2e retryRules: 空规则表不重试任何
+    # Subtest: D7g: 空 retryRules + 503+10310 → 不重试透传
+    ok 1 - D7g: 空 retryRules + 503+10310 → 不重试透传
+      ---
+      duration_ms: 12.1191
+      ...
+    1..1
+ok 126 - e2e retryRules: 空规则表不重试任何
+  ---
+  duration_ms: 17.4563
+  ...
+# Subtest: A. append 写出 idx + body 配对，idx 不含胖字段
+ok 127 - A. append 写出 idx + body 配对，idx 不含胖字段
+  ---
+  duration_ms: 11.1612
+  ...
+# Subtest: A2. model 缺失与空串落盘
+ok 128 - A2. model 缺失与空串落盘
+  ---
+  duration_ms: 6.8175
+  ...
+# Subtest: C. getById 用 offset 精确读回完整 trace
+ok 129 - C. getById 用 offset 精确读回完整 trace
+  ---
+  duration_ms: 3.4593
+  ...
+# Subtest: D1. 旧裸文件首次 list 补建 idx，二次 list 走 idx
+ok 130 - D1. 旧裸文件首次 list 补建 idx，二次 list 走 idx
+  ---
+  duration_ms: 4.1004
+  ...
+# Subtest: D2. getById 从旧裸文件按 offset 精确读
+ok 131 - D2. getById 从旧裸文件按 offset 精确读
+  ---
+  duration_ms: 4.2688
+  ...
+# Subtest: E. 四档过滤命中数
+ok 132 - E. 四档过滤命中数
+  ---
+  duration_ms: 11.0949
+  ...
+# Subtest: F. since 增量只返回新于 since 的
+ok 133 - F. since 增量只返回新于 since 的
+  ---
+  duration_ms: 4.3788
+  ...
+# Subtest: G. 序号三位补零 + idx/body 同序号配对
+ok 134 - G. 序号三位补零 + idx/body 同序号配对
+  ---
+  duration_ms: 2.9268
+  ...
+# Subtest: H. cleanupOld 删 7 天前的 idx + body + 旧裸文件
+ok 135 - H. cleanupOld 删 7 天前的 idx + body + 旧裸文件
+  ---
+  duration_ms: 3.3066
+  ...
+# Subtest: I. 真实旧裸日志补建 idx + 详情精确读 + 二次加速
+ok 136 - I. 真实旧裸日志补建 idx + 详情精确读 + 二次加速 # SKIP
+  ---
+  duration_ms: 0.2176
+  ...
+# Subtest: J1. stats 按 startedAt 窗口统计 2xx 成功数
+ok 137 - J1. stats 按 startedAt 窗口统计 2xx 成功数
+  ---
+  duration_ms: 6.3537
+  ...
+# Subtest: J2. stats 窗口按小时升序、空目录返回 0
+ok 138 - J2. stats 窗口按小时升序、空目录返回 0
+  ---
+  duration_ms: 1.3047
+  ...
+# Subtest: J3. stats 成功=2xx，3xx/4xx/5xx/0 都不算成功
+ok 139 - J3. stats 成功=2xx，3xx/4xx/5xx/0 都不算成功
+  ---
+  duration_ms: 7.5066
+  ...
+# Subtest: 1. aliasName 三档 × N=1 基本格式
+ok 140 - 1. aliasName 三档 × N=1 基本格式
+  ---
+  duration_ms: 1.0054
+  ...
+# Subtest: 2. aliasName [1m] 后缀统一小写
+ok 141 - 2. aliasName [1m] 后缀统一小写
+  ---
+  duration_ms: 0.1266
+  ...
+# Subtest: 3. aliasName 非法 tier 抛错
+ok 142 - 3. aliasName 非法 tier 抛错
+  ---
+  duration_ms: 0.555
+  ...
+# Subtest: 4. buildAliasEnv 四档注入 shell env（含 ANTHROPIC_MODEL），不含 BASE_URL/token
+ok 143 - 4. buildAliasEnv 四档注入 shell env（含 ANTHROPIC_MODEL），不含 BASE_URL/token
+  ---
+  duration_ms: 0.2001
+  ...
+# Subtest: 5. buildAliasEnv 幂等
+ok 144 - 5. buildAliasEnv 幂等
+  ---
+  duration_ms: 0.6518
+  ...
+# Subtest: 6. resolveDerivedUpstream 快照优先，忽略父 content 新值
+ok 145 - 6. resolveDerivedUpstream 快照优先，忽略父 content 新值
+  ---
+  duration_ms: 0.1944
+  ...
+# Subtest: 7. resolveDerivedUpstream 快照缺 → 父 content 解出
+ok 146 - 7. resolveDerivedUpstream 快照缺 → 父 content 解出
+  ---
+  duration_ms: 0.2186
+  ...
+# Subtest: 8. resolveDerivedUpstream 父缺 + 快照缺 → null
+ok 147 - 8. resolveDerivedUpstream 父缺 + 快照缺 → null
+  ---
+  duration_ms: 0.0968
+  ...
+# Subtest: 9. resolveDerivedUpstream 快照缺 + 父 content 无效 JSON → null
+ok 148 - 9. resolveDerivedUpstream 快照缺 + 父 content 无效 JSON → null
+  ---
+  duration_ms: 0.2224
+  ...
+# Subtest: 10. isOrphan 父存在/缺失
+ok 149 - 10. isOrphan 父存在/缺失
+  ---
+  duration_ms: 0.1721
+  ...
+# Subtest: 11. computeAliasSyncActions 代理表缺 → 补三档
+ok 150 - 11. computeAliasSyncActions 代理表缺 → 补三档
+  ---
+  duration_ms: 0.2594
+  ...
+# Subtest: 12. computeAliasSyncActions 代理表含部分 → 只补缺的
+ok 151 - 12. computeAliasSyncActions 代理表含部分 → 只补缺的
+  ---
+  duration_ms: 0.114
+  ...
+# Subtest: 13. computeAliasSyncActions 完全一致 → 无动作
+ok 152 - 13. computeAliasSyncActions 完全一致 → 无动作
+  ---
+  duration_ms: 0.1053
+  ...
+# Subtest: 14. computeAliasSyncActions 别的编号残留不清（编号不回收）
+ok 153 - 14. computeAliasSyncActions 别的编号残留不清（编号不回收）
+  ---
+  duration_ms: 0.1574
+  ...
+# Subtest: 15. computeAliasSyncActions 某档未配 → 不补该档
+ok 154 - 15. computeAliasSyncActions 某档未配 → 不补该档
+  ---
+  duration_ms: 0.1554
+  ...
+# Subtest: 16. computeAliasSyncActions 幂等
+ok 155 - 16. computeAliasSyncActions 幂等
+  ---
+  duration_ms: 0.1945
+  ...
+# Subtest: 17. aggregateModelCatalog 空 configs → []
+ok 156 - 17. aggregateModelCatalog 空 configs → []
+  ---
+  duration_ms: 0.1585
+  ...
+# Subtest: 18. aggregateModelCatalog global+local 多源去重
+ok 157 - 18. aggregateModelCatalog global+local 多源去重
+  ---
+  duration_ms: 0.3597
+  ...
+# Subtest: 19. aggregateModelCatalog 含 derived modelAliases 真实模型名
+ok 158 - 19. aggregateModelCatalog 含 derived modelAliases 真实模型名
+  ---
+  duration_ms: 0.1475
+  ...
+# Subtest: 20. summarizeAliases 三档全配
+ok 159 - 20. summarizeAliases 三档全配
+  ---
+  duration_ms: 0.1934
+  ...
+# Subtest: 21. summarizeAliases undefined → 空串
+ok 160 - 21. summarizeAliases undefined → 空串
+  ---
+  duration_ms: 0.1272
+  ...
+# Subtest: 22. summarizeAliases 只配 sonnet → 只显 S
+ok 161 - 22. summarizeAliases 只配 sonnet → 只显 S
+  ---
+  duration_ms: 0.09
+  ...
+# Subtest: 23. nextDerivedIndex 本地兜底 max+1 / 空→1
+ok 162 - 23. nextDerivedIndex 本地兜底 max+1 / 空→1
+  ---
+  duration_ms: 0.1651
+  ...
+# Subtest: S1. computeAliasSyncActions derivedIndex=0 不应抛错（应返回空动作）
+ok 163 - S1. computeAliasSyncActions derivedIndex=0 不应抛错（应返回空动作）
+  ---
+  duration_ms: 0.0865
+  ...
+# Subtest: S1b. computeAliasSyncActions derivedIndex=-1 不应抛错
+ok 164 - S1b. computeAliasSyncActions derivedIndex=-1 不应抛错
+  ---
+  duration_ms: 0.0739
+  ...
+# Subtest: S2. aggregateModelCatalog 非字符串 env 值不崩溃（数字/布尔/对象跳过）
+ok 165 - S2. aggregateModelCatalog 非字符串 env 值不崩溃（数字/布尔/对象跳过）
+  ---
+  duration_ms: 0.1443
+  ...
+# Subtest: S3. summarizeAliases 非字符串值不崩溃（跳过）
+ok 166 - S3. summarizeAliases 非字符串值不崩溃（跳过）
+  ---
+  duration_ms: 0.1541
+  ...
+# Subtest: S4. aggregateModelCatalog modelAliases 非字符串值不崩溃
+ok 167 - S4. aggregateModelCatalog modelAliases 非字符串值不崩溃
+  ---
+  duration_ms: 0.119
+  ...
+# Subtest: S5. resolveDerivedUpstream 快照 baseUrl 有 token 缺 → 回退父 content
+ok 168 - S5. resolveDerivedUpstream 快照 baseUrl 有 token 缺 → 回退父 content
+  ---
+  duration_ms: 0.1131
+  ...
+# Subtest: S6. resolveDerivedUpstream 快照 baseUrl 缺 → 回退父 content
+ok 169 - S6. resolveDerivedUpstream 快照 baseUrl 缺 → 回退父 content
+  ---
+  duration_ms: 0.0893
+  ...
+# Subtest: S7. resolveDerivedUpstream 快照部分缺 + 父缺 → null
+ok 170 - S7. resolveDerivedUpstream 快照部分缺 + 父缺 → null
+  ---
+  duration_ms: 0.078
+  ...
+# Subtest: S8. resolveDerivedUpstream 父 content env 值为数字 → 视为缺失返回 null
+ok 171 - S8. resolveDerivedUpstream 父 content env 值为数字 → 视为缺失返回 null
+  ---
+  duration_ms: 0.1371
+  ...
+# Subtest: S9. computeAliasSyncActions model 带尾空格 → trim 后比较
+ok 172 - S9. computeAliasSyncActions model 带尾空格 → trim 后比较
+  ---
+  duration_ms: 0.1362
+  ...
+# Subtest: S10. aliasName N 大数正常构造
+ok 173 - S10. aliasName N 大数正常构造
+  ---
+  duration_ms: 0.2432
+  ...
+# Subtest: S11. aliasName N 浮点（非整数）→ 抛错
+ok 174 - S11. aliasName N 浮点（非整数）→ 抛错
+  ---
+  duration_ms: 0.1717
+  ...
+# Subtest: S11b. aliasName N=2.0（浮点但整数）→ 正常
+ok 175 - S11b. aliasName N=2.0（浮点但整数）→ 正常
+  ---
+  duration_ms: 0.1613
+  ...
+# Subtest: S12. aliasName tier 大写 → 抛错（大小写敏感）
+ok 176 - S12. aliasName tier 大写 → 抛错（大小写敏感）
+  ---
+  duration_ms: 0.1906
+  ...
+# Subtest: S13. buildAliasEnv derivedIndex=0 → 抛错（编号必须 >=1）
+ok 177 - S13. buildAliasEnv derivedIndex=0 → 抛错（编号必须 >=1）
+  ---
+  duration_ms: 0.179
+  ...
+# Subtest: S14. nextDerivedIndex 含 NaN/Infinity/负数 → 忽略
+ok 178 - S14. nextDerivedIndex 含 NaN/Infinity/负数 → 忽略
+  ---
+  duration_ms: 0.1773
+  ...
+# Subtest: S15. nextDerivedIndex derivedIndex 为字符串 → 忽略（类型守卫正确）
+ok 179 - S15. nextDerivedIndex derivedIndex 为字符串 → 忽略（类型守卫正确）
+  ---
+  duration_ms: 0.1529
+  ...
+# Subtest: S16. computeAliasSyncActions 第一次补后第二次（代理表已含）→ 无动作
+ok 180 - S16. computeAliasSyncActions 第一次补后第二次（代理表已含）→ 无动作
+  ---
+  duration_ms: 0.1422
+  ...
+# Subtest: S17. computeAliasSyncActions toRemove 始终为空（编号不回收）
+ok 181 - S17. computeAliasSyncActions toRemove 始终为空（编号不回收）
+  ---
+  duration_ms: 0.1166
+  ...
+# Subtest: S18. aggregateModelCatalog content 空串/非 JSON → 跳过不崩
+ok 182 - S18. aggregateModelCatalog content 空串/非 JSON → 跳过不崩
+  ---
+  duration_ms: 0.1703
+  ...
+# Subtest: S19. aggregateModelCatalog content undefined → 跳过不崩
+ok 183 - S19. aggregateModelCatalog content undefined → 跳过不崩
+  ---
+  duration_ms: 0.1836
+  ...
+# Subtest: S20. summarizeAliases 空字符串值 → 跳过（不显示空档）
+ok 184 - S20. summarizeAliases 空字符串值 → 跳过（不显示空档）
+  ---
+  duration_ms: 0.1136
+  ...
+# Subtest: S21. isOrphan 只看 parent 有无（不看 derivedFrom）
+ok 185 - S21. isOrphan 只看 parent 有无（不看 derivedFrom）
+  ---
+  duration_ms: 0.1233
+  ...
+# Subtest: S22. 终端 name 匹配 \#2 不误匹配 \#20/\#21/\#200
+ok 186 - S22. 终端 name 匹配 \#2 不误匹配 \#20/\#21/\#200
+  ---
+  duration_ms: 0.1953
+  ...
+# Subtest: S22b. 终端 name 匹配 \#12 只匹配 \#12
+ok 187 - S22b. 终端 name 匹配 \#12 只匹配 \#12
+  ---
+  duration_ms: 0.1607
+  ...
+# Subtest: S23. resolveDerivedUpstream 快照 baseUrl 为数字 → 回退父 content
+ok 188 - S23. resolveDerivedUpstream 快照 baseUrl 为数字 → 回退父 content
+  ---
+  duration_ms: 0.186
+  ...
+# Subtest: S24. resolveDerivedUpstream 快照 token 为数字 + 父缺 → null
+ok 189 - S24. resolveDerivedUpstream 快照 token 为数字 + 父缺 → null
+  ---
+  duration_ms: 0.1031
+  ...
+# Subtest: filterParentConfigs: 排除派生节点，只留父 local 配置
+ok 190 - filterParentConfigs: 排除派生节点，只留父 local 配置
+  ---
+  duration_ms: 0.1876
+  ...
+# Subtest: filterParentConfigs: derivedFrom 为空串/undefined 都算父
+ok 191 - filterParentConfigs: derivedFrom 为空串/undefined 都算父
+  ---
+  duration_ms: 0.1176
+  ...
+# Subtest: filterParentConfigs: 空数组返空
+ok 192 - filterParentConfigs: 空数组返空
+  ---
+  duration_ms: 0.0744
+  ...
+# Subtest: filterParentConfigs: 全是派生节点返空（孤儿由 treeProvider 另挂）
+ok 193 - filterParentConfigs: 全是派生节点返空（孤儿由 treeProvider 另挂）
+  ---
+  duration_ms: 0.1139
+  ...
+# Subtest: M1. aliasName main 档基本格式 + [1m] 后缀
+ok 194 - M1. aliasName main 档基本格式 + [1m] 后缀
+  ---
+  duration_ms: 0.0856
+  ...
+# Subtest: M2. aliasName main 档 N=0/负数/浮点 → 抛错
+ok 195 - M2. aliasName main 档 N=0/负数/浮点 → 抛错
+  ---
+  duration_ms: 0.1653
+  ...
+# Subtest: M3. buildAliasEnv with1m=false → 四档别名都不带 [1m]
+ok 196 - M3. buildAliasEnv with1m=false → 四档别名都不带 [1m]
+  ---
+  duration_ms: 0.1971
+  ...
+# Subtest: M4. buildAliasEnv 不传 opts → 默认不带 [1m]
+ok 197 - M4. buildAliasEnv 不传 opts → 默认不带 [1m]
+  ---
+  duration_ms: 0.8169
+  ...
+# Subtest: M5. computeAliasSyncActions main 档配了 → 补 ccp-main-N
+ok 198 - M5. computeAliasSyncActions main 档配了 → 补 ccp-main-N
+  ---
+  duration_ms: 0.1391
+  ...
+# Subtest: M6. computeAliasSyncActions main 档未配 → 不补 main
+ok 199 - M6. computeAliasSyncActions main 档未配 → 不补 main
+  ---
+  duration_ms: 0.0848
+  ...
+# Subtest: M7. computeAliasSyncActions main 档一致 → 无动作
+ok 200 - M7. computeAliasSyncActions main 档一致 → 无动作
+  ---
+  duration_ms: 0.1469
+  ...
+# Subtest: M8. computeAliasSyncActions main 档不一致 → 覆盖
+ok 201 - M8. computeAliasSyncActions main 档不一致 → 覆盖
+  ---
+  duration_ms: 0.11
+  ...
+# Subtest: M9. computeAliasSyncActions main 档 + N=0 → 空动作不抛错
+ok 202 - M9. computeAliasSyncActions main 档 + N=0 → 空动作不抛错
+  ---
+  duration_ms: 0.1083
+  ...
+# Subtest: M10. computeAliasSyncActions main 档 model 带尾空格 → trim
+ok 203 - M10. computeAliasSyncActions main 档 model 带尾空格 → trim
+  ---
+  duration_ms: 0.1211
+  ...
+# Subtest: M11. summarizeAliases 含 main 档 → M: 前缀
+ok 204 - M11. summarizeAliases 含 main 档 → M: 前缀
+  ---
+  duration_ms: 0.1097
+  ...
+# Subtest: M12. summarizeAliases 只配 main → 只显 M
+ok 205 - M12. summarizeAliases 只配 main → 只显 M
+  ---
+  duration_ms: 0.1058
+  ...
+# Subtest: M13. summarizeAliases main 非字符串值 → 跳过
+ok 206 - M13. summarizeAliases main 非字符串值 → 跳过
+  ---
+  duration_ms: 0.1515
+  ...
+# Subtest: M14. summarizeAliases main 空串/纯空白 → 跳过
+ok 207 - M14. summarizeAliases main 空串/纯空白 → 跳过
+  ---
+  duration_ms: 0.1128
+  ...
+# Subtest: M15. aggregateModelCatalog 含 derived modelAliases.main 真实模型名
+ok 208 - M15. aggregateModelCatalog 含 derived modelAliases.main 真实模型名
+  ---
+  duration_ms: 0.1662
+  ...
+# Subtest: M16. aggregateModelCatalog main 非字符串值 → 跳过
+ok 209 - M16. aggregateModelCatalog main 非字符串值 → 跳过
+  ---
+  duration_ms: 0.0941
+  ...
+# Subtest: M17. inheritSessionContext1m 父带 [1m] → 四档 true
+ok 210 - M17. inheritSessionContext1m 父带 [1m] → 四档 true
+  ---
+  duration_ms: 0.3262
+  ...
+# Subtest: M18. inheritSessionContext1m 父不带 [1m] → 四档 false
+ok 211 - M18. inheritSessionContext1m 父不带 [1m] → 四档 false
+  ---
+  duration_ms: 0.1501
+  ...
+# Subtest: M19. inheritSessionContext1m 父无 ANTHROPIC_MODEL → 四档 false
+ok 212 - M19. inheritSessionContext1m 父无 ANTHROPIC_MODEL → 四档 false
+  ---
+  duration_ms: 0.232
+  ...
+# Subtest: M20. inheritSessionContext1m 父 content 无效 JSON → 四档 false
+ok 213 - M20. inheritSessionContext1m 父 content 无效 JSON → 四档 false
+  ---
+  duration_ms: 0.2786
+  ...
+# Subtest: M21. inheritSessionContext1m 父带大写 [1M] → 四档 true（大小写不敏感）
+ok 214 - M21. inheritSessionContext1m 父带大写 [1M] → 四档 true（大小写不敏感）
+  ---
+  duration_ms: 0.2243
+  ...
+# Subtest: M22. inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → 四档 false
+ok 215 - M22. inheritSessionContext1m 父 ANTHROPIC_MODEL 非字符串 → 四档 false
+  ---
+  duration_ms: 0.1384
+  ...
+# Subtest: M23. inheritSessionContext1m 父带 [2m]（CLI 不识别）→ false
+ok 216 - M23. inheritSessionContext1m 父带 [2m]（CLI 不识别）→ false
+  ---
+  duration_ms: 0.2248
+  ...
+# Subtest: R1. inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false
+ok 217 - R1. inheritSessionContext1m 父 ANTHROPIC_MODEL 空串 → false
+  ---
+  duration_ms: 0.1157
+  ...
+# Subtest: R2. inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false
+ok 218 - R2. inheritSessionContext1m 父 ANTHROPIC_MODEL 纯空白串 → false
+  ---
+  duration_ms: 0.0953
+  ...
+# Subtest: R3. inheritSessionContext1m 父 ANTHROPIC_MODEL 为 null → false
+ok 219 - R3. inheritSessionContext1m 父 ANTHROPIC_MODEL 为 null → false
+  ---
+  duration_ms: 0.197
+  ...
+# Subtest: R4. inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 → false
+ok 220 - R4. inheritSessionContext1m 父 ANTHROPIC_MODEL 为布尔 → false
+  ---
+  duration_ms: 0.0905
+  ...
+# Subtest: R5. inheritSessionContext1m 父 [1m] 前有空格 → true（子串匹配，与 CLI 一致）
+ok 221 - R5. inheritSessionContext1m 父 [1m] 前有空格 → true（子串匹配，与 CLI 一致）
+  ---
+  duration_ms: 0.0858
+  ...
+# Subtest: R6. inheritSessionContext1m 父 [1m] 多次出现 → true
+ok 222 - R6. inheritSessionContext1m 父 [1m] 多次出现 → true
+  ---
+  duration_ms: 0.0932
+  ...
+# Subtest: R7. computeAliasSyncActions modelAliases.main 为数字 → 跳过不崩
+ok 223 - R7. computeAliasSyncActions modelAliases.main 为数字 → 跳过不崩
+  ---
+  duration_ms: 0.1105
+  ...
+# Subtest: R8. computeAliasSyncActions modelAliases.main 为 null → 跳过
+ok 224 - R8. computeAliasSyncActions modelAliases.main 为 null → 跳过
+  ---
+  duration_ms: 0.1056
+  ...
+# Subtest: R9. computeAliasSyncActions modelAliases.main 为对象 → 跳过不崩
+ok 225 - R9. computeAliasSyncActions modelAliases.main 为对象 → 跳过不崩
+  ---
+  duration_ms: 0.0868
+  ...
+# Subtest: R10. aggregateModelCatalog modelAliases.main 为数字 → 跳过
+ok 226 - R10. aggregateModelCatalog modelAliases.main 为数字 → 跳过
+  ---
+  duration_ms: 0.0746
+  ...
+# Subtest: R11. aggregateModelCatalog modelAliases.main 为 null → 跳过
+ok 227 - R11. aggregateModelCatalog modelAliases.main 为 null → 跳过
+  ---
+  duration_ms: 0.0691
+  ...
+# Subtest: R12. computeAliasSyncActions derivedIndex 为字符串 "2" → 空动作
+ok 228 - R12. computeAliasSyncActions derivedIndex 为字符串 "2" → 空动作
+  ---
+  duration_ms: 0.0719
+  ...
+# Subtest: R13. computeAliasSyncActions derivedIndex 为 NaN → 空动作
+ok 229 - R13. computeAliasSyncActions derivedIndex 为 NaN → 空动作
+  ---
+  duration_ms: 0.07
+  ...
+# Subtest: R14. computeAliasSyncActions derivedIndex 为 Infinity → 空动作
+ok 230 - R14. computeAliasSyncActions derivedIndex 为 Infinity → 空动作
+  ---
+  duration_ms: 0.0681
+  ...
+# Subtest: R15. buildAliasEnv derivedIndex=1.5 → 抛错
+ok 231 - R15. buildAliasEnv derivedIndex=1.5 → 抛错
+  ---
+  duration_ms: 0.1143
+  ...
+# Subtest: R16. summarizeAliases 四档全配 → 顺序 M · S · H · O
+ok 232 - R16. summarizeAliases 四档全配 → 顺序 M · S · H · O
+  ---
+  duration_ms: 0.0769
+  ...
+# Subtest: R17. inheritSessionContext1m 父 content 为 JSON null → false
+ok 233 - R17. inheritSessionContext1m 父 content 为 JSON null → false
+  ---
+  duration_ms: 0.1229
+  ...
+# Subtest: R18. inheritSessionContext1m 父 content 为 JSON 数组 → false
+ok 234 - R18. inheritSessionContext1m 父 content 为 JSON 数组 → false
+  ---
+  duration_ms: 0.1323
+  ...
+# Subtest: R19. inheritSessionContext1m 父带 [1M] 大写 → true（大小写不敏感）
+ok 235 - R19. inheritSessionContext1m 父带 [1M] 大写 → true（大小写不敏感）
+  ---
+  duration_ms: 0.1032
+  ...
+# Subtest: R20. inheritSessionContext1m 父 ANTHROPIC_MODEL 是别名 ccp-main-1[1m] → true
+ok 236 - R20. inheritSessionContext1m 父 ANTHROPIC_MODEL 是别名 ccp-main-1[1m] → true
+  ---
+  duration_ms: 0.0907
+  ...
+# Subtest: R21. computeAliasSyncActions main 档 model 带尾空格 + 代理表不一致 → trim 后 set
+ok 237 - R21. computeAliasSyncActions main 档 model 带尾空格 + 代理表不一致 → trim 后 set
+  ---
+  duration_ms: 0.09
+  ...
+# Subtest: R22. computeAliasSyncActions 四档部分配部分一致 → 只补缺的
+ok 238 - R22. computeAliasSyncActions 四档部分配部分一致 → 只补缺的
+  ---
+  duration_ms: 0.084
+  ...
+# Subtest: R23. computeAliasSyncActions 四档全配 + 代理表空 → 补四条
+ok 239 - R23. computeAliasSyncActions 四档全配 + 代理表空 → 补四条
+  ---
+  duration_ms: 0.1194
+  ...
+# Subtest: R24. computeAliasSyncActions 映射 key 永不带 [1m]（不读 sessionContext1m）
+ok 240 - R24. computeAliasSyncActions 映射 key 永不带 [1m]（不读 sessionContext1m）
+  ---
+  duration_ms: 0.1093
+  ...
+# Subtest: R25. buildAliasEnv with1m=true → 四档都带 [1m]
+ok 241 - R25. buildAliasEnv with1m=true → 四档都带 [1m]
+  ---
+  duration_ms: 0.0888
+  ...
+# Subtest: R26. inheritSessionContext1m 父 env 为数字 → false
+ok 242 - R26. inheritSessionContext1m 父 env 为数字 → false
+  ---
+  duration_ms: 0.0904
+  ...
+# Subtest: R27. inheritSessionContext1m 父 env 为数组 → false
+ok 243 - R27. inheritSessionContext1m 父 env 为数组 → false
+  ---
+  duration_ms: 0.1234
+  ...
+# Subtest: R28. inheritSessionContext1m 父 env 为 null → false
+ok 244 - R28. inheritSessionContext1m 父 env 为 null → false
+  ---
+  duration_ms: 0.1088
+  ...
+# Subtest: R29. inheritSessionContext1m 传入 undefined → false（不崩）
+ok 245 - R29. inheritSessionContext1m 传入 undefined → false（不崩）
+  ---
+  duration_ms: 0.1032
+  ...
+# Subtest: R30. inheritSessionContext1m 传入 null → false（不崩）
+ok 246 - R30. inheritSessionContext1m 传入 null → false（不崩）
+  ---
+  duration_ms: 0.1319
+  ...
+# Subtest: R31. inheritSessionContext1m 传入数字 → false（不崩）
+ok 247 - R31. inheritSessionContext1m 传入数字 → false（不崩）
+  ---
+  duration_ms: 0.0968
+  ...
+# Subtest: R32. inheritSessionContext1m 传入对象 → false（不崩）
+ok 248 - R32. inheritSessionContext1m 传入对象 → false（不崩）
+  ---
+  duration_ms: 0.0987
+  ...
+# Subtest: R33. computeAliasSyncActions modelAliases=null → 空动作
+ok 249 - R33. computeAliasSyncActions modelAliases=null → 空动作
+  ---
+  duration_ms: 0.0891
+  ...
+# Subtest: R34. aggregateModelCatalog modelAliases=null → 跳过不崩
+ok 250 - R34. aggregateModelCatalog modelAliases=null → 跳过不崩
+  ---
+  duration_ms: 0.1017
+  ...
+# Subtest: R35. summarizeAliases main 带尾空格 → 显示带空格（trim 只用于判定）
+ok 251 - R35. summarizeAliases main 带尾空格 → 显示带空格（trim 只用于判定）
+  ---
+  duration_ms: 0.0707
+  ...
+# Subtest: R36. aliasName 非法 tier 错误消息含全部四档
+ok 252 - R36. aliasName 非法 tier 错误消息含全部四档
+  ---
+  duration_ms: 0.0919
+  ...
+# Subtest: R37. buildAliasEnv key 命名：main→ANTHROPIC_MODEL，三档→ANTHROPIC_DEFAULT_*_MODEL
+ok 253 - R37. buildAliasEnv key 命名：main→ANTHROPIC_MODEL，三档→ANTHROPIC_DEFAULT_*_MODEL
+  ---
+  duration_ms: 0.0753
+  ...
+# Subtest: RV1. resolveDerivedUpstream 父 API_TIMEOUT_MS 非数字 → timeoutSec 应为 undefined（非 NaN）
+ok 254 - RV1. resolveDerivedUpstream 父 API_TIMEOUT_MS 非数字 → timeoutSec 应为 undefined（非 NaN）
+  ---
+  duration_ms: 0.1391
+  ...
+# Subtest: RV1b. resolveDerivedUpstream 父 API_TIMEOUT_MS 空串 → timeoutSec 应为 undefined（非 0）
+ok 255 - RV1b. resolveDerivedUpstream 父 API_TIMEOUT_MS 空串 → timeoutSec 应为 undefined（非 0）
+  ---
+  duration_ms: 0.163
+  ...
+# Subtest: RV2. resolveDerivedUpstream 快照 timeoutSec=NaN → 应视为 undefined（非透传 NaN）
+ok 256 - RV2. resolveDerivedUpstream 快照 timeoutSec=NaN → 应视为 undefined（非透传 NaN）
+  ---
+  duration_ms: 0.0912
+  ...
+# Subtest: RV3. resolveDerivedUpstream 快照 timeoutSec 为字符串 "abc" → 应归一为 undefined
+ok 257 - RV3. resolveDerivedUpstream 快照 timeoutSec 为字符串 "abc" → 应归一为 undefined
+  ---
+  duration_ms: 0.0748
+  ...
+# Subtest: RV4. aggregateModelCatalog ANTHROPIC_SMALL_FAST_MODEL 带尾空格 → trim
+ok 258 - RV4. aggregateModelCatalog ANTHROPIC_SMALL_FAST_MODEL 带尾空格 → trim
+  ---
+  duration_ms: 0.104
+  ...
+# Subtest: RV5. computeAliasSyncActions 代理表值带尾空格 → 多余 set（代理表值未 trim）
+ok 259 - RV5. computeAliasSyncActions 代理表值带尾空格 → 多余 set（代理表值未 trim）
+  ---
+  duration_ms: 0.0751
+  ...
+# Subtest: PT1. aliasName 各档独立 with1m 后缀
+ok 260 - PT1. aliasName 各档独立 with1m 后缀
+  ---
+  duration_ms: 0.0671
+  ...
+# Subtest: PT2. buildAliasEnv opts.sessionContext1m 对象 → 各档独立后缀
+ok 261 - PT2. buildAliasEnv opts.sessionContext1m 对象 → 各档独立后缀
+  ---
+  duration_ms: 0.1548
+  ...
+# Subtest: PT3. buildAliasEnv sessionContext1m 部分档缺 → 缺的档默认 200K（不带后缀）
+ok 262 - PT3. buildAliasEnv sessionContext1m 部分档缺 → 缺的档默认 200K（不带后缀）
+  ---
+  duration_ms: 0.0953
+  ...
+# Subtest: PT4. buildAliasEnv opts.with1m 布尔（兼容）→ 四档同值
+ok 263 - PT4. buildAliasEnv opts.with1m 布尔（兼容）→ 四档同值
+  ---
+  duration_ms: 0.0776
+  ...
+# Subtest: PT5. buildAliasEnv sessionContext1m 对象优先于 with1m
+ok 264 - PT5. buildAliasEnv sessionContext1m 对象优先于 with1m
+  ---
+  duration_ms: 0.0805
+  ...
+# Subtest: PT6. buildAliasEnv sessionContext1m value 非布尔 → 视为 false（200K）
+ok 265 - PT6. buildAliasEnv sessionContext1m value 非布尔 → 视为 false（200K）
+  ---
+  duration_ms: 0.0767
+  ...
+# Subtest: PT7. buildAliasEnv sessionContext1m 非对象脏数据 → 四档 200K
+ok 266 - PT7. buildAliasEnv sessionContext1m 非对象脏数据 → 四档 200K
+  ---
+  duration_ms: 0.1024
+  ...
+# Subtest: PT8. inheritSessionContext1m 父带 [1m] → {四档:true}
+ok 267 - PT8. inheritSessionContext1m 父带 [1m] → {四档:true}
+  ---
+  duration_ms: 0.1054
+  ...
+# Subtest: PT9. inheritSessionContext1m 父不带 [1m] → {四档:false}
+ok 268 - PT9. inheritSessionContext1m 父不带 [1m] → {四档:false}
+  ---
+  duration_ms: 0.0964
+  ...
+# Subtest: PT10. inheritSessionContext1m 父无 model / 无效 → {四档:false}
+ok 269 - PT10. inheritSessionContext1m 父无 model / 无效 → {四档:false}
+  ---
+  duration_ms: 0.1461
+  ...
+# Subtest: PT11. inheritSessionContext1m 父带 [2m] → 四档 false（CLI 只认 [1m]）
+ok 270 - PT11. inheritSessionContext1m 父带 [2m] → 四档 false（CLI 只认 [1m]）
+  ---
+  duration_ms: 0.091
+  ...
+# Subtest: PT12. normalizeSessionContext1m 布尔 true → 四档 true
+ok 271 - PT12. normalizeSessionContext1m 布尔 true → 四档 true
+  ---
+  duration_ms: 0.0632
+  ...
+# Subtest: PT13. normalizeSessionContext1m 布尔 false → 四档 false
+ok 272 - PT13. normalizeSessionContext1m 布尔 false → 四档 false
+  ---
+  duration_ms: 0.0546
+  ...
+# Subtest: PT14. normalizeSessionContext1m undefined → undefined（保持未填）
+ok 273 - PT14. normalizeSessionContext1m undefined → undefined（保持未填）
+  ---
+  duration_ms: 0.0511
+  ...
+# Subtest: PT15. normalizeSessionContext1m 对象 → 归一（非布尔 value 转 false）
+ok 274 - PT15. normalizeSessionContext1m 对象 → 归一（非布尔 value 转 false）
+  ---
+  duration_ms: 0.7445
+  ...
+# Subtest: PT16. normalizeSessionContext1m 非对象非布尔脏数据 → 四档 false
+ok 275 - PT16. normalizeSessionContext1m 非对象非布尔脏数据 → 四档 false
+  ---
+  duration_ms: 0.1029
+  ...
+# Subtest: IA1. inheritAliasesFromParent 四档都剥 [1m] 小写后缀
+ok 276 - IA1. inheritAliasesFromParent 四档都剥 [1m] 小写后缀
+  ---
+  duration_ms: 0.1205
+  ...
+# Subtest: IA2. inheritAliasesFromParent [1M] 大写后缀也剥（大小写不敏感）
+ok 277 - IA2. inheritAliasesFromParent [1M] 大写后缀也剥（大小写不敏感）
+  ---
+  duration_ms: 0.0772
+  ...
+# Subtest: IA3. inheritAliasesFromParent [1m] 多次出现/任意位置全剥
+ok 278 - IA3. inheritAliasesFromParent [1m] 多次出现/任意位置全剥
+  ---
+  duration_ms: 0.0739
+  ...
+# Subtest: IA4. inheritAliasesFromParent [2m]/[500k] 等非 [1m] 后缀不剥
+ok 279 - IA4. inheritAliasesFromParent [2m]/[500k] 等非 [1m] 后缀不剥
+  ---
+  duration_ms: 0.0695
+  ...
+# Subtest: IA5. inheritAliasesFromParent 非法 JSON content → {}
+ok 280 - IA5. inheritAliasesFromParent 非法 JSON content → {}
+  ---
+  duration_ms: 0.083
+  ...
+# Subtest: IA6. inheritAliasesFromParent 部分档缺失 → 缺档不进结果
+ok 281 - IA6. inheritAliasesFromParent 部分档缺失 → 缺档不进结果
+  ---
+  duration_ms: 0.0773
+  ...
+# Subtest: IA7. inheritAliasesFromParent 非字符串 env 值不崩、视为缺失
+ok 282 - IA7. inheritAliasesFromParent 非字符串 env 值不崩、视为缺失
+  ---
+  duration_ms: 0.0776
+  ...
+# Subtest: IA8. inheritAliasesFromParent 剥后缀后 trim，纯空白视为未配
+ok 283 - IA8. inheritAliasesFromParent 剥后缀后 trim，纯空白视为未配
+  ---
+  duration_ms: 0.0769
+  ...
+# Subtest: IA9. inheritAliasesFromParent content 无 env → {}
+ok 284 - IA9. inheritAliasesFromParent content 无 env → {}
+  ---
+  duration_ms: 0.0818
+  ...
+# Subtest: S1. inheritAliasesFromParent env 是数组/数字/字符串不崩
+ok 285 - S1. inheritAliasesFromParent env 是数组/数字/字符串不崩
+  ---
+  duration_ms: 0.1077
+  ...
+# Subtest: S2. inheritAliasesFromParent 值只含 [1m] 剥后空 → 视为未配
+ok 286 - S2. inheritAliasesFromParent 值只含 [1m] 剥后空 → 视为未配
+  ---
+  duration_ms: 0.0795
+  ...
+# Subtest: S3. inheritAliasesFromParent 全角 [１ｍ] 不剥（与 CLI has1mContext 一致）
+ok 287 - S3. inheritAliasesFromParent 全角 [１ｍ] 不剥（与 CLI has1mContext 一致）
+  ---
+  duration_ms: 0.1307
+  ...
+# Subtest: S4. inheritAliasesFromParent content 是 JSON 数组/原始值 → {}
+ok 288 - S4. inheritAliasesFromParent content 是 JSON 数组/原始值 → {}
+  ---
+  duration_ms: 0.2297
+  ...
+# Subtest: S5. aggregateModelCatalog 父 content 带 [1m] 与派生剥后值产生重复候选
+ok 289 - S5. aggregateModelCatalog 父 content 带 [1m] 与派生剥后值产生重复候选
+  ---
+  duration_ms: 0.1217
+  ...
+# Subtest: S6. inheritSessionContext1m + inheritAliasesFromParent + buildAliasEnv 链路一致
+ok 290 - S6. inheritSessionContext1m + inheritAliasesFromParent + buildAliasEnv 链路一致
+  ---
+  duration_ms: 0.1132
+  ...
+# Subtest: S7. 父 main 无[1m] 但三档有[1m]：ctx1m 全 false（设计限制，非 bug）
+ok 291 - S7. 父 main 无[1m] 但三档有[1m]：ctx1m 全 false（设计限制，非 bug）
+  ---
+  duration_ms: 0.1112
+  ...
+# Subtest: S8. computeAliasSyncActions 不剥 [1m]（raw.trim() 原样透传，剥后缀责任在写入方）
+ok 292 - S8. computeAliasSyncActions 不剥 [1m]（raw.trim() 原样透传，剥后缀责任在写入方）
+  ---
+  duration_ms: 0.0761
+  ...
+# Subtest: D:\\work_dir\\claude-code-proxy\\test\\mock-cli\\test\\helpers.mjs
+ok 18 - D:\\work_dir\\claude-code-proxy\\test\\mock-cli\\test\\helpers.mjs
+  ---
+  duration_ms: 50.7477
+  ...
+# Subtest: 1. shell env 别名运行中冻结
+ok 294 - 1. shell env 别名运行中冻结
+  ---
+  duration_ms: 127.2216
+  ...
+# Subtest: 2. settings.env 不含别名同名 key 则不覆盖；含则覆盖
+ok 295 - 2. settings.env 不含别名同名 key 则不覆盖；含则覆盖
+  ---
+  duration_ms: 1170.242
+  ...
+# Subtest: 3. settings.env 删 key 不删 process.env（additive-only）
+ok 296 - 3. settings.env 删 key 不删 process.env（additive-only）
+  ---
+  duration_ms: 1222.9259
+  ...
+# Subtest: 4. [1m] 后缀 → contextWindow=1M + beta header + 透传拼回
+ok 297 - 4. [1m] 后缀 → contextWindow=1M + beta header + 透传拼回
+  ---
+  duration_ms: 150.2906
+  ...
+# Subtest: 5. 无 [1m] → contextWindow=200K + 不含 1M beta
+ok 298 - 5. 无 [1m] → contextWindow=200K + 不含 1M beta
+  ---
+  duration_ms: 152.1039
+  ...
+# Subtest: 6. AUTO_COMPACT_WINDOW min 钳制 + reservedTokens
+ok 299 - 6. AUTO_COMPACT_WINDOW min 钳制 + reservedTokens
+  ---
+  duration_ms: 322.7494
+  ...
+# Subtest: 7. alias 保留词 vs 自定义别名
+ok 300 - 7. alias 保留词 vs 自定义别名
+  ---
+  duration_ms: 407.0125
+  ...
+# Subtest: 8. 运行中改 settings.env → chokidar 重读后探针反映新值
+ok 301 - 8. 运行中改 settings.env → chokidar 重读后探针反映新值
+  ---
+  duration_ms: 1216.2258
+  ...
+# Subtest: 附加. /probe/force-reload 确定性兜底
+ok 302 - 附加. /probe/force-reload 确定性兜底
+  ---
+  duration_ms: 137.674
+  ...
+# Subtest: 9. 无 settings.json，纯 shell env 传 model → CLI 正常 + model 来自 env
+ok 303 - 9. 无 settings.json，纯 shell env 传 model → CLI 正常 + model 来自 env
+  ---
+  duration_ms: 130.7722
+  ...
+# Subtest: D10: cleanEnv 删 NODE_OPTIONS（死锁元凶）
+ok 304 - D10: cleanEnv 删 NODE_OPTIONS（死锁元凶）
+  ---
+  duration_ms: 3.0117
+  ...
+# Subtest: D11: cleanEnv 删 VSCODE_*/ELECTRON_*/CHROME_*/PIPE
+ok 305 - D11: cleanEnv 删 VSCODE_*/ELECTRON_*/CHROME_*/PIPE
+  ---
+  duration_ms: 1.5831
+  ...
+# Subtest: D12: cleanEnv 保留系统变量（PATH/HOME/USERPROFILE 等）
+ok 306 - D12: cleanEnv 保留系统变量（PATH/HOME/USERPROFILE 等）
+  ---
+  duration_ms: 1.4498
+  ...
+# Subtest: D13: cleanEnv 设 ELECTRON_RUN_AS_NODE=1
+ok 307 - D13: cleanEnv 设 ELECTRON_RUN_AS_NODE=1
+  ---
+  duration_ms: 2.1698
+  ...
+# Subtest: D13b: 已有 ELECTRON_RUN_AS_NODE 被覆盖为 1（不残留旧值）
+ok 308 - D13b: 已有 ELECTRON_RUN_AS_NODE 被覆盖为 1（不残留旧值）
+  ---
+  duration_ms: 3.2182
+  ...
+# Subtest: D14: cleanEnv 设 CCP_* 路径
+ok 309 - D14: cleanEnv 设 CCP_* 路径
+  ---
+  duration_ms: 2.3497
+  ...
+# Subtest: D11b: 大小写混合的注入变量都被删
+ok 310 - D11b: 大小写混合的注入变量都被删
+  ---
+  duration_ms: 2.133
+  ...
+# Subtest: 边界：env 里空字符串值保留（非注入变量名）
+ok 311 - 边界：env 里空字符串值保留（非注入变量名）
+  ---
+  duration_ms: 2.2375
+  ...
+# Subtest: 基本：spawnProxyChild spawn server.js → 就绪返回 handle
+ok 312 - 基本：spawnProxyChild spawn server.js → 就绪返回 handle
+  ---
+  duration_ms: 146.8091
+  ...
+# Subtest: crash 恢复：kill 子进程 → onExit 触发 → re-spawn 成功
+ok 313 - crash 恢复：kill 子进程 → onExit 触发 → re-spawn 成功
+  ---
+  duration_ms: 593.8963
+  ...
+# Subtest: 反复 re-spawn 10 次：每次就绪、pid 不同、无 TIME_WAIT 冲突
+ok 314 - 反复 re-spawn 10 次：每次就绪、pid 不同、无 TIME_WAIT 冲突
+  ---
+  duration_ms: 3267.6705
+  ...
+# Subtest: EADDRINUSE：端口被占 → 返回 null + 子进程 exit(1)
+ok 315 - EADDRINUSE：端口被占 → 返回 null + 子进程 exit(1)
+  ---
+  duration_ms: 677.4992
+  ...
+# Subtest: 早期 exit 快速返回：子进程 exit 后 spawnProxyChild 不等满 readyTimeoutMs
+ok 316 - 早期 exit 快速返回：子进程 exit 后 spawnProxyChild 不等满 readyTimeoutMs
+  ---
+  duration_ms: 622.5975
+  ...
+# Subtest: 多窗口端口冲突：B spawn 同端口 → B 子进程 exit(1)，A 仍存活
+ok 317 - 多窗口端口冲突：B spawn 同端口 → B 子进程 exit(1)，A 仍存活
+  ---
+  duration_ms: 236.5288
+  ...
+# Subtest: exit 注册时机：spawn 后立即 exit 的子进程，注册前不丢事件
+ok 318 - exit 注册时机：spawn 后立即 exit 的子进程，注册前不丢事件
+  ---
+  duration_ms: 214.3124
+  ...
+# Subtest: exit 注册时机：spawn 后同步立即注册，极快 exit 也不丢
+ok 319 - exit 注册时机：spawn 后同步立即注册，极快 exit 也不丢
+  ---
+  duration_ms: 215.5798
+  ...
+# Subtest: killChild：正常子进程 kill 后在 3s 内退出
+ok 320 - killChild：正常子进程 kill 后在 3s 内退出
+  ---
+  duration_ms: 113.624
+  ...
+# Subtest: killChild：对已退出的子进程立即 resolve
+ok 321 - killChild：对已退出的子进程立即 resolve
+  ---
+  duration_ms: 107.0576
+  ...
+# Subtest: killChild 兜底：忽略 SIGTERM 的子进程，SIGKILL 强杀后退出（修复后不泄漏）
+ok 322 - killChild 兜底：忽略 SIGTERM 的子进程，SIGKILL 强杀后退出（修复后不泄漏） # SKIP Windows child.kill 走 TerminateProcess 不可忽略
+  ---
+  duration_ms: 0.1958
+  ...
+# Subtest: waitForPortReady：端口就绪后返回 true
+ok 323 - waitForPortReady：端口就绪后返回 true
+  ---
+  duration_ms: 21.4174
+  ...
+# Subtest: waitForPortReady：端口无监听，超时后返回 false
+ok 324 - waitForPortReady：端口无监听，超时后返回 false
+  ---
+  duration_ms: 407.9502
+  ...
+# Subtest: waitForPortReady：Date.now() 在纯 Node 正常推进 deadline
+ok 325 - waitForPortReady：Date.now() 在纯 Node 正常推进 deadline
+  ---
+  duration_ms: 306.6295
+  ...
+# Subtest: killChild：kill 触发的 exit，once handler 正常收到并 resolve
+ok 326 - killChild：kill 触发的 exit，once handler 正常收到并 resolve
+  ---
+  duration_ms: 114.4478
+  ...
+# Subtest: killChild：多次调用不抛错
+ok 327 - killChild：多次调用不抛错
+  ---
+  duration_ms: 114.0792
+  ...
+# Subtest: stdout/stderr 独立 lineBuf：半行不混合
+ok 328 - stdout/stderr 独立 lineBuf：半行不混合
+  ---
+  duration_ms: 104.1023
+  ...
+# Subtest: 残行 flush：FATAL + 立即 exit，无换行结尾的残行被 flush
+ok 329 - 残行 flush：FATAL + 立即 exit，无换行结尾的残行被 flush
+  ---
+  duration_ms: 106.3596
+  ...
+# Subtest: 残行 flush：stdout 持续输出无换行结尾，exit 后 flush
+ok 330 - 残行 flush：stdout 持续输出无换行结尾，exit 后 flush
+  ---
+  duration_ms: 99.502
+  ...
+# Subtest: 多行 + 残行：完整行即时输出，残行延迟 flush
+ok 331 - 多行 + 残行：完整行即时输出，残行延迟 flush
+  ---
+  duration_ms: 97.8951
+  ...
+1..331
+# tests 352
+# suites 0
+# pass 350
+# fail 0
+# cancelled 0
+# skipped 2
+# todo 0
+# duration_ms 52148.5694
+
+## 修复原有失败（2 个）
+
+1. test-stream-incremental：两处问题
+   - config 用旧字段 retryOnStatus:[]/retryOnBodyErrorCode:[]（无 retryRules 字段）→ config-store 迁移成默认规则 [{503,10310},{200,10310}]，导致 inspectFirstBody 对 SSE 首 chunk（非 JSON）返回 incomplete 一直攒到 end → 缓冲式。改 retryRules:[]（显式空规则，跳过迁移）后首 chunk 即转发。
+   - mock 端口 8795 是 Windows 保留端口（EACCES），mock-server listen 失败 → waitHealth 超时。改 8796。
+2. test-stats-e2e：web UI 演进，旧断言失效（<colgroup> 带属性、无 white-space:normal、无 table-scroll）。断言更新匹配当前 index.html 实际结构（<colgroup / table-layout:fixed / stats-row / sub-cell + 死代码检查）。
+
+## 结果
+352 tests / 350 pass / 0 fail / 2 skip（POSIX）/ 51s。全绿。

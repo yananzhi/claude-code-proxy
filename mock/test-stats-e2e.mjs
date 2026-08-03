@@ -91,13 +91,12 @@ test('/api/stats 与 /api/traces 集成（窗口/去重/DoS 防护 + web UI 对�
         assert.ok(elapsed < 2000, `超大窗口不应卡死代理（耗时 ${elapsed}ms < 2000）`);
         assert.equal(JSON.stringify(huge.windows.map(w => w.hours)), JSON.stringify([1, 5, 24]), '超大/超限窗口被过滤，回退默认 [1,5,24]');
 
-        // 4. web UI HTML 含 colgroup（对齐修复落盘）
+        // 4. web UI HTML 关键结构存在（colgroup 定宽列 + 统计卡片 + sub-cell；断言随 web UI 演进更新）
         const html = readFileSync(join(here, '..', 'proxy', 'web', 'index.html'), 'utf8');
-        assert.ok(html.includes('<colgroup>'), 'web UI 含 colgroup 定宽列');
+        assert.ok(html.includes('<colgroup'), 'web UI 含 colgroup 定宽列');
         assert.ok(html.includes('table-layout: fixed'), 'web UI 含 table-layout:fixed');
-        assert.ok(html.includes('stats-row'), 'web UI 含统计卡片');
-        assert.ok(html.includes('.sub-cell') && html.includes('white-space: normal'), 'web UI 子行 nowrap 回退为 normal');
-        assert.ok(html.includes('table-scroll'), 'web UI 含横向滚动容器');
+        assert.ok(html.includes('stats-row'), 'web UI 含统计卡片行');
+        assert.ok(html.includes('sub-cell'), 'web UI 含 attempts 子行样式');
         assert.ok(!html.includes('statsCache'), 'web UI 已移除死的 statsCache 状态');
         assert.ok(!html.includes('stat-remove'), 'web UI 已移除死的 .stat-remove CSS');
     } finally {

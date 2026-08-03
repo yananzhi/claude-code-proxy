@@ -19,7 +19,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_JS = join(__dirname, '..', 'proxy', 'server.js');
 const MOCK_JS = join(__dirname, 'mock-server.js');
 const PROXY_PORT = 11515;
-const MOCK_PORT = 8795;
+const MOCK_PORT = 8796;
 const PROXY = `http://127.0.0.1:${PROXY_PORT}`;
 const MOCK = `http://127.0.0.1:${MOCK_PORT}`;
 
@@ -32,7 +32,7 @@ function writeConfig(dir) {
     writeFileSync(join(dir, 'config.json'), JSON.stringify({
         env: { ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_BASE_URL: MOCK, API_TIMEOUT_MS: '10000', ANTHROPIC_MODEL: 'm' },
         effortLevel: '',
-        proxy: { listenHost: '127.0.0.1', listenPort: PROXY_PORT, maxAttempts: 1, backoffSec: 0.2, backoffMaxSec: 2, passthrough: false, retryOnStatus: [], retryOnBodyErrorCode: [] },
+        proxy: { listenHost: '127.0.0.1', listenPort: PROXY_PORT, maxAttempts: 1, backoffSec: 0.2, backoffMaxSec: 2, passthrough: false, retryRules: [] },
     }, null, 2) + '\n', 'utf8');
     return join(dir, 'config.json');
 }

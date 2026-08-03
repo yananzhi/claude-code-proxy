@@ -72,9 +72,7 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
   node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/
   ```
   ⚠ `--test-concurrency=1` 必须加：`mock/` 套件起真代理子进程 + mock 上游，默认并发会端口抢占/资源竞争卡死。串行才稳定。
-  现状 ~352 tests / 348 pass / 2 fail（原有失败，见下）/ 2 skip（POSIX 专属在 Windows 跳过）。
-
-- **已知失败（原有，非改造引入）**：`mock/test-stats-e2e.mjs`（3 个 web UI HTML 断言与 `proxy/web/index.html` 不符）、`mock/test-stream-incremental.mjs`（代理在本环境缓冲了整个 SSE 响应而非增量转发）。两者在改造前就是失败/被 `exit 0` 掩盖，改造后变成显式 test failure。
+  现状 ~352 tests / 350 pass / 0 fail / 2 skip（POSIX 专属在 Windows 跳过）。
 
 - **按目录跑**（改某块时针对性）：
   - `node --test proxy/test/` — server/config/trace 配置层 + e2e（9 文件，~157 用例）
