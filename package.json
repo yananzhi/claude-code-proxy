@@ -24,7 +24,8 @@
   "files": [
     "out/",
     "standalone/",
-    "proxy/server.js",    "proxy/config-store.js",
+    "proxy/server.js",
+    "proxy/config-store.js",
     "proxy/trace-store.js",
     "proxy/logger.js",
     "proxy/package.json",
@@ -309,9 +310,11 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
-    "test:mock-cli": "node --test test/mock-cli/test/"
+    "test:mock-cli": "node --test test/mock-cli/test/",
+    "test:e2e": "playwright test --config=playwright.config.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.80.0",
     "chokidar": "^5.0.0",
