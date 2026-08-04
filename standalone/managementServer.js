@@ -111,48 +111,26 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // POST /api/workspaces/:id/terminals → 基于当前 active normal config 开终端
+            // POST /api/workspaces/:id/terminals → 开终端（body 可选 cfgId，不传则用 active 默认）
             const mWsTerm = pathname.match(/^\/api\/workspaces\/([^/]+)\/terminals$/);
             if (method === 'POST' && mWsTerm) {
                 const id = decodeURIComponent(mWsTerm[1]);
-                const ws = await manager.get(id);
-                if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
-                // 取 active normal config
-                const active = await getActiveConfig(manager, id);
-                if (!active) {
-                    sendJson(res, 400, { error: '当前 workspace 无 active 配置，请先激活一个 local config 再开终端' });
+                let body = {};
+                try { body = await readJsonBody(req); } catch (e) {
+                    // body 存在但非合法 JSON（空 body 已在 readJsonBody 内 resolve 为 {}，不会 reject）
+                    sendJson(res, 400, { error: '请求体不是有效 JSON' });
                     return;
                 }
-                const configs = await manager.getLocalConfigs(id);
-                const cfg = configs.find(c => c.id === active.id);
-                if (!cfg) {
-                    sendJson(res, 400, { error: `active 配置 ${active.id} 已不存在，请重新激活` });
-                    return;
+                try {
+                    const result = await startWorkspaceTerminal({ manager, sessions, opts, proxyPort: opts.proxyPort }, id, body);
+                    sendJson(res, 201, result);
+                } catch (e) {
+                    sendTermError(res, e);
                 }
-                if (cfg.derivedFrom !== undefined) {
-                    sendJson(res, 400, { error: '当前 active 配置是派生配置，请在该派生配置节点下开终端' });
-                    return;
-                }
-                const binaryPath = resolveClaudeBinaryStandalone({ log: opts.log });
-                if (!binaryPath) {
-                    sendJson(res, 400, { error: '未找到 Claude Code CLI 二进制。请安装 Claude Code，或在系统 PATH 中配置 claude。' });
-                    return;
-                }
-                const terminalId = sessions.newTerminalId();
-                const { env, configDir } = await buildTerminalEnv(cfg, null, opts.proxyPort, {
-                    workspaceDir: ws.dir, terminalId, log: opts.log,
-                });
-                await ensureProjectPermissions(ws.dir, opts.log);
-                await ensureGitignore(ws.dir, opts.log);
-                const result = await sessions.start(terminalId, {
-                    cwd: ws.dir, binaryPath, env, configDir,
-                    workspaceId: id, configId: cfg.id, startedConfigName: cfg.name, kind: 'normal',
-                });
-                sendJson(res, 201, { ...result, kind: 'normal', startedConfigName: cfg.name, configId: cfg.id, workspaceId: id });
                 return;
             }
 
-            // GET /api/workspaces/:id/terminals → 列 workspace 的 normal 活终端
+            // GET /api/workspaces/:id/terminals → 列 workspace 的活终端
             if (method === 'GET' && mWsTerm) {
                 const id = decodeURIComponent(mWsTerm[1]);
                 const terminals = sessions.listByWorkspace(id);
@@ -160,37 +138,17 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // POST /api/workspaces/:id/configs/:cfgId/terminals → 开派生终端
+            // POST /api/workspaces/:id/configs/:cfgId/terminals → 开指定 config 终端（普通/派生都行）
             const mCfgTerm = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/terminals$/);
             if (method === 'POST' && mCfgTerm) {
                 const id = decodeURIComponent(mCfgTerm[1]);
                 const cfgId = decodeURIComponent(mCfgTerm[2]);
-                const ws = await manager.get(id);
-                if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
-                const configs = await manager.getLocalConfigs(id);
-                const cfg = configs.find(c => c.id === cfgId);
-                if (!cfg) { sendJson(res, 404, { error: `config 不存在: ${cfgId}` }); return; }
-                if (cfg.derivedFrom === undefined) {
-                    sendJson(res, 400, { error: '普通配置请用 workspace 级「新建终端」入口（基于 active 配置启动）' });
-                    return;
+                try {
+                    const result = await startTerminalForConfig({ manager, sessions, opts, proxyPort: opts.proxyPort }, id, cfgId);
+                    sendJson(res, 201, result);
+                } catch (e) {
+                    sendTermError(res, e);
                 }
-                const parent = cfg.derivedFrom ? configs.find(c => c.id === cfg.derivedFrom) : null;
-                const binaryPath = resolveClaudeBinaryStandalone({ log: opts.log });
-                if (!binaryPath) {
-                    sendJson(res, 400, { error: '未找到 Claude Code CLI 二进制。请安装 Claude Code，或在系统 PATH 中配置 claude。' });
-                    return;
-                }
-                const terminalId = sessions.newTerminalId();
-                const { env, configDir } = await buildTerminalEnv(cfg, parent, opts.proxyPort, {
-                    workspaceDir: ws.dir, terminalId, log: opts.log,
-                });
-                await ensureProjectPermissions(ws.dir, opts.log);
-                await ensureGitignore(ws.dir, opts.log);
-                const result = await sessions.start(terminalId, {
-                    cwd: ws.dir, binaryPath, env, configDir,
-                    workspaceId: id, configId: cfg.id, startedConfigName: cfg.name, kind: 'derived',
-                });
-                sendJson(res, 201, { ...result, kind: 'derived', startedConfigName: cfg.name, configId: cfg.id, workspaceId: id });
                 return;
             }
 
@@ -512,3 +470,72 @@ function sendJson(res, status, obj) {
     });
     res.end(body);
 }
+
+/**
+ * 起终端的共享逻辑（目标3：workspace 级与 config 级入口共用）。
+ * 取 config + parent → buildTerminalEnv → ensureProjectPermissions/Gitignore → sessions.start。
+ * 不限制 config 类型（普通/派生都行），kind 由 cfg.derivedFrom 决定。
+ *
+ * @param {object} deps { manager, sessions, opts, proxyPort }
+ * @param {string} wsId workspace id
+ * @param {string} cfgId 配置 id
+ * @returns {Promise<object>} 起终端结果（含 terminalId/pid/kind/startedConfigName/configId/workspaceId）
+ * @throws {NotFoundError} workspace/config 不存在（→ 404）
+ * @throws {Error} 二进制缺失/上游不可达等（消息含可读提示，调用方映射 status）
+ */
+async function startTerminalForConfig({ manager, sessions, opts, proxyPort }, wsId, cfgId) {
+    const ws = await manager.get(wsId);
+    if (!ws) throw new NotFoundError(`workspace 不存在: ${wsId}`);
+    const configs = await manager.getLocalConfigs(wsId);
+    const cfg = configs.find(c => c.id === cfgId);
+    if (!cfg) throw new NotFoundError(`config 不存在: ${cfgId}`);
+    const isDerived = cfg.derivedFrom !== undefined;
+    const parent = isDerived ? configs.find(c => c.id === cfg.derivedFrom) : null;
+    const binaryPath = resolveClaudeBinaryStandalone({ log: opts.log });
+    if (!binaryPath) {
+        const err = new Error('未找到 Claude Code CLI 二进制。请安装 Claude Code，或在系统 PATH 中配置 claude。');
+        err.statusCode = 400;
+        throw err;
+    }
+    const terminalId = sessions.newTerminalId();
+    const kind = isDerived ? 'derived' : 'normal';
+    const { env, configDir } = await buildTerminalEnv(cfg, parent, proxyPort, {
+        workspaceDir: ws.dir, terminalId, log: opts.log,
+    });
+    await ensureProjectPermissions(ws.dir, opts.log);
+    await ensureGitignore(ws.dir, opts.log);
+    const result = await sessions.start(terminalId, {
+        cwd: ws.dir, binaryPath, env, configDir,
+        workspaceId: wsId, configId: cfg.id, startedConfigName: cfg.name, kind,
+    });
+    return { ...result, kind, startedConfigName: cfg.name, configId: cfg.id, workspaceId: wsId };
+}
+
+/** workspace 级起终端：解析 body 的 cfgId（可选），不传则用 active。 */
+async function startWorkspaceTerminal(deps, wsId, body) {
+    const { manager, opts } = deps;
+    const ws = await manager.get(wsId);
+    if (!ws) throw new NotFoundError(`workspace 不存在: ${wsId}`);
+    let cfgId = body?.cfgId;
+    if (!cfgId) {
+        // 无 cfgId → 用 active 默认配置
+        const active = await getActiveConfig(manager, wsId);
+        if (!active) {
+            const err = new Error('当前 workspace 无默认配置，请先标记一个 config 为默认，或在 body 指定 cfgId');
+            err.statusCode = 400;
+            throw err;
+        }
+        cfgId = active.id;
+    }
+    return startTerminalForConfig(deps, wsId, cfgId);
+}
+
+/** 起终端错误统一映射：NotFound→404，ProxyUnavailable→502，Validation→400，二进制缺失(自定义 statusCode)→原值，其他→500。 */
+function sendTermError(res, e) {
+    if (e instanceof NotFoundError) sendJson(res, 404, { error: e.message });
+    else if (e instanceof ProxyUnavailableError) sendJson(res, 502, { error: e.message });
+    else if (e instanceof ValidationError) sendJson(res, 400, { error: e.message });
+    else if (e.statusCode) sendJson(res, e.statusCode, { error: e.message });
+    else sendJson(res, 500, { error: e.message });
+}
+

@@ -309,9 +309,10 @@ test('E2: 缺 BASE_URL 的 config 仍可标记（标记 ≠ 启动，启动时�
 // F 审查 TDD：边界/状态转换/一致性
 // ════════════════════════════════════════════════════════════
 
-// F1（怀疑点4·状态转换一致性）：派生配置可标记为默认，但起终端路由拒绝派生 active。
-// 断言"bug 存在"：标记派生为默认后，POST /terminals 应 400（路由 line 132-135 拒绝派生 active）。
-test('F1: 派生配置标记为默认后，workspace 级起终端被拒（400）— 标记与起终端入口不一致', async () => {
+// F1（目标3 已修复）：派生配置可标记为默认，起终端路由不再拒绝派生 active。
+// 旧设计（目标2 审查时）workspace 级拒绝派生 active（400），与"派生可标记默认"不一致。
+// 目标3 取消该限制：派生 active 走 workspace 级不再 400（代理不可达 → 502 亦可，非类型拒绝）。
+test('F1: 派生配置标记为默认后，workspace 级起终端不因类型被拒（目标3 取消旧限制）', async () => {
     const { handle, port, home } = await startMgmt('f1');
     const { wsId, proj } = await createWorkspace(port, 'f1');
     const parent = await createConfig(port, wsId, { name: 'parent', mode: 'proxy', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm' } }) });
@@ -327,11 +328,9 @@ test('F1: 派生配置标记为默认后，workspace 级起终端被拒（400）
         // 标记派生为默认（A4 已验证可标记）
         const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}/activate`, { method: 'POST' });
         assert.equal(r.status, 200, '派生应可标记为默认');
-        // 起终端：路由拒绝派生 active → 400
+        // 起终端：目标3 取消旧"拒绝派生 active"限制 → 不再 400（代理不可达 → 502，非类型拒绝）
         const r2 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`, { method: 'POST' });
-        assert.equal(r2.status, 400, 'workspace 级起终端应拒绝派生 active（路由 line 132-135）');
-        const data = await r2.json();
-        assert.ok(/派生配置/.test(data.error), `错误应提及派生配置，实际: ${data.error}`);
+        assert.notEqual(r2.status, 400, '派生 active 不应被类型拒绝（目标3 取消旧限制）');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
