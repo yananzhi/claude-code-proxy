@@ -79,7 +79,10 @@ export class ClaudeSessionManager {
             ptyProcess = this.pty.spawn(workspace.binaryPath, [], {
                 cwd: workspace.dir,
                 env,
-                // node-pty 默认用系统 shell 包装；claude 二进制直接执行，cols/rows 默认
+                // PTY 初始尺寸：与 xterm 默认对齐，避免 claude CLI 按 80x24 渲染而 xterm 按容器宽渲染致错位。
+                // 实际尺寸由前端 fit 后通过 WS resize 消息同步（pty.resize）。
+                cols: 80,
+                rows: 24,
             });
         } catch (e) {
             throw new Error(`spawn claude 失败: ${e.message || String(e)}`);
@@ -167,12 +170,23 @@ export class ClaudeSessionManager {
 
         handle.wsClients.add(ws);
 
-        // WS 收到消息 → 写入 PTY（用户输入）
+        // WS 收到消息 → resize 控制 或 写入 PTY（用户输入）
         ws.on('message', (data) => {
             if (handle.disposed) return;
+            const text = typeof data === 'string' ? data : data.toString('utf8');
+            // resize 控制消息：JSON {type:'resize',cols,rows}（前端 fit 后发）
+            if (text.startsWith('{')) {
+                try {
+                    const obj = JSON.parse(text);
+                    if (obj.type === 'resize' && Number.isFinite(obj.cols) && Number.isFinite(obj.rows)) {
+                        try { handle.pty.resize(Math.max(1, obj.cols|0), Math.max(1, obj.rows|0)); } catch (e) {
+                            this.log(`[claudeSession] pty.resize 异常: ${e?.message || String(e)}`);
+                        }
+                        return;
+                    }
+                } catch { /* 非 JSON，按用户输入处理 */ }
+            }
             try {
-                // data 可能是 Buffer 或字符串，pty.write 接受 string/Buffer
-                const text = typeof data === 'string' ? data : data.toString('utf8');
                 handle.pty.write(text);
             } catch (e) {
                 this.log(`[claudeSession] write PTY 异常: ${e?.message || String(e)}`);

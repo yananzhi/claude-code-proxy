@@ -267,10 +267,17 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
 
   function connectWs() {
     var ws = new WebSocket(wsUrl);
+    function sendResize() {
+      try {
+        var cols = term.cols, rows = term.rows;
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: cols, rows: rows }));
+      } catch (e) {}
+    }
     ws.onopen = function () {
       msgEl.className = 'msg ok';
       msgEl.textContent = '';
       term.focus();
+      sendResize(); // 初始同步 xterm 尺寸到 PTY
     };
     ws.onmessage = function (ev) {
       if (typeof ev.data === 'string') {
@@ -301,6 +308,8 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
       msgEl.textContent = 'WebSocket 连接错误';
     };
     term.onData(function (data) { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+    // xterm 尺寸变化（窗口 resize / fit）→ 同步给 PTY
+    term.onResize(function () { sendResize(); });
     window.addEventListener('resize', function () { try { fit.fit(); } catch (e) {} });
   }
 })();
