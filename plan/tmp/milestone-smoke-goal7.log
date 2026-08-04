@@ -1,0 +1,19 @@
+
+Running 8 tests using 1 worker
+
+  ✓  1 [chromium] › test\e2e\smoke.spec.ts:9:1 › 冒烟：起 standalone 后端 → 打开列表页 → 标题渲染 (802ms)
+  ✓  2 [chromium] › test\e2e\smoke.spec.ts:19:1 › 冒烟：代理控制台链接指向 proxyPort (451ms)
+  ✓  3 [chromium] › test\e2e\workspaces.spec.ts:32:1 › 列表页：空状态显示新建 workspace 提示 (454ms)
+  ✓  4 [chromium] › test\e2e\workspaces.spec.ts:40:1 › 树形结构：workspace 下有「配置」「终端」两个一级标签 (505ms)
+  ✓  5 [chromium] › test\e2e\workspaces.spec.ts:48:1 › 文案统一：静态配置行显示 [直连]/[代理] 徽标 (507ms)
+  ✓  6 [chromium] › test\e2e\workspaces.spec.ts:55:1 › 文案统一：无"派生/derived/Local LLM Configs"残留（用户可见处） (486ms)
+  ✓  7 [chromium] › test\e2e\workspaces.spec.ts:64:1 › 默认标记：静态配置有「设为默认」按钮 (467ms)
+  ✓  8 [chromium] › test\e2e\workspaces.spec.ts:70:1 › 默认标记：点「设为默认」后变为「✓ 默认」徽标 (538ms)
+
+  8 passed (5.2s)
+
+# === 目标7 e2e 套件补全 ===
+# 冒烟 2 + 列表页结构 6 = 8/8 pass
+# 覆盖：树形结构（配置/终端两个一级标签）+ 文案统一（[直连]/[代理]、无派生残留）+ 默认标记（设为默认→✓默认）
+# 不起真终端的用例（xterm/顶栏实时映射）留手动验证（CLAUDE.md 约定：PTY 手动不进套件）
+# 纯测试追加，无源码改动
