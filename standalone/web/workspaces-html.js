@@ -24,7 +24,11 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
   .ws-card .name { font-weight: 600; }
   .ws-card .meta { color: #666; font-size: 0.85rem; margin: 4px 0; }
   .ws-card .configs { font-size: 0.85rem; color: #444; margin-top: 8px; }
-  .ws-card .config-item { padding: 2px 0; }
+  .ws-card .config-item { padding: 3px 0; display: flex; align-items: center; gap: 8px; }
+  .ws-card .cfg-ops { margin: 6px 0; }
+  .cfg-link { color: #06c; text-decoration: none; margin-right: 8px; }
+  .cfg-link:hover { text-decoration: underline; }
+  .cfg-act { padding: 2px 8px; font-size: 0.8rem; cursor: pointer; }
   .danger { color: #c00; }
   .msg { padding: 8px; margin: 8px 0; border-radius: 4px; }
   .msg.err { background: #fee; color: #c00; }
@@ -80,23 +84,71 @@ async function loadList() {
         if (rr.ok) { showMsg('已删除'); loadList(); } else { const e = await rr.json(); showMsg(e.error, true); }
       };
       card.querySelector('.meta').appendChild(document.createElement('br'));
+      card.querySelector('.meta').appendChild(document.createElement('br'));
       card.querySelector('.meta').appendChild(delBtn);
-      // 加载该 workspace 的 local 配置
-      fetch(API + '/api/workspaces/' + ws.id).then(r => r.json()).then(d => {
+
+      // 配置区：新建配置 + 配置列表（每条带编辑/激活链接）+ 打开 CLI 终端
+      const cfgBlock = card.querySelector('.configs');
+      cfgBlock.textContent = '配置加载中...';
+      // 顶部操作行：新建配置 + 打开终端
+      const opsRow = document.createElement('div');
+      opsRow.className = 'cfg-ops';
+      const newLink = document.createElement('a');
+      newLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/new/edit';
+      newLink.textContent = '+ 新建配置';
+      newLink.className = 'cfg-link';
+      opsRow.appendChild(newLink);
+      const termLink = document.createElement('a');
+      termLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/terminal';
+      termLink.textContent = '打开 CLI 终端';
+      termLink.className = 'cfg-link';
+      termLink.target = '_blank';
+      opsRow.appendChild(document.createTextNode(' · '));
+      opsRow.appendChild(termLink);
+      cfgBlock.textContent = '';
+      cfgBlock.appendChild(opsRow);
+      cfgBlock.appendChild(document.createElement('br'));
+
+      // 加载该 workspace 的 local 配置（每条带编辑/激活）
+      fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id)).then(r => r.json()).then(d => {
         const cfgs = d.configs || [];
-        const c = card.querySelector('.configs');
-        if (cfgs.length === 0) { c.textContent = '（无 local 配置）'; return; }
-        // 用 textContent 而非 innerHTML 拼接，防配置名 XSS
-        c.textContent = '';
-        c.appendChild(document.createTextNode('Local 配置（' + cfgs.length + '）：'));
-        c.appendChild(document.createElement('br'));
+        const head = document.createTextNode('Local 配置（' + cfgs.length + '）：');
+        cfgBlock.appendChild(head);
+        cfgBlock.appendChild(document.createElement('br'));
+        if (cfgs.length === 0) {
+          const empty = document.createElement('span');
+          empty.className = 'hint';
+          empty.textContent = '（无配置，点上面「新建配置」创建）';
+          cfgBlock.appendChild(empty);
+          return;
+        }
         for (const cfg of cfgs) {
           const item = document.createElement('div');
           item.className = 'config-item';
-          item.textContent = '· ' + (cfg.name || cfg.id) + ' [mode=' + (cfg.mode || 'direct') + ']';
-          c.appendChild(item);
+          // 编辑链接
+          const editLink = document.createElement('a');
+          editLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/edit';
+          editLink.textContent = '· ' + (cfg.name || cfg.id) + ' [mode=' + (cfg.mode || 'direct') + ']';
+          editLink.className = 'cfg-link';
+          item.appendChild(editLink);
+          // 激活按钮
+          const actBtn = document.createElement('button');
+          actBtn.textContent = '激活';
+          actBtn.className = 'cfg-act';
+          actBtn.onclick = async () => {
+            actBtn.disabled = true;
+            try {
+              const rr = await fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/activate', { method: 'POST' });
+              const dd = await rr.json();
+              if (rr.ok) { showMsg('已激活（' + (dd.mode || '') + '）：' + (dd.note || ''), false); }
+              else { showMsg(dd.error || '激活失败', true); }
+            } catch (e) { showMsg(e.message, true); }
+            actBtn.disabled = false;
+          };
+          item.appendChild(actBtn);
+          cfgBlock.appendChild(item);
         }
-      }).catch(() => { card.querySelector('.configs').textContent = '配置加载失败'; });
+      }).catch(() => { cfgBlock.appendChild(document.createTextNode('配置加载失败')); });
       list.appendChild(card);
     }
   } catch (e) {
