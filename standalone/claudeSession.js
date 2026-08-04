@@ -1,18 +1,20 @@
-// standalone/claudeSession.js — CLI 会话管理（node-pty + WebSocket，ESM JS）
+// standalone/claudeSession.js — CLI 终端会话管理（node-pty + WebSocket，ESM JS）
 //
-// 职责（阶段 3）：
-//   - 每 workspace 一个 claude CLI 会话（node-pty spawn，TUI 不降级）
-//   - CLAUDE_CONFIG_DIR 指向 workspace 的 .claude_proxy/，cwd=workspace dir
-//   - WebSocket 双向流：PTY onData → 广播 WS；WS message → PTY write
-//   - 会话状态 Map 内存管理 + 退出/断线清理
+// 职责：
+//   - 每个终端一个独立 PTY 会话（按 terminalId 索引，不再 per-workspace 单会话）
+//   - normal 终端：基于 active 配置的 settings.json 启动（env 只注入 CLAUDE_CONFIG_DIR）
+//   - derived 终端：env 注入 BASE_URL/token/四档别名，configDir 用 per-terminal 空目录
+//   - WebSocket 双向流：PTY onData → 广播 WS；WS message → PTY write / resize
+//   - 会话状态 Map 内存管理 + 退出/断线清理 + listByWorkspace/listByConfig
 //
-// 设计依据：docs/standalone-backend-plan.md 阶段 3
-// 正交设计：plan/tmp/2026-08-03-stage3-cli-session.md
+// 设计依据：docs/standalone-backend-plan.md；plan: .claude_proxy/plans/ancient-greeting-puddle.md
 //
-// 范围收缩：阶段 3 spawn "裸 claude 会话"（CLAUDE_CONFIG_DIR + cwd + env，不预写 settings.json）。
-// 完整 settings.json 合成（proxy 模式 upstream 注入 + 派生节点别名）留后续。
+// 注：真实 PTY/conqty 集成（含 xterm.js 端到端）由手动 smoke 验证，不进 node --test 套件
+// （node-pty 的 conqty handle 进程退出后不自动释放，会让 event loop 不空卡死套件）。
 
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -32,52 +34,72 @@ try {
 /** 默认 pty 实现（可被 ClaudeSessionManager 构造函数 opts.pty 覆盖，便于测试 mock）。 */
 export const defaultPty = _pty;
 
-/** workspace 下独立配置目录名（与 localConfigStore/launcher 一致）。 */
-const WORKSPACE_CONFIG_DIR = '.claude_proxy';
+/** 默认 terminalId 生成器：'t_' + 8 hex。测试可注入 opts.newId 覆盖。 */
+export function defaultNewId() {
+    return 't_' + randomBytes(4).toString('hex');
+}
 
 /**
- * Claude 会话管理器：每 workspace 一个 PTY 会话。
+ * Claude 终端会话管理器：每个 terminalId 一个独立 PTY 会话。
+ *
+ * 与旧版（per-workspace 单会话、reuse-on-exist）区别：
+ *   - start 永远 spawn 新 PTY（不 reuse）——支持同一 workspace/config 多终端
+ *   - handle 多存 configId/workspaceId/startedConfigName/kind/configDir，供 listBy* 查询
+ *   - stop 时 rmSync 清理 per-terminal configDir（派生终端的独立目录）
  */
 export class ClaudeSessionManager {
     constructor(opts = {}) {
-        /** @type {Map<string, SessionHandle>} workspaceId → handle */
+        /** @type {Map<string, TerminalHandle>} terminalId → handle */
         this.sessions = new Map();
         this.log = opts.log || (() => {});
         // pty 实现可注入（测试用 mock，默认用 node-pty）
         this.pty = opts.pty || defaultPty;
+        this.newId = opts.newId || defaultNewId;
     }
 
     /**
-     * 启动（或复用）某 workspace 的 claude 会话。
-     * @param {string} workspaceId
-     * @param {{dir: string, binaryPath: string}} workspace workspace 磁盘目录 + claude 二进制路径
-     * @returns {Promise<{ sessionId: string, pid: number, reused: boolean }>}
-     * @throws {Error} binaryPath 为空 / spawn 失败
+     * Spawn 一个新终端（永不 reuse）。调用方保证 terminalId 唯一。
+     * @param {string} terminalId 终端唯一 id（调用方生成，或用 mgr.newId()）
+     * @param {object} params
+     *   @param {string} params.cwd workspace 磁盘目录（PTY cwd）
+     *   @param {string} params.binaryPath claude 二进制路径
+     *   @param {object} params.env spawn env 覆盖层（含 CLAUDE_CONFIG_DIR + 配置特定 key）
+     *   @param {string} params.configDir CLAUDE_CONFIG_DIR 路径（per-terminal，spawn 前 mkdir）
+     *   @param {string} params.workspaceId 所属 workspace id（listByWorkspace 用）
+     *   @param {string} params.configId 所属 config id（listByConfig 用）
+     *   @param {string} params.startedConfigName 启动时所基于的配置名（normal 终端显示用）
+     *   @param {'normal'|'derived'} params.kind 终端类型
+     * @returns {Promise<{ terminalId: string, pid: number }>}
+     * @throws {Error} binaryPath 为空 / cwd 为空 / spawn 失败
      */
-    async start(workspaceId, workspace) {
-        if (!workspace?.binaryPath) {
+    async start(terminalId, params) {
+        if (!params?.binaryPath) {
             throw new Error('claude 二进制未找到（请安装 Claude Code CLI 或在设置中指定路径）');
         }
-        if (!workspace?.dir) {
+        if (!params?.cwd) {
             throw new Error('workspace 目录无效');
         }
 
-        // 已有会话 → 复用
-        const existing = this.sessions.get(workspaceId);
-        if (existing) {
-            return { sessionId: existing.id, pid: existing.pty.pid, reused: true };
+        // 确保 per-terminal configDir 存在（派生终端的独立空目录；normal 终端指向 .claude_proxy，已存在也无所谓）
+        const configDir = params.configDir;
+        if (configDir) {
+            try {
+                fs.mkdirSync(configDir, { recursive: true });
+            } catch (e) {
+                this.log(`[claudeSession] mkdir configDir 失败（忽略）: ${e?.message || String(e)}`);
+            }
         }
 
-        const configDir = path.join(workspace.dir, WORKSPACE_CONFIG_DIR);
         const env = {
             ...process.env,
             CLAUDE_CONFIG_DIR: configDir,
+            ...params.env,
         };
 
         let ptyProcess;
         try {
-            ptyProcess = this.pty.spawn(workspace.binaryPath, [], {
-                cwd: workspace.dir,
+            ptyProcess = this.pty.spawn(params.binaryPath, [], {
+                cwd: params.cwd,
                 env,
                 // PTY 初始尺寸：与 xterm 默认对齐，避免 claude CLI 按 80x24 渲染而 xterm 按容器宽渲染致错位。
                 // 实际尺寸由前端 fit 后通过 WS resize 消息同步（pty.resize）。
@@ -89,13 +111,18 @@ export class ClaudeSessionManager {
         }
 
         const handle = {
-            id: workspaceId,
+            id: terminalId,
             pty: ptyProcess,
             pid: ptyProcess.pid,
             startedAt: new Date().toISOString(),
             /** @type {Set<import('ws').WebSocket>} 连接的 WS 客户端 */
             wsClients: new Set(),
             disposed: false,
+            workspaceId: params.workspaceId,
+            configId: params.configId,
+            startedConfigName: params.startedConfigName,
+            kind: params.kind || 'normal',
+            configDir,
         };
 
         // PTY 输出 → 广播到所有 WS 客户端（发 binary frame，前端 binaryType=arraybuffer 接 Uint8Array，
@@ -115,9 +142,17 @@ export class ClaudeSessionManager {
 
         // PTY 退出 → 清理 + 通知 WS 客户端
         ptyProcess.onExit(({ exitCode, signal }) => {
-            this.log(`[claudeSession] 会话 ${workspaceId} 退出 code=${exitCode} signal=${signal}`);
+            this.log(`[claudeSession] 终端 ${terminalId} 退出 code=${exitCode} signal=${signal}`);
             handle.disposed = true; // 防 ws message 在 close 前仍写死 PTY
-            this.sessions.delete(workspaceId);
+            this.sessions.delete(terminalId);
+            // 清理 per-terminal configDir（派生终端的独立空目录；normal 终端 configDir=.claude_proxy，rmSync force 忽略）
+            if (handle.configDir && handle.kind === 'derived') {
+                try {
+                    fs.rmSync(handle.configDir, { recursive: true, force: true });
+                } catch (e) {
+                    this.log(`[claudeSession] 清理 configDir 失败（忽略）: ${e?.message || String(e)}`);
+                }
+            }
             // 通知所有 WS 客户端
             for (const ws of handle.wsClients) {
                 if (ws.readyState === ws.OPEN) {
@@ -128,23 +163,38 @@ export class ClaudeSessionManager {
             handle.wsClients.clear();
         });
 
-        this.sessions.set(workspaceId, handle);
-        this.log(`[claudeSession] 会话已启动 ${workspaceId} pid=${handle.pid}`);
-        return { sessionId: handle.id, pid: handle.pid, reused: false };
+        this.sessions.set(terminalId, handle);
+        this.log(`[claudeSession] 终端已启动 ${terminalId} pid=${handle.pid} kind=${handle.kind} configId=${handle.configId}`);
+        return { terminalId: handle.id, pid: handle.pid };
     }
 
-    /** 停止某 workspace 会话（kill PTY + 移除）。不存在 → 无操作。 */
-    async stop(workspaceId) {
-        const handle = this.sessions.get(workspaceId);
+    /**
+     * 生成新 terminalId（便捷方法，调用方可不用、自己生成）。
+     */
+    newTerminalId() {
+        return this.newId();
+    }
+
+    /** 停止某终端（kill PTY + 移除 + 清理 configDir）。不存在 → false。 */
+    async stop(terminalId) {
+        const handle = this.sessions.get(terminalId);
         if (!handle) return false;
         handle.disposed = true;
         try {
             // node-pty 的 kill 默认 SIGTERM，Windows 用 TerminateProcess
             handle.pty.kill();
         } catch (e) {
-            this.log(`[claudeSession] kill ${workspaceId} 异常: ${e?.message || String(e)}`);
+            this.log(`[claudeSession] kill ${terminalId} 异常: ${e?.message || String(e)}`);
         }
-        this.sessions.delete(workspaceId);
+        this.sessions.delete(terminalId);
+        // 清理 per-terminal configDir（派生终端的独立空目录）
+        if (handle.configDir && handle.kind === 'derived') {
+            try {
+                fs.rmSync(handle.configDir, { recursive: true, force: true });
+            } catch (e) {
+                this.log(`[claudeSession] 清理 configDir 失败（忽略）: ${e?.message || String(e)}`);
+            }
+        }
         // 关闭所有 WS
         for (const ws of handle.wsClients) {
             if (ws.readyState === ws.OPEN) {
@@ -155,19 +205,59 @@ export class ClaudeSessionManager {
         return true;
     }
 
-    /** 取会话状态。不存在 → null。 */
-    status(workspaceId) {
-        const h = this.sessions.get(workspaceId);
+    /** 取终端状态。不存在 → null。 */
+    status(terminalId) {
+        const h = this.sessions.get(terminalId);
         if (!h) return null;
-        return { sessionId: h.id, pid: h.pid, startedAt: h.startedAt, running: true };
+        return {
+            terminalId: h.id,
+            pid: h.pid,
+            startedAt: h.startedAt,
+            running: true,
+            workspaceId: h.workspaceId,
+            configId: h.configId,
+            startedConfigName: h.startedConfigName,
+            kind: h.kind,
+        };
+    }
+
+    /** 列某 workspace 的所有活终端（normal 终端用）。 */
+    listByWorkspace(workspaceId) {
+        const out = [];
+        for (const h of this.sessions.values()) {
+            if (h.workspaceId === workspaceId) {
+                out.push({
+                    terminalId: h.id, pid: h.pid, startedAt: h.startedAt,
+                    configId: h.configId, startedConfigName: h.startedConfigName,
+                    kind: h.kind, workspaceId: h.workspaceId,
+                });
+            }
+        }
+        return out;
+    }
+
+    /** 列某 config 的所有活终端（derived 终端用）。 */
+    listByConfig(configId) {
+        const out = [];
+        for (const h of this.sessions.values()) {
+            if (h.configId === configId) {
+                out.push({
+                    terminalId: h.id, pid: h.pid, startedAt: h.startedAt,
+                    configId: h.configId, startedConfigName: h.startedConfigName,
+                    kind: h.kind, workspaceId: h.workspaceId,
+                });
+            }
+        }
+        return out;
     }
 
     /**
-     * 注册一个 WS 客户端到某会话（接收 PTY 输出 + 发送输入）。
-     * 会话不存在 → 返回 false（调用方应拒绝升级）。
+     * 注册一个 WS 客户端到某终端（接收 PTY 输出 + 发送输入）。
+     * 终端不存在 → 返回 false（调用方应拒绝升级）。
+     * 重入：同一终端可 attach 多个 WS 客户端（广播 fan-out）。
      */
-    attachWs(workspaceId, ws) {
-        const handle = this.sessions.get(workspaceId);
+    attachWs(terminalId, ws) {
+        const handle = this.sessions.get(terminalId);
         if (!handle) return false;
 
         handle.wsClients.add(ws);
@@ -221,7 +311,7 @@ export class ClaudeSessionManager {
         return true;
     }
 
-    /** 停止所有会话（standalone 退出时调）。 */
+    /** 停止所有终端（standalone 退出时调）。 */
     async stopAll() {
         const ids = [...this.sessions.keys()];
         for (const id of ids) {

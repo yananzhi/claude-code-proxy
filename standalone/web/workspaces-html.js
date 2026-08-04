@@ -5,7 +5,8 @@
 //
 // 通信：fetch 调同端口 management API（/api/workspaces）。
 
-/** 生成 workspace 管理网页 HTML。proxyPort 用于显示"打开控制台"链接。 */
+/** 生成 workspace 管理网页 HTML（树状：workspace → configs → derived → terminals）。
+ * proxyPort 用于显示"打开控制台"链接。通信：fetch 调同端口 management API。 */
 export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
     const proxyLink = proxyPort ? `http://127.0.0.1:${proxyPort}/` : '';
     return `<!DOCTYPE html>
@@ -14,32 +15,43 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
 <meta charset="UTF-8">
 <title>Claude Code Proxy — Workspace 管理</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; color: #222; }
+  body { font-family: system-ui, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; color: #222; }
   h1 { font-size: 1.4rem; }
   h2 { font-size: 1.1rem; margin-top: 24px; }
   .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
   input[type=text] { padding: 4px 8px; min-width: 200px; }
   button { padding: 4px 12px; cursor: pointer; }
-  .ws-card { border: 1px solid #ccc; border-radius: 6px; padding: 12px; margin: 8px 0; }
-  .ws-card .name { font-weight: 600; }
-  .ws-card .meta { color: #666; font-size: 0.85rem; margin: 4px 0; }
-  .ws-card .configs { font-size: 0.85rem; color: #444; margin-top: 8px; }
-  .ws-card .config-item { padding: 3px 0; display: flex; align-items: center; gap: 8px; }
-  .ws-card .cfg-ops { margin: 6px 0; }
-  .cfg-link { color: #06c; text-decoration: none; margin-right: 8px; }
+  .tree { margin: 8px 0; }
+  .ws-node { border: 1px solid #ddd; border-radius: 6px; margin: 8px 0; padding: 0; }
+  .ws-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #f7f7f7; border-radius: 6px 6px 0 0; }
+  .ws-head .name { font-weight: 600; }
+  .ws-head .meta { color: #666; font-size: 0.82rem; }
+  .ws-body { padding: 6px 12px 10px 12px; }
+  .toggle { cursor: pointer; user-select: none; width: 16px; display: inline-block; color: #555; }
+  .group { margin: 6px 0 6px 24px; }
+  .group-title { font-size: 0.85rem; color: #555; font-weight: 600; margin: 6px 0 2px 0; }
+  .config-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; margin-left: 8px; }
+  .derived-row { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 28px; }
+  .term-row { display: flex; align-items: center; gap: 8px; padding: 2px 0 2px 44px; font-size: 0.85rem; }
+  .cfg-link { color: #06c; text-decoration: none; }
   .cfg-link:hover { text-decoration: underline; }
+  .term-link { color: #06c; text-decoration: none; }
+  .term-link:hover { text-decoration: underline; }
   .cfg-act { padding: 2px 8px; font-size: 0.8rem; cursor: pointer; }
-  .active-badge { color: #060; background: #efe; padding: 2px 6px; border-radius: 3px; font-size: 0.8rem; font-weight: 600; }
+  .cfg-new-term { padding: 2px 8px; font-size: 0.8rem; cursor: pointer; background: #eef; border: 1px solid #ccd; border-radius: 3px; }
+  .active-badge { color: #060; background: #efe; padding: 2px 6px; border-radius: 3px; font-size: 0.78rem; font-weight: 600; }
+  .derived-tag { color: #649; font-size: 0.78rem; }
   .danger { color: #c00; }
   .msg { padding: 8px; margin: 8px 0; border-radius: 4px; }
   .msg.err { background: #fee; color: #c00; }
   .msg.ok { background: #efe; color: #060; }
+  .msg.warn { background: #ffd; color: #960; }
   .proxy-link { margin: 8px 0; }
 </style>
 </head>
 <body>
 <h1>Claude Code Proxy — Workspace 管理</h1>
-${proxyLink ? `<div class="proxy-link">代理控制台（trace/统计）：<a href="${proxyLink}" target="_blank">${proxyLink}</a></div>` : ''}
+${proxyLink ? `<div class="proxy-link">代理控制台（trace/统计）：<a href="${escapeHtml(proxyLink)}" target="_blank">${escapeHtml(proxyLink)}</a></div>` : ''}
 
 <h2>新建 Workspace</h2>
 <div class="row">
@@ -50,138 +62,275 @@ ${proxyLink ? `<div class="proxy-link">代理控制台（trace/统计）：<a hr
 <div id="msg"></div>
 
 <h2>已注册 Workspaces</h2>
-<div id="list">加载中...</div>
+<div id="list" class="tree">加载中...</div>
 
 <script>
-const API = '${apiBase}';
-function showMsg(text, isErr) {
-  const el = document.getElementById('msg');
-  el.className = 'msg ' + (isErr ? 'err' : 'ok');
+var API = ${safeJsonForScript(apiBase)};
+function showMsg(text, kind) {
+  var el = document.getElementById('msg');
+  el.className = 'msg ' + (kind || 'ok');
   el.textContent = text;
-  setTimeout(() => { el.textContent = ''; el.className = ''; }, 4000);
+  setTimeout(function() { el.textContent = ''; el.className = ''; }, kind === 'warn' ? 8000 : 4000);
 }
+
+// 新建 normal 终端（基于 active config）
+function newTerminal(wsId) {
+  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/terminals', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) { showMsg('新建终端失败: ' + d.error, 'err'); return; }
+      window.open(API + '/terminal/' + encodeURIComponent(d.terminalId), '_blank');
+      loadList();
+    })
+    .catch(function(e) { showMsg('新建终端异常: ' + e.message, 'err'); });
+}
+// 新建派生终端
+function newDerivedTerminal(wsId, cfgId) {
+  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/terminals', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) { showMsg('新建派生终端失败: ' + d.error, 'err'); return; }
+      window.open(API + '/terminal/' + encodeURIComponent(d.terminalId), '_blank');
+      loadList();
+    })
+    .catch(function(e) { showMsg('新建终端异常: ' + e.message, 'err'); });
+}
+// 激活 config
+function activateCfg(wsId, cfgId, btn) {
+  btn.disabled = true;
+  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/activate', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) { showMsg(d.error, 'err'); btn.disabled = false; return; }
+      var msg = '已激活（' + (d.mode || '') + '）';
+      if (d.warning) { showMsg(msg + '  ⚠ ' + d.warning, 'warn'); }
+      else { showMsg(msg, 'ok'); }
+      loadList();
+    })
+    .catch(function(e) { showMsg(e.message, 'err'); btn.disabled = false; });
+}
+// 删除 terminal
+function stopTerminal(tid, btn) {
+  fetch(API + '/api/terminals/' + encodeURIComponent(tid), { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) { loadList(); })
+    .catch(function(e) { showMsg(e.message, 'err'); });
+}
+
 async function loadList() {
   try {
-    const r = await fetch(API + '/api/workspaces');
-    const data = await r.json();
-    const list = document.getElementById('list');
+    var r = await fetch(API + '/api/workspaces');
+    var data = await r.json();
+    var list = document.getElementById('list');
     if (!data.workspaces || data.workspaces.length === 0) {
-      list.textContent = '（无 workspace）';
+      list.textContent = '（无 workspace，上方新建）';
       return;
     }
-    list.innerHTML = '';
-    for (const ws of data.workspaces) {
-      const card = document.createElement('div');
-      card.className = 'ws-card';
-      card.innerHTML = '<div class="name"></div><div class="meta"></div><div class="configs">配置加载中...</div>';
-      card.querySelector('.name').textContent = ws.name + '  [' + ws.id + ']';
-      card.querySelector('.meta').textContent = ws.dir + '  ·  创建于 ' + (ws.createdAt || '?');
-      const delBtn = document.createElement('button');
-      delBtn.className = 'danger';
-      delBtn.textContent = '删除（仅移除索引）';
-      delBtn.onclick = async () => {
-        if (!confirm('删除 workspace "' + ws.name + '"？\\n（只移除索引，不删磁盘文件）')) return;
-        const rr = await fetch(API + '/api/workspaces/' + ws.id, { method: 'DELETE' });
-        if (rr.ok) { showMsg('已删除'); loadList(); } else { const e = await rr.json(); showMsg(e.error, true); }
-      };
-      card.querySelector('.meta').appendChild(document.createElement('br'));
-      card.querySelector('.meta').appendChild(document.createElement('br'));
-      card.querySelector('.meta').appendChild(delBtn);
-
-      // 配置区：新建配置 + 配置列表（每条带编辑/激活链接）+ 打开 CLI 终端
-      const cfgBlock = card.querySelector('.configs');
-      cfgBlock.textContent = '配置加载中...';
-      // 顶部操作行：新建配置 + 打开终端
-      const opsRow = document.createElement('div');
-      opsRow.className = 'cfg-ops';
-      const newLink = document.createElement('a');
-      newLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/new/edit';
-      newLink.textContent = '+ 新建配置';
-      newLink.className = 'cfg-link';
-      opsRow.appendChild(newLink);
-      const termLink = document.createElement('a');
-      termLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/terminal';
-      termLink.textContent = '打开 CLI 终端';
-      termLink.className = 'cfg-link';
-      termLink.target = '_blank';
-      opsRow.appendChild(document.createTextNode(' · '));
-      opsRow.appendChild(termLink);
-      cfgBlock.textContent = '';
-      cfgBlock.appendChild(opsRow);
-      cfgBlock.appendChild(document.createElement('br'));
-
-      // 加载该 workspace 的 local 配置（每条带编辑/激活）+ 当前激活标记
-      Promise.all([
-        fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id)).then(r => r.json()),
-        fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id) + '/active').then(r => r.json()),
-      ]).then(([d, a]) => {
-        const cfgs = d.configs || [];
-        const activeId = (a.active && a.active.id) || null;
-        const head = document.createTextNode('Local 配置（' + cfgs.length + '）：');
-        cfgBlock.appendChild(head);
-        cfgBlock.appendChild(document.createElement('br'));
-        if (cfgs.length === 0) {
-          const empty = document.createElement('span');
-          empty.className = 'hint';
-          empty.textContent = '（无配置，点上面「新建配置」创建）';
-          cfgBlock.appendChild(empty);
-          return;
-        }
-        for (const cfg of cfgs) {
-          const item = document.createElement('div');
-          item.className = 'config-item';
-          const isActive = cfg.id === activeId;
-          // 编辑链接
-          const editLink = document.createElement('a');
-          editLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/edit';
-          editLink.textContent = '· ' + (cfg.name || cfg.id) + ' [mode=' + (cfg.mode || 'direct') + ']';
-          editLink.className = 'cfg-link';
-          item.appendChild(editLink);
-          // 激活状态标记 / 激活按钮
-          if (isActive) {
-            const badge = document.createElement('span');
-            badge.className = 'active-badge';
-            badge.textContent = '✓ 已激活';
-            item.appendChild(badge);
-          } else {
-            const actBtn = document.createElement('button');
-            actBtn.textContent = '激活';
-            actBtn.className = 'cfg-act';
-            actBtn.onclick = async () => {
-              actBtn.disabled = true;
-              try {
-                const rr = await fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/activate', { method: 'POST' });
-                const dd = await rr.json();
-                if (rr.ok) { showMsg('已激活（' + (dd.mode || '') + '）：' + (dd.note || ''), false); loadList(); }
-                else { showMsg(dd.error || '激活失败', true); }
-              } catch (e) { showMsg(e.message, true); }
-              actBtn.disabled = false;
-            };
-            item.appendChild(actBtn);
-          }
-          cfgBlock.appendChild(item);
-        }
-      }).catch(() => { cfgBlock.appendChild(document.createTextNode('配置加载失败')); });
-      list.appendChild(card);
+    list.textContent = '';
+    for (var ws of data.workspaces) {
+      list.appendChild(buildWsNode(ws));
     }
   } catch (e) {
     document.getElementById('list').textContent = '加载失败: ' + e.message;
   }
 }
+
+function buildWsNode(ws) {
+  var node = document.createElement('div');
+  node.className = 'ws-node';
+  var head = document.createElement('div');
+  head.className = 'ws-head';
+  var tog = document.createElement('span');
+  tog.className = 'toggle';
+  tog.textContent = '▼';
+  head.appendChild(tog);
+  var name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = ws.name;
+  head.appendChild(name);
+  var idTag = document.createElement('span');
+  idTag.className = 'meta';
+  idTag.textContent = '[' + ws.id + ']  ' + ws.dir + '  ·  创建于 ' + (ws.createdAt || '?');
+  head.appendChild(idTag);
+  var delBtn = document.createElement('button');
+  delBtn.className = 'danger';
+  delBtn.textContent = '删除';
+  delBtn.onclick = async function() {
+    if (!confirm('删除 workspace "' + ws.name + '"？\\n（只移除索引，不删磁盘文件）')) return;
+    var rr = await fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id), { method: 'DELETE' });
+    if (rr.ok) { showMsg('已删除'); loadList(); } else { var e = await rr.json(); showMsg(e.error, 'err'); }
+  };
+  head.appendChild(delBtn);
+  node.appendChild(head);
+
+  var body = document.createElement('div');
+  body.className = 'ws-body';
+  node.appendChild(body);
+
+  tog.onclick = function() {
+    var hidden = body.style.display === 'none';
+    body.style.display = hidden ? '' : 'none';
+    tog.textContent = hidden ? '▼' : '▶';
+  };
+
+  // 异步加载 configs + active + normal terminals
+  Promise.all([
+    fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id)).then(function(r){return r.json();}),
+    fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id) + '/active').then(function(r){return r.json();}),
+    fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id) + '/terminals').then(function(r){return r.json();}),
+  ]).then(function(results) {
+    var d = results[0], a = results[1], t = results[2];
+    var configs = d.configs || [];
+    var activeId = (a.active && a.active.id) || null;
+    var normalTerms = t.terminals || [];
+    renderWsBody(body, ws, configs, activeId, normalTerms);
+  }).catch(function() {
+    body.appendChild(document.createTextNode('加载失败'));
+  });
+  return node;
+}
+
+function renderWsBody(body, ws, configs, activeId, normalTerms) {
+  body.textContent = '';
+  // 分离 parent configs 和 derived
+  var parents = configs.filter(function(c){ return c.derivedFrom === undefined; });
+  var derivedOf = {};
+  configs.forEach(function(c){ if (c.derivedFrom !== undefined) { (derivedOf[c.derivedFrom] = derivedOf[c.derivedFrom] || []).push(c); } });
+
+  // Local LLM Configs 分组
+  var cfgGroup = document.createElement('div');
+  cfgGroup.className = 'group';
+  var cfgTitle = document.createElement('div');
+  cfgTitle.className = 'group-title';
+  cfgTitle.textContent = 'Local LLM Configs（' + parents.length + '）';
+  cfgGroup.appendChild(cfgTitle);
+
+  // 新建配置链接
+  var newCfgLink = document.createElement('a');
+  newCfgLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/new/edit';
+  newCfgLink.textContent = '+ 新建配置';
+  newCfgLink.className = 'cfg-link';
+  cfgGroup.appendChild(newCfgLink);
+
+  parents.forEach(function(cfg) {
+    cfgGroup.appendChild(buildConfigRow(ws, cfg, activeId, false));
+    // 派生配置挂父下
+    var deriveds = derivedOf[cfg.id] || [];
+    deriveds.forEach(function(dc) {
+      cfgGroup.appendChild(buildConfigRow(ws, dc, activeId, true));
+    });
+  });
+  if (parents.length === 0) {
+    var hint = document.createElement('div');
+    hint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
+    hint.textContent = '（无配置，点上面「新建配置」创建）';
+    cfgGroup.appendChild(hint);
+  }
+  body.appendChild(cfgGroup);
+
+  // Terminals 分组（normal 终端挂 workspace 下，名带启动配置名）
+  var termGroup = document.createElement('div');
+  termGroup.className = 'group';
+  var termTitle = document.createElement('div');
+  termTitle.className = 'group-title';
+  termTitle.textContent = 'Terminals（' + normalTerms.length + '）';
+  termGroup.appendChild(termTitle);
+
+  var newTermBtn = document.createElement('button');
+  newTermBtn.className = 'cfg-new-term';
+  newTermBtn.textContent = '+ 新建终端';
+  newTermBtn.title = '基于当前 active normal 配置启动';
+  newTermBtn.onclick = function() { newTerminal(ws.id); };
+  termGroup.appendChild(newTermBtn);
+
+  normalTerms.forEach(function(t) {
+    termGroup.appendChild(buildTerminalRow(t));
+  });
+  if (normalTerms.length === 0) {
+    var tHint = document.createElement('div');
+    tHint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
+    tHint.textContent = '（先激活一个 normal 配置，再点「新建终端」）';
+    termGroup.appendChild(tHint);
+  }
+  body.appendChild(termGroup);
+}
+
+function buildConfigRow(ws, cfg, activeId, isDerived) {
+  var row = document.createElement('div');
+  row.className = isDerived ? 'derived-row' : 'config-row';
+  var isActive = cfg.id === activeId;
+  var editLink = document.createElement('a');
+  editLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/edit';
+  editLink.className = 'cfg-link';
+  var label = (isDerived ? '  ↳ ' : '· ') + (cfg.name || cfg.id) + ' [mode=' + (cfg.mode || 'direct') + ']';
+  if (isDerived && cfg.derivedIndex) label += '  #' + cfg.derivedIndex;
+  editLink.textContent = label;
+  row.appendChild(editLink);
+  if (isDerived) {
+    var tag = document.createElement('span');
+    tag.className = 'derived-tag';
+    tag.textContent = 'derived';
+    row.appendChild(tag);
+  }
+  if (isActive) {
+    var badge = document.createElement('span');
+    badge.className = 'active-badge';
+    badge.textContent = '✓ 已激活';
+    row.appendChild(badge);
+  } else {
+    var actBtn = document.createElement('button');
+    actBtn.className = 'cfg-act';
+    actBtn.textContent = '激活';
+    actBtn.onclick = function() { activateCfg(ws.id, cfg.id, actBtn); };
+    row.appendChild(actBtn);
+  }
+  // 派生配置：自己的「新建终端」入口
+  if (isDerived) {
+    var dtBtn = document.createElement('button');
+    dtBtn.className = 'cfg-new-term';
+    dtBtn.textContent = '新建终端';
+    dtBtn.onclick = function() { newDerivedTerminal(ws.id, cfg.id); };
+    row.appendChild(dtBtn);
+  }
+  return row;
+}
+
+function buildTerminalRow(t) {
+  var row = document.createElement('div');
+  row.className = 'term-row';
+  var link = document.createElement('a');
+  link.href = API + '/terminal/' + encodeURIComponent(t.terminalId);
+  link.className = 'term-link';
+  link.target = '_blank';
+  link.textContent = '🖥 terminal ' + t.terminalId + (t.startedConfigName ? ' (' + t.startedConfigName + ')' : '');
+  row.appendChild(link);
+  var meta = document.createElement('span');
+  meta.style.cssText = 'color:#888';
+  meta.textContent = 'pid=' + t.pid + '  ' + (t.kind || '');
+  row.appendChild(meta);
+  var stopBtn = document.createElement('button');
+  stopBtn.className = 'danger';
+  stopBtn.style.cssText = 'padding:1px 6px;font-size:0.75rem';
+  stopBtn.textContent = '停止';
+  stopBtn.onclick = function() { stopTerminal(t.terminalId, stopBtn); };
+  row.appendChild(stopBtn);
+  return row;
+}
+
 async function createWs() {
-  const name = document.getElementById('name').value.trim();
-  const dir = document.getElementById('dir').value.trim();
-  if (!name || !dir) { showMsg('name 和 dir 都必填', true); return; }
+  var name = document.getElementById('name').value.trim();
+  var dir = document.getElementById('dir').value.trim();
+  if (!name || !dir) { showMsg('name 和 dir 都必填', 'err'); return; }
   try {
-    const r = await fetch(API + '/api/workspaces', {
+    var r = await fetch(API + '/api/workspaces', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, dir }),
+      body: JSON.stringify({ name: name, dir: dir }),
     });
-    const data = await r.json();
+    var data = await r.json();
     if (r.ok) { showMsg('已创建' + (data.created ? '（新建 .claude_proxy/）' : '（复用已有 .claude_proxy/）')); document.getElementById('name').value=''; document.getElementById('dir').value=''; loadList(); }
-    else { showMsg(data.error, true); }
-  } catch (e) { showMsg(e.message, true); }
+    else { showMsg(data.error, 'err'); }
+  } catch (e) { showMsg(e.message, 'err'); }
 }
 loadList();
 </script>
@@ -191,20 +340,19 @@ loadList();
 
 /**
  * 生成 CLI 终端页 HTML（xterm.js + WebSocket 双向流）。
- * 阶段 3：每 workspace 一个 xterm 终端，连 /api/workspaces/:id/claude-session/ws。
+ * 终端已由管理页 POST 创建（terminalId 已生成），此页只连 WS 重入/连接。
+ *
+ * @param {{ terminalId: string, apiBase?: string }} opts
  */
-export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } = {}) {
-    // 防注入：workspaceId 可能来自 URL（decodeURIComponent），含任意字符。
-    // - 插入 HTML 上下文（title/bar）→ escapeHtml
-    // - 插入 JS 字符串字面量 → JSON.stringify（转义引号/反斜杠/换行）
-    // - 插入 URL 路径 → encodeURIComponent
-    const safeId = safeJsonForScript(String(workspaceId ?? ''));
+export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
+    // 防注入：terminalId 走 escapeHtml（HTML 上下文）+ safeJsonForScript（JS 字符串）+ encodeURIComponent（URL）
+    const safeId = safeJsonForScript(String(terminalId ?? ''));
     const safeApiBase = safeJsonForScript(String(apiBase));
     return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>Claude Code — ${escapeHtml(workspaceName || workspaceId)}</title>
+<title>Claude Code 终端</title>
 <link rel="stylesheet" href="${escapeHtml(apiBase)}/vendor/xterm.css">
 <style>
   html, body { height: 100%; margin: 0; }
@@ -221,17 +369,17 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
 </head>
 <body>
 <div class="bar">
-  <span>Claude Code — ${escapeHtml(workspaceName || workspaceId)}</span>
+  <span>Claude Code 终端</span>
   <span><a href="${escapeHtml(apiBase)}/">← 返回 workspace 列表</a></span>
 </div>
-<div id="msg" class="msg info">正在启动 claude 会话...</div>
+<div id="msg" class="msg info">正在连接终端...</div>
 <div id="terminal"></div>
 <script src="${escapeHtml(apiBase)}/vendor/xterm.min.js"></script>
 <script src="${escapeHtml(apiBase)}/vendor/xterm-addon-fit.min.js"></script>
 <script>
 (function() {
   var apiBase = ${safeApiBase};
-  var wsId = ${safeId};
+  var tid = ${safeId};
   var msgEl = document.getElementById('msg');
 
   // 检查 xterm 是否加载成功（CDN 失败时 Terminal 未定义）
@@ -243,61 +391,36 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
 
   var term = new Terminal({
     cursorBlink: true,
-    // 显式等宽字体 + monospace 兜底（避免浏览器 monospace 在中文系统映射到非等宽字体致 CJK 错位）
     fontFamily: 'Consolas, Menlo, "DejaVu Sans Mono", "Courier New", monospace',
     fontSize: 14,
-    lineHeight: 1.1,        // 补偿行高（VS Code Linux 默认 1.1）
+    lineHeight: 1.1,
     letterSpacing: 0,
     scrollback: 1000,
-    allowProposedApi: true, // 部分 addon 需要
-    reflowCursorLine: true, // Windows conpty 下 resize 防 prompt 丢失（xterm 5.1+）
+    allowProposedApi: true,
+    reflowCursorLine: true,
   });
   var fit = new FitAddon.FitAddon ? new FitAddon.FitAddon() : new FitAddon();
   term.loadAddon(fit);
   var termEl = document.getElementById('terminal');
   term.open(termEl);
-  // fit：open 后立即 + ResizeObserver（容器尺寸变化，比 window resize 更可靠，
-  // 覆盖换显示器/移动窗口/布局异步就绪）+ window resize 兜底
   try { fit.fit(); } catch (e) {}
   if (typeof ResizeObserver !== 'undefined') {
     var ro = new ResizeObserver(function () {
       try { fit.fit(); } catch (e) {}
-      // fit 会触发 term.onResize → sendResizeDebounced（若 WS 已连）
     });
     ro.observe(termEl);
   }
   window.addEventListener('resize', function () { try { fit.fit(); } catch (e) {} });
 
-  var wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + apiBase + '/api/workspaces/' + encodeURIComponent(wsId) + '/claude-session/ws';
-
-  // 会话可能未启动 → 先 POST 启动，再连 WS
-  fetch(apiBase + '/api/workspaces/' + encodeURIComponent(wsId) + '/claude-session', { method: 'POST' })
-    .then(r => r.json())
-    .then(d => {
-      if (d.error) {
-        msgEl.className = 'msg err';
-        msgEl.textContent = '启动 claude 会话失败: ' + d.error;
-        return;
-      }
-      msgEl.className = 'msg info';
-      msgEl.textContent = 'claude 会话已启动（pid=' + d.pid + '），连接终端...';
-      connectWs();
-    })
-    .catch(e => {
-      msgEl.className = 'msg err';
-      msgEl.textContent = '启动会话异常: ' + e.message;
-    });
+  var wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + apiBase + '/api/terminals/' + encodeURIComponent(tid) + '/ws';
 
   function connectWs() {
     var ws = new WebSocket(wsUrl);
-    // PTY→xterm 走 binary（arraybuffer），避免 string 双重 UTF-8 解码致 CJK 损坏。
-    // 控制事件（exit/error）仍走 text，靠 JSON.parse 区分。
     ws.binaryType = 'arraybuffer';
 
     function sendResize() {
       try {
         var cols = term.cols, rows = term.rows;
-        // 带像素尺寸（Windows conpty 高 DPI 按 pixel 缩放，不传会渲染错位）
         var rect = term.element ? term.element.getBoundingClientRect() : { width: 0, height: 0 };
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
@@ -307,7 +430,6 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
         }
       } catch (e) {}
     }
-    // resize 防抖 100ms（拖窗口时高频 resize 致 PTY reflow 卡顿）
     var resizeTimer = null;
     function sendResizeDebounced() {
       if (resizeTimer) clearTimeout(resizeTimer);
@@ -317,16 +439,15 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
       msgEl.className = 'msg ok';
       msgEl.textContent = '';
       term.focus();
-      sendResize(); // 初始同步 xterm 尺寸到 PTY（立即，不防抖）
+      sendResize();
     };
     ws.onmessage = function (ev) {
-      // text = 控制事件（JSON）；arraybuffer = PTY 输出（binary，UTF-8 字节）
       if (typeof ev.data === 'string') {
         try {
           var obj = JSON.parse(ev.data);
           if (obj.type === 'exit') {
             msgEl.className = 'msg info';
-            msgEl.textContent = 'Claude 已退出（code=' + obj.exitCode + '）。重新打开终端页可重启。';
+            msgEl.textContent = 'Claude 已退出（code=' + obj.exitCode + '）。在管理页可重新新建终端。';
           } else if (obj.type === 'error') {
             msgEl.className = 'msg err';
             msgEl.textContent = obj.error;
@@ -335,7 +456,6 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
           }
         } catch (e) { term.write(ev.data); }
       } else {
-        // arraybuffer → Uint8Array，xterm 原生支持，不经 string 解码
         term.write(new Uint8Array(ev.data));
       }
     };
@@ -347,15 +467,15 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
     };
     ws.onerror = function () {
       msgEl.className = 'msg err';
-      msgEl.textContent = 'WebSocket 连接错误';
+      msgEl.textContent = 'WebSocket 连接错误（终端可能已退出）';
     };
-    // xterm → PTY：string 输入（onData）+ binary 输入（onBinary，IME/Alt 序列/paste 非文本）
     term.onData(function (data) { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
     term.onBinary(function (data) { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
-    // xterm 尺寸变化（fit / window resize）→ 防抖同步给 PTY
     term.onResize(function () { sendResizeDebounced(); });
     window.addEventListener('resize', function () { try { fit.fit(); } catch (e) {} });
   }
+
+  connectWs();
 })();
 </script>
 </body>

@@ -21,8 +21,10 @@ import { resolveClaudeBinaryStandalone } from './claudeBinaryStandalone.js';
 import {
     createLocalConfig, updateLocalConfig, deleteLocalConfig, getModelCatalog,
     proxyForward, activateConfig, getActiveConfig,
+    ensureProjectPermissions, ensureGitignore,
     ValidationError, NotFoundError, ProxyUnavailableError,
 } from './configApi.js';
+import { buildTerminalEnv } from './terminalApi.js';
 import { managementPort } from './ports.js';
 import { buildWorkspacesHtml, buildTerminalHtml, buildConfigEditorHtml } from './web/workspaces-html.js';
 
@@ -38,7 +40,7 @@ const { WebSocketServer } = require('ws');
  */
 export async function startManagementServer(opts = {}) {
     const manager = new WorkspaceManager({ homeDir: opts.homeDir, log: opts.log });
-    const sessions = new ClaudeSessionManager({ log: opts.log });
+    const sessions = new ClaudeSessionManager({ log: opts.log, pty: opts.sessionPty });
     const port = opts.port || managementPort(process.platform);
 
     const server = http.createServer(async (req, res) => {
@@ -98,64 +100,117 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // ── CLI 会话路由（阶段 3）──────────────────────────────────
-            // GET /workspace/:id/terminal → 终端页 HTML（xterm.js + WS）
-            const mTermPage = pathname.match(/^\/workspace\/([^/]+)\/terminal$/);
+            // ── 终端路由（per-config / active 驱动，keyed by terminalId）──────────
+            // GET /terminal/:tid → 终端页 HTML（xterm.js + WS）。终端已存在时打开此页重入。
+            const mTermPage = pathname.match(/^\/terminal\/([^/]+)$/);
             if (method === 'GET' && mTermPage) {
-                const id = decodeURIComponent(mTermPage[1]);
-                const ws = await manager.get(id);
-                if (!ws) {
-                    sendJson(res, 404, { error: `workspace 不存在: ${id}` });
-                    return;
-                }
-                const html = buildTerminalHtml({ workspaceId: id, workspaceName: ws.name, apiBase: '' });
+                const tid = decodeURIComponent(mTermPage[1]);
+                const html = buildTerminalHtml({ terminalId: tid, apiBase: '' });
                 res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
                 res.end(html);
                 return;
             }
 
-            // POST /api/workspaces/:id/claude-session → 启动会话
-            const mStart = pathname.match(/^\/api\/workspaces\/([^/]+)\/claude-session$/);
-            if (method === 'POST' && mStart) {
-                const id = decodeURIComponent(mStart[1]);
+            // POST /api/workspaces/:id/terminals → 基于当前 active normal config 开终端
+            const mWsTerm = pathname.match(/^\/api\/workspaces\/([^/]+)\/terminals$/);
+            if (method === 'POST' && mWsTerm) {
+                const id = decodeURIComponent(mWsTerm[1]);
                 const ws = await manager.get(id);
-                if (!ws) {
-                    sendJson(res, 404, { error: `workspace 不存在: ${id}` });
+                if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
+                // 取 active normal config
+                const active = await getActiveConfig(manager, id);
+                if (!active) {
+                    sendJson(res, 400, { error: '当前 workspace 无 active 配置，请先激活一个 local config 再开终端' });
                     return;
                 }
-                // 探测二进制（用户覆盖可从 config 读，阶段 3 首版用默认探测）
+                const configs = await manager.getLocalConfigs(id);
+                const cfg = configs.find(c => c.id === active.id);
+                if (!cfg) {
+                    sendJson(res, 400, { error: `active 配置 ${active.id} 已不存在，请重新激活` });
+                    return;
+                }
+                if (cfg.derivedFrom !== undefined) {
+                    sendJson(res, 400, { error: '当前 active 配置是派生配置，请在该派生配置节点下开终端' });
+                    return;
+                }
                 const binaryPath = resolveClaudeBinaryStandalone({ log: opts.log });
                 if (!binaryPath) {
                     sendJson(res, 400, { error: '未找到 Claude Code CLI 二进制。请安装 Claude Code，或在系统 PATH 中配置 claude。' });
                     return;
                 }
-                try {
-                    const result = await sessions.start(id, { dir: ws.dir, binaryPath });
-                    sendJson(res, 201, result);
-                } catch (e) {
-                    sendJson(res, 400, { error: e.message || String(e) });
+                const terminalId = sessions.newTerminalId();
+                const { env, configDir } = await buildTerminalEnv(cfg, null, opts.proxyPort, {
+                    workspaceDir: ws.dir, terminalId, log: opts.log,
+                });
+                await ensureProjectPermissions(ws.dir, opts.log);
+                await ensureGitignore(ws.dir, opts.log);
+                const result = await sessions.start(terminalId, {
+                    cwd: ws.dir, binaryPath, env, configDir,
+                    workspaceId: id, configId: cfg.id, startedConfigName: cfg.name, kind: 'normal',
+                });
+                sendJson(res, 201, { ...result, kind: 'normal', startedConfigName: cfg.name, configId: cfg.id, workspaceId: id });
+                return;
+            }
+
+            // GET /api/workspaces/:id/terminals → 列 workspace 的 normal 活终端
+            if (method === 'GET' && mWsTerm) {
+                const id = decodeURIComponent(mWsTerm[1]);
+                const terminals = sessions.listByWorkspace(id);
+                sendJson(res, 200, { terminals });
+                return;
+            }
+
+            // POST /api/workspaces/:id/configs/:cfgId/terminals → 开派生终端
+            const mCfgTerm = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/terminals$/);
+            if (method === 'POST' && mCfgTerm) {
+                const id = decodeURIComponent(mCfgTerm[1]);
+                const cfgId = decodeURIComponent(mCfgTerm[2]);
+                const ws = await manager.get(id);
+                if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
+                const configs = await manager.getLocalConfigs(id);
+                const cfg = configs.find(c => c.id === cfgId);
+                if (!cfg) { sendJson(res, 404, { error: `config 不存在: ${cfgId}` }); return; }
+                if (cfg.derivedFrom === undefined) {
+                    sendJson(res, 400, { error: '普通配置请用 workspace 级「新建终端」入口（基于 active 配置启动）' });
+                    return;
                 }
+                const parent = cfg.derivedFrom ? configs.find(c => c.id === cfg.derivedFrom) : null;
+                const binaryPath = resolveClaudeBinaryStandalone({ log: opts.log });
+                if (!binaryPath) {
+                    sendJson(res, 400, { error: '未找到 Claude Code CLI 二进制。请安装 Claude Code，或在系统 PATH 中配置 claude。' });
+                    return;
+                }
+                const terminalId = sessions.newTerminalId();
+                const { env, configDir } = await buildTerminalEnv(cfg, parent, opts.proxyPort, {
+                    workspaceDir: ws.dir, terminalId, log: opts.log,
+                });
+                await ensureProjectPermissions(ws.dir, opts.log);
+                await ensureGitignore(ws.dir, opts.log);
+                const result = await sessions.start(terminalId, {
+                    cwd: ws.dir, binaryPath, env, configDir,
+                    workspaceId: id, configId: cfg.id, startedConfigName: cfg.name, kind: 'derived',
+                });
+                sendJson(res, 201, { ...result, kind: 'derived', startedConfigName: cfg.name, configId: cfg.id, workspaceId: id });
                 return;
             }
 
-            // GET /api/workspaces/:id/claude-session → 会话状态
-            const mStatus = pathname.match(/^\/api\/workspaces\/([^/]+)\/claude-session$/);
-            if (method === 'GET' && mStatus) {
-                const id = decodeURIComponent(mStatus[1]);
-                const s = sessions.status(id);
-                sendJson(res, 200, { session: s });
+            // GET /api/workspaces/:id/configs/:cfgId/terminals → 列 config（派生）活终端
+            if (method === 'GET' && mCfgTerm) {
+                const cfgId = decodeURIComponent(mCfgTerm[2]);
+                const terminals = sessions.listByConfig(cfgId);
+                sendJson(res, 200, { terminals });
                 return;
             }
 
-            // DELETE /api/workspaces/:id/claude-session → 停止会话
-            const mStop = pathname.match(/^\/api\/workspaces\/([^/]+)\/claude-session$/);
-            if (method === 'DELETE' && mStop) {
-                const id = decodeURIComponent(mStop[1]);
-                const stopped = await sessions.stop(id);
+            // DELETE /api/terminals/:tid → 停止终端
+            const mTermStop = pathname.match(/^\/api\/terminals\/([^/]+)$/);
+            if (method === 'DELETE' && mTermStop) {
+                const tid = decodeURIComponent(mTermStop[1]);
+                const stopped = await sessions.stop(tid);
                 sendJson(res, 200, { stopped });
                 return;
             }
-            // ── /CLI 会话路由 ──────────────────────────────────────────
+            // ── /终端路由 ──────────────────────────────────────────
 
             // ── 配置编辑路由（阶段 4）─────────────────────────────────
             // GET /api/workspaces/:id/configs → 列 local configs
@@ -256,6 +311,13 @@ export async function startManagementServer(opts = {}) {
                 const id = decodeURIComponent(mActivate[1]);
                 const cfgId = decodeURIComponent(mActivate[2]);
                 const result = await activateConfig(manager, opts.proxyPort, id, cfgId, { log: opts.log });
+                // 警告：若 workspace 下已有存活 normal 终端，提示用户已开的 session 可能受影响（settings.json 已被覆盖），
+                // 建议退出后通过 resume 再进入。
+                const liveTerminals = sessions.listByWorkspace(id);
+                if (liveTerminals.length > 0) {
+                    result.warning = `workspace 下已有 ${liveTerminals.length} 个存活终端（基于之前的 active 配置启动）。` +
+                        `本次激活已覆盖 settings.json，已开的 session 可能受影响，建议退出后通过 resume 再进入。`;
+                }
                 sendJson(res, 200, result);
                 return;
             }
@@ -361,24 +423,24 @@ export async function startManagementServer(opts = {}) {
         }
     });
 
-    // WebSocket 升级：/api/workspaces/:id/claude-session/ws
+    // WebSocket 升级：/api/terminals/:tid/ws（按 terminalId 重入/连接）
     const wss = new WebSocketServer({ noServer: true });
     server.on('upgrade', (req, socket, head) => {
         const url = new URL(req.url, `http://127.0.0.1:${port}`);
-        const m = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/claude-session\/ws$/);
+        const m = url.pathname.match(/^\/api\/terminals\/([^/]+)\/ws$/);
         if (!m) {
             socket.destroy();
             return;
         }
-        const id = decodeURIComponent(m[1]);
+        const tid = decodeURIComponent(m[1]);
         wss.handleUpgrade(req, socket, head, (ws) => {
-            // 会话不存在 → 拒绝（要求先 POST 启动）。
-            // 注意 TOCTOU：status 检查与 attachWs 之间会话可能被 stop。
-            // 因此以 attachWs 返回值为准（false = 会话已删），关 ws 防孤儿。
-            if (!sessions.status(id) || !sessions.attachWs(id, ws)) {
+            // 终端不存在 → 拒绝（终端由 POST 创建，此处仅重入）。
+            // 注意 TOCTOU：status 检查与 attachWs 之间终端可能被 stop。
+            // 因此以 attachWs 返回值为准（false = 终端已删），关 ws 防孤儿。
+            if (!sessions.status(tid) || !sessions.attachWs(tid, ws)) {
                 try {
-                    ws.send(JSON.stringify({ type: 'error', error: '会话不存在，请先 POST 启动' }));
-                    ws.close(1008, 'session not found');
+                    ws.send(JSON.stringify({ type: 'error', error: '终端不存在，请先在管理页新建终端' }));
+                    ws.close(1008, 'terminal not found');
                 } catch {}
                 return;
             }
