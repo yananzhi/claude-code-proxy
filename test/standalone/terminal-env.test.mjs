@@ -82,18 +82,19 @@ function makeMockForward(responses = {}) {
 
 // ════════════════════════════════════════════════════════════
 // D1 normal-direct
+// （重设计：env 注入 ANTHROPIC_* 真实配置 + per-terminal configDir，不再读 settings.json）
 // ════════════════════════════════════════════════════════════
-test('D1a: direct config → env 只含 CLAUDE_CONFIG_DIR（LLM 配置走 settings.json）', async () => {
+test('D1a: direct config → env 含上游 BASE_URL/TOKEN/MODEL + per-terminal configDir + 不碰代理', async () => {
     const wsDir = newTmpDir('d1a');
     const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
     const fwd = makeMockForward();
     const { env, configDir } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd });
-    // normal 终端 env 不应含 LLM 配置（让 settings.json 生效）
-    assert.equal(env.ANTHROPIC_BASE_URL, undefined);
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
-    assert.equal(env.ANTHROPIC_MODEL, undefined);
-    // configDir 指向 {ws.dir}/.claude_proxy（共享 settings.json）
-    assert.equal(configDir, join(wsDir, '.claude_proxy'));
+    // direct env 注入上游真实地址 + token + model（不再靠 settings.json）
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://up.test');
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-direct');
+    assert.equal(env.ANTHROPIC_MODEL, 'real-model');
+    // configDir 用 per-terminal 空目录（与 derived 一致，防 settings.json 覆盖 env）
+    assert.equal(configDir, join(wsDir, '.claude_proxy', 'sessions', 't1'));
     // direct 不碰代理
     assert.equal(fwd.calls.length, 0);
 });
@@ -122,19 +123,48 @@ test('D1d: direct config content 非法 JSON → throw', async () => {
     );
 });
 
+test('D1e: direct content 无 MODEL → env 不含 ANTHROPIC_MODEL（不报错）', async () => {
+    const cfg = { id: 'c1', name: 'n', content: directContent({ ANTHROPIC_MODEL: undefined }), mode: 'direct' };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('d1e'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.ANTHROPIC_MODEL, undefined, '无 MODEL 不应注入');
+    // BASE_URL/TOKEN 仍在
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://up.test');
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-direct');
+});
+
+test('D1f: direct content 无 SMALL_FAST_MODEL/TIMEOUT → env 不含', async () => {
+    const cfg = { id: 'c1', name: 'n', content: directContent({ ANTHROPIC_SMALL_FAST_MODEL: undefined, API_TIMEOUT_MS: undefined }), mode: 'direct' };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('d1f'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, undefined);
+    assert.equal(env.API_TIMEOUT_MS, undefined);
+});
+
+test('D1g: direct → env 含 SMALL_FAST_MODEL + TIMEOUT（毫秒字符串）', async () => {
+    // directContent 已含 SMALL_FAST_MODEL=fast-model + API_TIMEOUT_MS=30000
+    const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('d1g'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, 'fast-model');
+    // 30000ms → 保持毫秒字符串（与 derived timeoutSec*1000 一致：秒→毫秒字符串）
+    assert.equal(env.API_TIMEOUT_MS, '30000');
+});
+
 // ════════════════════════════════════════════════════════════
 // D2 normal-proxy
+// （重设计：env BASE_URL 指向代理 + per-terminal configDir + 注入 upstream）
 // ════════════════════════════════════════════════════════════
-test('D2a: proxy config → 注入 upstream 到代理（POST /api/upstream）', async () => {
+test('D2a: proxy config → env BASE_URL=代理 + TOKEN + MODEL + per-terminal configDir + 注入 upstream', async () => {
     const wsDir = newTmpDir('d2a');
     const cfg = { id: 'c1', name: 'n', content: proxyContent(), mode: 'proxy' };
     const fwd = makeMockForward();
     const { env, configDir } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd });
-    // normal-proxy env 也只含 CLAUDE_CONFIG_DIR（LLM 走 settings.json，upstream 已注入代理）
-    assert.equal(env.ANTHROPIC_BASE_URL, undefined);
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
-    assert.equal(configDir, join(wsDir, '.claude_proxy'));
-    // 注入了 upstream
+    // proxy env BASE_URL 指向代理（不是上游真实地址）
+    assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:11444');
+    // token 仍是上游 token（代理透传时用）
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-proxy');
+    assert.equal(env.ANTHROPIC_MODEL, 'proxy-model');
+    // configDir per-terminal 空目录
+    assert.equal(configDir, join(wsDir, '.claude_proxy', 'sessions', 't1'));
+    // 注入了 upstream（真实上游地址）
     const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
     assert.ok(upCall, '应 POST /api/upstream');
     assert.equal(upCall.body.upstream.baseUrl, 'https://up.proxy');
@@ -148,6 +178,101 @@ test('D2b: proxy config + 代理返回非2xx → throw ProxyUnavailableError', a
         () => buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('d2b'), terminalId: 't1', proxyForwardFn: fwd }),
         /代理拒绝|ProxyUnavailable/i,
     );
+});
+
+test('D2c: proxy → upstream body 含 model/smallFastModel/timeoutSec', async () => {
+    const cfg = { id: 'c1', name: 'n', content: proxyContent({ ANTHROPIC_SMALL_FAST_MODEL: 'fast-m', API_TIMEOUT_MS: '60000' }), mode: 'proxy' };
+    const fwd = makeMockForward();
+    await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('d2c'), terminalId: 't1', proxyForwardFn: fwd });
+    const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
+    assert.ok(upCall);
+    assert.equal(upCall.body.upstream.model, 'proxy-model');
+    assert.equal(upCall.body.upstream.smallFastModel, 'fast-m');
+    assert.equal(upCall.body.upstream.timeoutSec, 60, '60000ms → 60s');
+});
+
+// ════════════════════════════════════════════════════════════
+// 代码审查 TDD 怀疑点（S1-S6）
+// ════════════════════════════════════════════════════════════
+
+// S1（类型安全）：ANTHROPIC_BASE_URL 为非字符串（数字/对象）时，normal 分支应拒绝或视为缺失，
+// 与 derived 的 resolveDerivedUpstream typeof 守卫一致。怀疑：数字/对象值 truthy 会穿透 !baseUrl 校验。
+test('S1a: direct content BASE_URL 是数字 → 应拒绝（与 derived typeof 守卫一致）', async () => {
+    const cfg = { id: 'c1', name: 'n', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 123, ANTHROPIC_AUTH_TOKEN: 'tok' } }), mode: 'direct' };
+    await assert.rejects(
+        () => buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s1a'), terminalId: 't1', proxyForwardFn: makeMockForward() }),
+        /ANTHROPIC_BASE_URL|ValidationError/i,
+    );
+});
+
+// S1b：对象型 BASE_URL（{} truthy）更危险——会穿透校验注入 [object Object]
+test('S1b: direct content BASE_URL 是对象 {} → 应拒绝（{} truthy 穿透）', async () => {
+    const cfg = { id: 'c1', name: 'n', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: {}, ANTHROPIC_AUTH_TOKEN: 'tok' } }), mode: 'direct' };
+    await assert.rejects(
+        () => buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s1b'), terminalId: 't1', proxyForwardFn: makeMockForward() }),
+        /ANTHROPIC_BASE_URL|ValidationError/i,
+    );
+});
+
+// S2（类型安全）：ANTHROPIC_MODEL 为非字符串（数字）时，env 应不含或拒绝，不应原样注入数字
+test('S2: direct content MODEL 是数字 → env 不应含数字型 MODEL', async () => {
+    const cfg = { id: 'c1', name: 'n', content: directContent({ ANTHROPIC_MODEL: 42 }), mode: 'direct' };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s2'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    // 期望：要么不含，要么是字符串；不应是数字 42
+    assert.equal(typeof env.ANTHROPIC_MODEL === 'undefined' || typeof env.ANTHROPIC_MODEL === 'string', true,
+        `MODEL 应为 undefined 或 string，实际: ${typeof env.ANTHROPIC_MODEL} = ${JSON.stringify(env.ANTHROPIC_MODEL)}`);
+});
+
+// S3（边界）：API_TIMEOUT_MS 非法值（0/负/NaN/空串）→ env 不含
+test('S3a: direct content API_TIMEOUT_MS=0 → env 不含', async () => {
+    const cfg = { id: 'c1', name: 'n', content: directContent({ API_TIMEOUT_MS: '0' }), mode: 'direct' };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s3a'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.API_TIMEOUT_MS, undefined, '0ms 应视为无效不注入');
+});
+
+test('S3b: direct content API_TIMEOUT_MS=-5 → env 不含', async () => {
+    const cfg = { id: 'c1', name: 'n', content: directContent({ API_TIMEOUT_MS: '-5' }), mode: 'direct' };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s3b'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.API_TIMEOUT_MS, undefined, '负数应视为无效不注入');
+});
+
+test('S3c: direct content API_TIMEOUT_MS="abc" → env 不含', async () => {
+    const cfg = { id: 'c1', name: 'n', content: directContent({ API_TIMEOUT_MS: 'abc' }), mode: 'direct' };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s3c'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.API_TIMEOUT_MS, undefined, '非数字字符串应视为无效不注入');
+});
+
+// S4（一致性）：proxy 模式 + API_TIMEOUT_MS 非法 → upstream body 不含 timeoutSec，但仍注入 upstream + env 不含
+test('S4: proxy + API_TIMEOUT_MS 非法 → upstream body 无 timeoutSec + env 无 API_TIMEOUT_MS', async () => {
+    const cfg = { id: 'c1', name: 'n', content: proxyContent({ API_TIMEOUT_MS: 'abc' }), mode: 'proxy' };
+    const fwd = makeMockForward();
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s4'), terminalId: 't1', proxyForwardFn: fwd });
+    const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
+    assert.ok(upCall);
+    assert.equal(upCall.body.upstream.timeoutSec, undefined, '非法 timeout → upstream body 不应含 timeoutSec');
+    assert.equal(env.API_TIMEOUT_MS, undefined, '非法 timeout → env 不应含 API_TIMEOUT_MS');
+});
+
+// S5（错误路径）：proxy 模式 fwd 抛异常（网络错误等）→ buildTerminalEnv 应抛出（不吞）
+test('S5: proxy 模式 fwd reject → buildTerminalEnv 应 reject（不吞异常）', async () => {
+    const cfg = { id: 'c1', name: 'n', content: proxyContent(), mode: 'proxy' };
+    const throwingFwd = async () => { throw new Error('proxy 不可达: ECONNREFUSED'); };
+    await assert.rejects(
+        () => buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s5'), terminalId: 't1', proxyForwardFn: throwingFwd }),
+        /ECONNREFUSED|不可达/i,
+    );
+});
+
+// S6（一致性/状态）：proxy 模式小数毫秒 timeout → CLI env 与 proxy timeoutSec 应一致（不差 500ms）
+test('S6: proxy + API_TIMEOUT_MS=30500 → env API_TIMEOUT_MS 与 proxy timeoutSec*1000 一致', async () => {
+    const cfg = { id: 'c1', name: 'n', content: proxyContent({ API_TIMEOUT_MS: '30500' }), mode: 'proxy' };
+    const fwd = makeMockForward();
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s6'), terminalId: 't1', proxyForwardFn: fwd });
+    const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
+    const proxyTimeoutMs = upCall.body.upstream.timeoutSec * 1000;
+    const cliTimeoutMs = Number(env.API_TIMEOUT_MS);
+    assert.equal(cliTimeoutMs, proxyTimeoutMs,
+        `CLI env API_TIMEOUT_MS(${cliTimeoutMs}) 应与 proxy timeoutSec*1000(${proxyTimeoutMs}) 一致，不应差 500ms`);
 });
 
 // ════════════════════════════════════════════════════════════

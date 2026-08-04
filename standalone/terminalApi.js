@@ -41,24 +41,26 @@ const WORKSPACE_CONFIG_DIR = '.claude_proxy';
 /**
  * 构建终端 spawn env + configDir。
  *
- * - normal（direct/proxy）：env 只注入 CLAUDE_CONFIG_DIR（指向 {ws.dir}/.claude_proxy，复用 active 写的 settings.json）。
- *   LLM 配置（BASE_URL/TOKEN/MODEL）走 settings.json，env 不覆盖——normal 本就靠 settings.json。
- *   ⚠ 调用方需先 activateConfig 写好 settings.json，否则 CLI 无配置可用。
- * - derived：env 注入 BASE_URL=proxy + TOKEN + 四档别名 env，configDir 用 per-terminal 空目录
- *   （{ws.dir}/.claude_proxy/sessions/{terminalId}/，防 settings.json 覆盖别名 env）。启动前同步别名表。
+ * - normal（direct/proxy）：env 注入 ANTHROPIC_BASE_URL/TOKEN/MODEL（+ 可选 SMALL_FAST_MODEL/TIMEOUT），
+ *   configDir 用 per-terminal 空目录（与 derived 一致，防 settings.json 覆盖 env）。
+ *   不再依赖 settings.json——所有终端统一走 env。
+ *   - direct：BASE_URL = 上游真实地址，不碰代理。
+ *   - proxy：BASE_URL = http://127.0.0.1:proxyPort，起终端前注入 upstream 到代理。
+ * - derived：env 注入 BASE_URL=proxy + TOKEN + 四档别名 env，configDir 用 per-terminal 空目录。
+ *   启动前注入 upstream + 同步别名表。
  *
  * @param {object} cfg LLMConfig（normal 或 derived）
  * @param {object|null} parentCfg 父 LLMConfig（derived 必传，normal 忽略）
  * @param {number} proxyPort 代理端口
  * @param {object} opts
  *   @param {string} opts.workspaceDir workspace 磁盘目录（算 configDir 用）
- *   @param {string} opts.terminalId 终端 id（derived 用，算 per-terminal configDir）
+ *   @param {string} opts.terminalId 终端 id（算 per-terminal configDir）
  *   @param {Function} [opts.proxyForwardFn] 注入的 proxyForward（测试 mock），默认用 configApi 的
  *   @param {Function} [opts.log]
  * @returns {Promise<{ env: object, configDir: string }>}
- *   env = spawn env 覆盖层（含 CLAUDE_CONFIG_DIR + 配置特定 key）
- *   configDir = 该终端的 CLAUDE_CONFIG_DIR 路径
- * @throws {ValidationError} direct 缺 BASE_URL/TOKEN、derived 无法解上游
+ *   env = spawn env 覆盖层（含 ANTHROPIC_* 配置特定 key）
+ *   configDir = 该终端的 CLAUDE_CONFIG_DIR 路径（per-terminal 空目录）
+ * @throws {ValidationError} direct/proxy 缺 BASE_URL/TOKEN、derived 无法解上游
  * @throws {ProxyUnavailableError} proxy/derived 模式代理不可达/拒绝 upstream/别名同步失败
  */
 export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
@@ -69,26 +71,32 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
 
     const isDerived = cfg && cfg.derivedFrom !== undefined;
 
-    // ── normal：靠 settings.json，env 只注入 CLAUDE_CONFIG_DIR ──
+    // per-terminal 空目录（normal 与 derived 一致，防 settings.json 覆盖 env）
+    const configDir = path.join(workspaceDir, WORKSPACE_CONFIG_DIR, 'sessions', terminalId);
+
+    // ── normal：env 注入 ANTHROPIC_* 真实配置，不再读 settings.json ──
     if (!isDerived) {
-        const configDir = path.join(workspaceDir, WORKSPACE_CONFIG_DIR);
         const parsed = extractUpstream(cfg.content);
         if (!parsed) throw new ValidationError('config content 不是有效 JSON，无法解析 env');
         const baseUrl = parsed.env.ANTHROPIC_BASE_URL;
         const token = parsed.env.ANTHROPIC_AUTH_TOKEN;
-        if (!baseUrl || !token) {
+        // 类型守卫：extractUpstream 把 obj.env 强转为 Record<string,string>，但实际值可能是数字/对象。
+        // 非字符串的 baseUrl/token 视为缺失（与 derived 的 resolveDerivedUpstream typeof 守卫一致），
+        // 避免数字/对象值穿透 truthy 校验注入脏 env（{} truthy → [object Object]）。
+        if (typeof baseUrl !== 'string' || !baseUrl || typeof token !== 'string' || !token) {
             throw new ValidationError('config 缺少 env.ANTHROPIC_BASE_URL 或 ANTHROPIC_AUTH_TOKEN');
         }
-        // proxy 模式：开终端前确保代理 upstream 已注入（settings.json 由 activateConfig 写过则代理已设；
-        // 但允许不 activate 直接开终端，故这里兜底注入。direct 不碰代理）
+
+        // timeoutSec：API_TIMEOUT_MS 毫秒→秒，空/非数/非正→undefined（与 derived normalizeTimeoutSec 一致）
+        const tNum = Number(parsed.env.API_TIMEOUT_MS);
+        const timeoutSec = Number.isFinite(tNum) && tNum > 0 ? Math.round(tNum / 1000) : undefined;
+
+        // proxy 模式：起终端前注入 upstream 到代理（全局共享 last-write-wins）；direct 不碰代理
         if (cfg.mode === 'proxy') {
-            const timeoutRaw = parsed.env.API_TIMEOUT_MS;
-            const tNum = Number(timeoutRaw);
-            const timeoutSec = Number.isFinite(tNum) && tNum > 0 ? Math.round(tNum / 1000) : undefined;
             log(`[terminal] normal-proxy 配置 '${cfg.name}' 注入代理上游: ${baseUrl}（代理全局共享，并发不同上游会串味）`);
             const upBody = { upstream: { baseUrl, token } };
-            if (parsed.env.ANTHROPIC_MODEL) upBody.upstream.model = parsed.env.ANTHROPIC_MODEL;
-            if (parsed.env.ANTHROPIC_SMALL_FAST_MODEL) upBody.upstream.smallFastModel = parsed.env.ANTHROPIC_SMALL_FAST_MODEL;
+            if (typeof parsed.env.ANTHROPIC_MODEL === 'string' && parsed.env.ANTHROPIC_MODEL) upBody.upstream.model = parsed.env.ANTHROPIC_MODEL;
+            if (typeof parsed.env.ANTHROPIC_SMALL_FAST_MODEL === 'string' && parsed.env.ANTHROPIC_SMALL_FAST_MODEL) upBody.upstream.smallFastModel = parsed.env.ANTHROPIC_SMALL_FAST_MODEL;
             if (timeoutSec != null) upBody.upstream.timeoutSec = timeoutSec;
             const r = await fwd(proxyPort, '/api/upstream', 'POST', upBody);
             if (r.status < 200 || r.status >= 300) {
@@ -96,11 +104,22 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
                 throw new ProxyUnavailableError(`代理拒绝 upstream: ${detail}`);
             }
         }
-        // normal 终端 env 不注入 LLM 配置（让 settings.json 生效），只注入 CLAUDE_CONFIG_DIR
-        return { env: {}, configDir };
+
+        // env 注入：direct → BASE_URL=上游真实地址；proxy → BASE_URL=代理地址
+        const env = {
+            ANTHROPIC_BASE_URL: cfg.mode === 'proxy' ? `http://127.0.0.1:${proxyPort}` : baseUrl,
+            ANTHROPIC_AUTH_TOKEN: token,
+        };
+        // MODEL/SMALL_FAST_MODEL：仅字符串非空才注入（防数字/对象脏值，与 upstream body 注入一致）
+        if (typeof parsed.env.ANTHROPIC_MODEL === 'string' && parsed.env.ANTHROPIC_MODEL) env.ANTHROPIC_MODEL = parsed.env.ANTHROPIC_MODEL;
+        if (typeof parsed.env.ANTHROPIC_SMALL_FAST_MODEL === 'string' && parsed.env.ANTHROPIC_SMALL_FAST_MODEL) env.ANTHROPIC_SMALL_FAST_MODEL = parsed.env.ANTHROPIC_SMALL_FAST_MODEL;
+        // API_TIMEOUT_MS：与 derived 殊途同归——从 timeoutSec 反推毫秒字符串，保证 proxy 模式下
+        // CLI env 与代理 timeoutSec*1000 严格一致（不因小数毫秒差 500ms）。
+        if (timeoutSec != null) env.API_TIMEOUT_MS = String(timeoutSec * 1000);
+        return { env, configDir };
     }
 
-    // ── derived：env 注入 BASE_URL/token/别名，configDir 用 per-terminal 空目录 ──
+    // ── derived：env 注入 BASE_URL=proxy/token/别名，configDir 用 per-terminal 空目录 ──
     const upstream = resolveDerivedUpstream(cfg, parentCfg);
     if (!upstream) {
         throw new ValidationError(
@@ -122,8 +141,7 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
     // 同步别名表（缺则补，幂等）
     await syncDerivedAliases(cfg, proxyPort, { proxyForwardFn: fwd, log });
 
-    // per-terminal 空 configDir（防 settings.json 覆盖别名 env）
-    const configDir = path.join(workspaceDir, WORKSPACE_CONFIG_DIR, 'sessions', terminalId);
+    // configDir 已在顶部统一算（per-terminal 空目录）
 
     // env 注入 BASE_URL=proxy + token + 四档别名
     const aliasEnv = buildAliasEnv(cfg.derivedIndex, { sessionContext1m: cfg.sessionContext1m });
