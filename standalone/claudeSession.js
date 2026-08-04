@@ -98,12 +98,14 @@ export class ClaudeSessionManager {
             disposed: false,
         };
 
-        // PTY 输出 → 广播到所有 WS 客户端
+        // PTY 输出 → 广播到所有 WS 客户端（发 binary frame，前端 binaryType=arraybuffer 接 Uint8Array，
+        // 避免 string 双重 UTF-8 解码致 CJK 损坏）
         ptyProcess.onData((data) => {
+            const buf = Buffer.from(data, 'utf-8');
             for (const ws of handle.wsClients) {
                 if (ws.readyState === ws.OPEN) {
                     try {
-                        ws.send(data);
+                        ws.send(buf);
                     } catch (e) {
                         this.log(`[claudeSession] 广播 WS 异常: ${e?.message || String(e)}`);
                     }
@@ -170,26 +172,40 @@ export class ClaudeSessionManager {
 
         handle.wsClients.add(ws);
 
-        // WS 收到消息 → resize 控制 或 写入 PTY（用户输入）
-        ws.on('message', (data) => {
+        // WS 收到消息 → resize 控制（text JSON）或 写入 PTY（用户输入 string/binary）
+        ws.on('message', (data, isBinary) => {
             if (handle.disposed) return;
-            const text = typeof data === 'string' ? data : data.toString('utf8');
-            // resize 控制消息：JSON {type:'resize',cols,rows}（前端 fit 后发）
-            if (text.startsWith('{')) {
-                try {
-                    const obj = JSON.parse(text);
-                    if (obj.type === 'resize' && Number.isFinite(obj.cols) && Number.isFinite(obj.rows)) {
-                        try { handle.pty.resize(Math.max(1, obj.cols|0), Math.max(1, obj.rows|0)); } catch (e) {
-                            this.log(`[claudeSession] pty.resize 异常: ${e?.message || String(e)}`);
+            // text frame：可能是 resize 控制消息（JSON {type:'resize',...}）或 string 输入
+            if (!isBinary) {
+                const text = data.toString('utf8');
+                if (text.startsWith('{')) {
+                    try {
+                        const obj = JSON.parse(text);
+                        if (obj.type === 'resize' && Number.isFinite(obj.cols) && Number.isFinite(obj.rows)) {
+                            try {
+                                // 像素尺寸（Windows conpty 高 DPI 按 pixel 缩放，不传会渲染错位）
+                                const opts = {};
+                                if (Number.isFinite(obj.pixelWidth) && Number.isFinite(obj.pixelHeight)) {
+                                    opts.width = obj.pixelWidth;
+                                    opts.height = obj.pixelHeight;
+                                }
+                                handle.pty.resize(Math.max(1, obj.cols|0), Math.max(1, obj.rows|0), opts);
+                            } catch (e) {
+                                this.log(`[claudeSession] pty.resize 异常: ${e?.message || String(e)}`);
+                            }
+                            return;
                         }
-                        return;
-                    }
-                } catch { /* 非 JSON，按用户输入处理 */ }
+                    } catch { /* 非 JSON，按用户输入处理 */ }
+                }
+                // 非 resize 的 text = 用户 string 输入
+                try { handle.pty.write(text); } catch (e) {
+                    this.log(`[claudeSession] write PTY 异常: ${e?.message || String(e)}`);
+                }
+                return;
             }
-            try {
-                handle.pty.write(text);
-            } catch (e) {
-                this.log(`[claudeSession] write PTY 异常: ${e?.message || String(e)}`);
+            // binary frame = xterm onBinary（IME/Alt 序列/paste 非文本），直接写 PTY
+            try { handle.pty.write(Buffer.from(data)); } catch (e) {
+                this.log(`[claudeSession] write PTY(binary) 异常: ${e?.message || String(e)}`);
             }
         });
 

@@ -239,7 +239,17 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
     return;
   }
 
-  var term = new Terminal({ cursorBlink: true });
+  var term = new Terminal({
+    cursorBlink: true,
+    // 显式等宽字体 + monospace 兜底（避免浏览器 monospace 在中文系统映射到非等宽字体致 CJK 错位）
+    fontFamily: 'Consolas, Menlo, "DejaVu Sans Mono", "Courier New", monospace',
+    fontSize: 14,
+    lineHeight: 1.1,        // 补偿行高（VS Code Linux 默认 1.1）
+    letterSpacing: 0,
+    scrollback: 1000,
+    allowProposedApi: true, // 部分 addon 需要
+    reflowCursorLine: true, // Windows conpty 下 resize 防 prompt 丢失（xterm 5.1+）
+  });
   var fit = new FitAddon.FitAddon ? new FitAddon.FitAddon() : new FitAddon();
   term.loadAddon(fit);
   term.open(document.getElementById('terminal'));
@@ -267,19 +277,37 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
 
   function connectWs() {
     var ws = new WebSocket(wsUrl);
+    // PTY→xterm 走 binary（arraybuffer），避免 string 双重 UTF-8 解码致 CJK 损坏。
+    // 控制事件（exit/error）仍走 text，靠 JSON.parse 区分。
+    ws.binaryType = 'arraybuffer';
+
     function sendResize() {
       try {
         var cols = term.cols, rows = term.rows;
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: cols, rows: rows }));
+        // 带像素尺寸（Windows conpty 高 DPI 按 pixel 缩放，不传会渲染错位）
+        var rect = term.element ? term.element.getBoundingClientRect() : { width: 0, height: 0 };
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'resize', cols: cols, rows: rows,
+            pixelWidth: Math.round(rect.width), pixelHeight: Math.round(rect.height),
+          }));
+        }
       } catch (e) {}
+    }
+    // resize 防抖 100ms（拖窗口时高频 resize 致 PTY reflow 卡顿）
+    var resizeTimer = null;
+    function sendResizeDebounced() {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(sendResize, 100);
     }
     ws.onopen = function () {
       msgEl.className = 'msg ok';
       msgEl.textContent = '';
       term.focus();
-      sendResize(); // 初始同步 xterm 尺寸到 PTY
+      sendResize(); // 初始同步 xterm 尺寸到 PTY（立即，不防抖）
     };
     ws.onmessage = function (ev) {
+      // text = 控制事件（JSON）；arraybuffer = PTY 输出（binary，UTF-8 字节）
       if (typeof ev.data === 'string') {
         try {
           var obj = JSON.parse(ev.data);
@@ -294,7 +322,8 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
           }
         } catch (e) { term.write(ev.data); }
       } else {
-        ev.data.text().then(function (t) { term.write(t); });
+        // arraybuffer → Uint8Array，xterm 原生支持，不经 string 解码
+        term.write(new Uint8Array(ev.data));
       }
     };
     ws.onclose = function (ev) {
@@ -307,9 +336,11 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
       msgEl.className = 'msg err';
       msgEl.textContent = 'WebSocket 连接错误';
     };
+    // xterm → PTY：string 输入（onData）+ binary 输入（onBinary，IME/Alt 序列/paste 非文本）
     term.onData(function (data) { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
-    // xterm 尺寸变化（窗口 resize / fit）→ 同步给 PTY
-    term.onResize(function () { sendResize(); });
+    term.onBinary(function (data) { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+    // xterm 尺寸变化（fit / window resize）→ 防抖同步给 PTY
+    term.onResize(function () { sendResizeDebounced(); });
     window.addEventListener('resize', function () { try { fit.fit(); } catch (e) {} });
   }
 })();
