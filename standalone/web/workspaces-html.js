@@ -207,10 +207,12 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
 <title>Claude Code — ${escapeHtml(workspaceName || workspaceId)}</title>
 <link rel="stylesheet" href="${escapeHtml(apiBase)}/vendor/xterm.css">
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 8px; background: #1e1e1e; color: #ddd; }
-  .bar { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; }
+  html, body { height: 100%; margin: 0; }
+  body { font-family: system-ui, sans-serif; padding: 0; background: #1e1e1e; color: #ddd; display: flex; flex-direction: column; overflow: hidden; }
+  .bar { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; flex: 0 0 auto; }
   .bar a { color: #6cf; }
-  #terminal { padding: 8px; }
+  #msg { flex: 0 0 auto; }
+  #terminal { padding: 4px 8px; flex: 1 1 auto; overflow: hidden; }
   .msg { padding: 4px 8px; font-size: 13px; }
   .msg.err { color: #f88; }
   .msg.ok { color: #8f8; }
@@ -252,8 +254,19 @@ export function buildTerminalHtml({ workspaceId, workspaceName, apiBase = '' } =
   });
   var fit = new FitAddon.FitAddon ? new FitAddon.FitAddon() : new FitAddon();
   term.loadAddon(fit);
-  term.open(document.getElementById('terminal'));
+  var termEl = document.getElementById('terminal');
+  term.open(termEl);
+  // fit：open 后立即 + ResizeObserver（容器尺寸变化，比 window resize 更可靠，
+  // 覆盖换显示器/移动窗口/布局异步就绪）+ window resize 兜底
   try { fit.fit(); } catch (e) {}
+  if (typeof ResizeObserver !== 'undefined') {
+    var ro = new ResizeObserver(function () {
+      try { fit.fit(); } catch (e) {}
+      // fit 会触发 term.onResize → sendResizeDebounced（若 WS 已连）
+    });
+    ro.observe(termEl);
+  }
+  window.addEventListener('resize', function () { try { fit.fit(); } catch (e) {} });
 
   var wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + apiBase + '/api/workspaces/' + encodeURIComponent(wsId) + '/claude-session/ws';
 
