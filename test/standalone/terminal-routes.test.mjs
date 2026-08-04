@@ -799,3 +799,189 @@ test('R6f: alias 路由代理成功 → 回写本地 config.modelAliases', async
         rmSync(proxyHome, { recursive: true, force: true });
     }
 });
+
+// ════════════════════════════════════════════════════════════
+// 跨目标冲突审查 TDD（非 bug 回归看护）
+// ════════════════════════════════════════════════════════════
+
+// 怀疑点 C1（目标1 vs 目标2/3）：markDefaultConfig 不校验 content，但起终端时 buildTerminalEnv 校验
+//   active 标记指向 content 缺 BASE_URL 的 config → markDefaultConfig 成功 → 起终端时 ValidationError → 400
+//   翻转：错误路径一致（400 ValidationError），非 bug。回归锁定。
+test('C1: active 指向缺 BASE_URL 的 config → 起终端 400 ValidationError（错误路径一致，非 bug）', async () => {
+    const { handle, port, home } = await startMgmt('c1');
+    const proj = newTmpDir('c1-proj');
+    try {
+        // 建 workspace
+        const cr = await (await fetch(`http://127.0.0.1:${port}/api/workspaces`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'p', dir: proj }),
+        })).json();
+        const wsId = cr.workspace.id;
+        // 建一个 content 缺 BASE_URL 的 direct config
+        const badContent = JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'tok' } });
+        const cc = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'bad', content: badContent, mode: 'direct' }),
+        })).json();
+        const cfgId = cc.config.id;
+        // 标记为默认（markDefaultConfig 不校验 content → 成功）
+        const actR = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/activate`, { method: 'POST' });
+        assert.equal(actR.status, 200, 'markDefaultConfig 不校验 content → 标记成功');
+        // workspace 级无 cfgId 起终端 → 用 active → buildTerminalEnv 校验失败 → 400
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`, { method: 'POST' });
+        assert.equal(r.status, 400, 'content 缺 BASE_URL → ValidationError → 400');
+        const d = await r.json();
+        assert.match(d.error, /BASE_URL|TOKEN/i, '错误信息应提示缺 BASE_URL/TOKEN');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// 怀疑点 C2（目标3 vs 目标6）：双向同步一致性
+//   syncDerivedAliases 只补不删（toRemove 始终空），但 management alias/delete 路由同时删代理+本地。
+//   翻转：经 management 路由的删除双向一致，非 bug。回归锁定。
+//   验证：alias/delete 路由转发代理 delete（见 R6f 验证 set 路径），这里验证 delete 路由对不可达代理不回写本地。
+test('C2: alias/delete 代理不可达 → 不回写本地（双向同步保护，非 bug）', async () => {
+    const { handle, port, home } = await startMgmt('c2');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'c2');
+    // 手写别名配置
+    const derivedId = 'derived-c2';
+    const localCfgPath = join(proj, '.claude_proxy', 'local-configs.json');
+    const arr = JSON.parse(readFileSync(localCfgPath, 'utf8'));
+    arr.push({
+        id: derivedId, name: 'deriv', content: directContent(), mode: 'proxy',
+        updatedAt: '2026-01-01T00:00:00Z', derivedFrom: cfgId, derivedIndex: 9,
+        modelAliases: { main: 'old-model' }, sessionContext1m: { main: false, haiku: false, sonnet: false, opus: false },
+        derivedSnapshot: { baseUrl: 'https://up.test', token: 'tok', mode: 'proxy' },
+    });
+    writeFileSync(localCfgPath, JSON.stringify(arr), 'utf8');
+    try {
+        // 删别名（代理 19998 不可达 → 非 2xx → 不回写本地）
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}/alias/delete`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alias: 'ccp-main-9' }),
+        });
+        assert.ok(r.status >= 400, '代理不可达应返回错误');
+        // 验证本地未回写（main 仍为 old-model）
+        const cfg2 = JSON.parse(readFileSync(localCfgPath, 'utf8')).find(c => c.id === derivedId);
+        assert.equal(cfg2.modelAliases.main, 'old-model', '代理失败时本地不应回写删除');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// 怀疑点 C3（目标1 per-terminal configDir vs ensureProjectPermissions）：重复写 permissions
+//   startTerminalForConfig 每次起终端都调 ensureProjectPermissions + ensureGitignore。
+//   翻转：两个函数幂等（已写则跳过），非 bug。回归锁定。
+//   验证：同一 workspace 起两个终端，permissions 文件只写一次（内容不变）。
+test('C3: 同一 workspace 起两个终端 → permissions 不重复写（幂等，非 bug）', async () => {
+    const { handle, port, home } = await startMgmt('c3');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'c3');
+    try {
+        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/activate`, { method: 'POST' });
+        // 起第一个终端
+        const t1 = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`, { method: 'POST' })).json();
+        // 读 permissions 文件
+        const settingsLocalPath = join(proj, '.claude', 'settings.local.json');
+        const content1 = readFileSync(settingsLocalPath, 'utf8');
+        // 起第二个终端
+        const t2 = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`, { method: 'POST' })).json();
+        // permissions 文件内容应不变（幂等）
+        const content2 = readFileSync(settingsLocalPath, 'utf8');
+        assert.equal(content1, content2, '起两个终端后 permissions 文件内容应不变（幂等）');
+        // 清理
+        await fetch(`http://127.0.0.1:${port}/api/terminals/${t1.terminalId}`, { method: 'DELETE' });
+        await fetch(`http://127.0.0.1:${port}/api/terminals/${t2.terminalId}`, { method: 'DELETE' });
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// 怀疑点 C4（ValidationError instanceof 链）：terminalApi 抛的 ValidationError 是否被 managementServer sendTermError 正确识别
+//   terminalApi.js 从 configApi.js 解构导入 ValidationError → throw new ValidationError(...)
+//   managementServer.js 从 configApi.js 导入 ValidationError → instanceof 检查
+//   翻转：同一引用，instanceof 成立，非 bug。回归锁定。（已由 S1 覆盖，这里补一个 derived 路径）
+test('C4: config 级起终端 content 非法 JSON → ValidationError → 400（instanceof 链正确，非 bug）', async () => {
+    const { handle, port, home } = await startMgmt('c4');
+    const proj = newTmpDir('c4-proj');
+    try {
+        const cr = await (await fetch(`http://127.0.0.1:${port}/api/workspaces`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'p', dir: proj }),
+        })).json();
+        const wsId = cr.workspace.id;
+        // 建一个 content 非法 JSON 的 config（绕过前端校验）
+        const cc = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'bad', content: '{"env":{', mode: 'direct' }),
+        })).json();
+        // 注意：createLocalConfig 会校验 JSON，所以这里用合法 JSON 但缺字段
+        const cc2 = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'bad2', content: '{"env":{}}', mode: 'direct' }),
+        })).json();
+        const cfgId2 = cc2.config.id;
+        // config 级起终端 → buildTerminalEnv → extractUpstream 成功但缺 BASE_URL → ValidationError → 400
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId2}/terminals`, { method: 'POST' });
+        assert.equal(r.status, 400, '缺 BASE_URL → ValidationError → 400（instanceof 链正确）');
+        const d = await r.json();
+        assert.match(d.error, /BASE_URL|TOKEN/i);
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// 怀疑点 C5（GET vs POST mWsTerm 正则共享）：GET /api/workspaces/:id/terminals 不读 body
+//   mWsTerm 正则同时匹配 POST 和 GET，但 method 检查分离。GET 不调 readJsonBody。
+//   翻转：GET 请求不会被当 POST 处理读 body，非 bug。回归锁定。
+test('C5: GET /api/workspaces/:id/terminals → 200 列表（不被 POST 路由拦截读 body，非 bug）', async () => {
+    const { handle, port, home } = await startMgmt('c5');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'c5');
+    try {
+        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/activate`, { method: 'POST' });
+        const t1 = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`, { method: 'POST' })).json();
+        // GET 列表（不应被 POST 路由拦截读 body）
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`);
+        assert.equal(r.status, 200, 'GET 列表应 200（不被 POST 路由拦截）');
+        const d = await r.json();
+        assert.ok(Array.isArray(d.terminals), 'GET 应返回 terminals 数组');
+        assert.ok(d.terminals.length >= 1, '应含已起的终端');
+        await fetch(`http://127.0.0.1:${port}/api/terminals/${t1.terminalId}`, { method: 'DELETE' });
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// 怀疑点 C6（configDir 路径安全）：terminalId 含特殊字符时 configDir 路径
+//   terminalId 由 sessions.newTerminalId() 生成（t_ + hex），用户无法通过路由参数影响 configDir。
+//   路由参数 tid 仅用于内存 Map 查找或 HTML 渲染（不进 path.join/fs）。
+//   翻转：configDir 路径安全，非 bug。回归锁定。
+//   验证：起终端后 configDir 为 {ws}/.claude_proxy/sessions/t_xxxxxxxx 格式。
+test('C6: 起终端后 configDir 为 per-terminal 安全路径（t_+hex，非 bug）', async () => {
+    const { handle, port, home } = await startMgmt('c6');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'c6');
+    try {
+        const t1 = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' })).json();
+        // terminalId 应为 t_ + hex 格式
+        assert.match(t1.terminalId, /^t_[0-9a-f]+$/, 'terminalId 应为 t_+hex 格式（安全）');
+        // configDir 路径应为 {ws}/.claude_proxy/sessions/{tid}
+        const sessDir = join(proj, '.claude_proxy', 'sessions', t1.terminalId);
+        const { existsSync } = await import('node:fs');
+        assert.ok(existsSync(sessDir), 'configDir 应为 per-terminal 安全路径（sessions/{tid}）');
+        await fetch(`http://127.0.0.1:${port}/api/terminals/${t1.terminalId}`, { method: 'DELETE' });
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});

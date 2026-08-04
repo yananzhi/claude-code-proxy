@@ -106,12 +106,12 @@ function newTerminal(wsId) {
     })
     .catch(function(e) { showMsg('新建终端异常: ' + e.message, 'err'); });
 }
-// 新建别名终端
-function newDerivedTerminal(wsId, cfgId) {
+// 新建终端（基于指定 config，静态/别名都行；走 config 级路由）
+function newConfigTerminal(wsId, cfgId) {
   fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/terminals', { method: 'POST' })
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (d.error) { showMsg('新建别名终端失败: ' + d.error, 'err'); return; }
+      if (d.error) { showMsg('新建终端失败: ' + d.error, 'err'); return; }
       window.open(API + '/terminal/' + encodeURIComponent(d.terminalId), '_blank');
       loadList();
     })
@@ -311,8 +311,14 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
       row.appendChild(actBtn);
     }
   }
-  // 静态配置：可新建别名配置
+  // 静态配置：可新建终端 + 新建别名配置
   if (!isDerived) {
+    var stBtn = document.createElement('button');
+    stBtn.className = 'cfg-new-term';
+    stBtn.textContent = '新建终端';
+    stBtn.title = '基于此配置启动终端（env 现场注入）';
+    stBtn.onclick = function() { newConfigTerminal(ws.id, cfg.id); };
+    row.appendChild(stBtn);
     var derBtn = document.createElement('button');
     derBtn.className = 'cfg-new-term';
     derBtn.textContent = '+ 别名配置';
@@ -320,12 +326,12 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
     derBtn.onclick = function() { newDerivedConfig(ws.id, cfg.id, cfg.name); };
     row.appendChild(derBtn);
   }
-  // 派生配置：自己的「新建终端」入口
+  // 别名配置：自己的「新建终端」入口
   if (isDerived) {
     var dtBtn = document.createElement('button');
     dtBtn.className = 'cfg-new-term';
     dtBtn.textContent = '新建终端';
-    dtBtn.onclick = function() { newDerivedTerminal(ws.id, cfg.id); };
+    dtBtn.onclick = function() { newConfigTerminal(ws.id, cfg.id); };
     row.appendChild(dtBtn);
   }
   return row;
@@ -605,7 +611,7 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
 <div class="row">
   <label for="content">settings.json content${isDerived ? '（只读·继承父）' : ''}</label>
   <textarea id="content" spellcheck="false" ${isDerived ? 'readonly' : ''}>${escapeHtml(content)}</textarea>
-  <div class="hint">${isDerived ? '别名配置继承父配置 content，不可编辑。' : '切换配置时写入 .claude_proxy/settings.json（direct）或作为代理上游（proxy）。'}</div>
+  <div class="hint">${isDerived ? '别名配置继承父配置 content，不可编辑。' : '保存配置后，起终端时 env 现场注入（直连=上游真实地址，代理=经代理转发）。'}</div>
 </div>
 <div id="error" aria-live="polite"></div>
 <div class="actions">

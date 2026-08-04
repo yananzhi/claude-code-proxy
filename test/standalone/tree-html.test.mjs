@@ -357,3 +357,69 @@ test('G6-fe: 顶栏 tiers 顺序固定 main → haiku → sonnet → opus', () =
     assert.ok(mainPos > 0 && haikuPos > mainPos && sonnetPos > haikuPos && opusPos > sonnetPos,
         'tiers 顺序应为 main → haiku → sonnet → opus');
 });
+
+// ════════════════════════════════════════════════════════════
+// 跨目标冲突审查 TDD（目标1-7 整体）
+// ════════════════════════════════════════════════════════════
+
+// 怀疑点 X1（目标5 文案遗漏）：config 编辑页 hint 仍提"写入 .claude_proxy/settings.json"
+//   目标1/2 后终端统一走 env、standalone 不再写 settings.json（markDefaultConfig 只写标记）。
+//   但编辑页 hint 仍说"切换配置时写入 .claude_proxy/settings.json"——误导用户以为起终端依赖 settings.json。
+//   "bug 存在"断言：hint 含 settings.json 写入描述 → 文案过时。
+test('X1: 静态配置编辑页 hint 不应提"写入 settings.json"（目标1/2 后终端走 env）', () => {
+    const html = buildConfigEditorHtml({
+        workspaceId: 'w', workspaceName: 'ws', apiBase: '',
+        config: { id: 'c', name: 'n', content: '{}', mode: 'direct' },
+    });
+    // hint 不应含"写入 .claude_proxy/settings.json"描述（终端走 env，不再写 settings）
+    assert.ok(!/写入\s*\.claude_proxy\/settings\.json/.test(html),
+        '静态配置编辑页 hint 不应提"写入 .claude_proxy/settings.json"（目标1/2 后走 env）');
+});
+
+// 怀疑点 X2（目标5 文案遗漏）：managementServer checkDerivedForAlias 错误信息仍含"派生节点"
+//   目标5 全站文案统一为"静态配置/别名配置"，但 checkDerivedForAlias 返回的错误信息仍说"仅派生节点可设置别名"。
+//   此错误信息经 management alias 路由返回给前端 showMsg，是用户可见文案。
+//   "bug 存在"断言：错误信息含"派生节点" → 文案遗漏。
+test('X2: checkDerivedForAlias 错误信息无"派生节点"残留（目标5 文案统一）', () => {
+    const src = readFileSync(resolve(__dirname, '..', '..', 'standalone', 'managementServer.js'), 'utf8');
+    // checkDerivedForAlias 函数体内的错误信息不应含"派生节点"
+    const fnMatch = src.match(/function checkDerivedForAlias[\s\S]*?^}/m);
+    assert.ok(fnMatch, '应找到 checkDerivedForAlias 函数');
+    assert.ok(!/派生节点/.test(fnMatch[0]),
+        'checkDerivedForAlias 错误信息不应含"派生节点"（目标5 统一为"别名配置"）');
+});
+
+// 怀疑点 X3（目标6 决策3 文档 vs 代码）：alias-resolve 读本地 vs 文档说"查代理"
+//   文档第6节决策3："别名终端顶栏真实模型 → 实时查代理 modelAliases"
+//   实际实现：alias-resolve 路由读本地 config.modelAliases（managementServer.js 第171行注释"本地权威"）。
+//   这是代码比文档更合理（本地经 updateConfigAlias 同步、避免代理往返），但文档与代码不一致。
+//   翻转断言为正确行为：alias-resolve 读本地（非代理），文档需更新。
+test('X3: alias-resolve 读本地 config.modelAliases（非代理，文档需更新）', () => {
+    const src = readFileSync(resolve(__dirname, '..', '..', 'standalone', 'managementServer.js'), 'utf8');
+    const aliasResolveBlock = src.match(/mAliasResolve[\s\S]*?sendJson\(res, 200, result\)/);
+    assert.ok(aliasResolveBlock, '应找到 alias-resolve 路由块');
+    // 应读本地 config（manager.getLocalConfigs），非调代理 proxyForward
+    assert.ok(/manager\.getLocalConfigs/.test(aliasResolveBlock[0]), 'alias-resolve 应读本地 config');
+    assert.ok(!/proxyForward/.test(aliasResolveBlock[0]), 'alias-resolve 不应调代理 proxyForward（读本地）');
+});
+
+// 怀疑点 X4（目标2 决策2 文档 vs 代码）：静态配置行缺"新建终端"按钮
+//   文档第6节决策2："静态配置行也加该按钮（新建终端）"。
+//   实际代码：buildConfigRow 中 isDerived 才有"新建终端"按钮（第323-329行），!isDerived 只有"+ 别名配置"。
+//   "bug 存在"断言：静态配置行无"新建终端"按钮 → 文档说有但代码没有。
+test('X4: 静态配置行应有"新建终端"按钮（文档决策2 要求）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    // buildConfigRow 中 !isDerived 分支应有"新建终端"按钮（不只是"+ 别名配置"）
+    const cfgRowMatch = html.match(/function buildConfigRow[\s\S]*?return row;/m);
+    assert.ok(cfgRowMatch, '应找到 buildConfigRow 函数');
+    const fn = cfgRowMatch[0];
+    // 提取 isDerived 分支（if (isDerived) { ... }）内的按钮
+    const derivedBlock = fn.match(/if\s*\(isDerived\)\s*\{([\s\S]*?)\}/);
+    const derivedBtns = derivedBlock ? derivedBlock[1] : '';
+    // 提取 !isDerived 分支内的按钮（两个 if(!isDerived) 块）
+    const staticBlocks = fn.match(/if\s*\(!isDerived\)\s*\{[\s\S]*?\}/g) || [];
+    const staticBtns = staticBlocks.join('\n');
+    // 静态配置行应有"新建终端"按钮（当前 bug：只有"+ 别名配置"无"新建终端"）
+    assert.ok(/新建终端/.test(staticBtns),
+        '静态配置行（!isDerived 分支）应有"新建终端"按钮（文档决策2：静态配置行也加该按钮）');
+});

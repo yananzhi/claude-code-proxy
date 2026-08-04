@@ -460,7 +460,7 @@ async function checkDerivedForAlias(manager, workspaceId, cfgId) {
     const cfg = configs.find(c => c.id === cfgId);
     if (!cfg) return { status: 404, error: `config 不存在: ${cfgId}` };
     if (cfg.derivedFrom === undefined) {
-        return { status: 400, error: '仅派生节点可设置别名（普通配置无别名映射）' };
+        return { status: 400, error: '仅别名配置可设置别名（静态配置无别名映射）' };
     }
     return null;
 }
