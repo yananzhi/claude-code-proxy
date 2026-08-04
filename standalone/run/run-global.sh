@@ -41,6 +41,12 @@ fi
 # CCP_HOME = standalone/run/（端口 11444）
 export CCP_HOME="$SCRIPT_DIR"
 
+# 若 proxy-config.json 不存在，从 example 模板复制
+if [ ! -f "$SCRIPT_DIR/proxy-config.json" ]; then
+    cp "$SCRIPT_DIR/proxy-config.example.json" "$SCRIPT_DIR/proxy-config.json"
+    echo "[run-global] 已从 example 复制 proxy-config.json（请编辑填真实 upstream 后重启）"
+fi
+
 echo "[run-global] CCP_HOME=$CCP_HOME"
 echo "[run-global] 代理转发 → http://127.0.0.1:11444/"
 echo "[run-global] management 网页 → http://127.0.0.1:11544/"

@@ -24,8 +24,14 @@ if [ ! -f out/cleanEnv.js ]; then
     npm run compile
 fi
 
-# CCP_HOME = standalone/run/（预设了端口 11444 的 proxy-config.json）
+# CCP_HOME = standalone/run/（端口 11444）
 export CCP_HOME="$SCRIPT_DIR"
+
+# 若 proxy-config.json 不存在，从 example 模板复制（用户后续填真实 token）
+if [ ! -f "$SCRIPT_DIR/proxy-config.json" ]; then
+    cp "$SCRIPT_DIR/proxy-config.example.json" "$SCRIPT_DIR/proxy-config.json"
+    echo "[run-dev] 已从 example 复制 proxy-config.json（请编辑填真实 upstream 后重启）"
+fi
 
 # 检查 node-pty/ws
 if ! node -e "require('node-pty'); require('ws')" 2>/dev/null; then

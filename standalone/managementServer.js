@@ -11,6 +11,9 @@
 // 正交设计：plan/tmp/2026-08-03-stage2-workspace-manager.md, 2026-08-03-stage3-cli-session.md
 
 import * as http from 'node:http';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { WorkspaceManager } from './workspaceManager.js';
 import { ClaudeSessionManager } from './claudeSession.js';
@@ -22,6 +25,8 @@ import {
 } from './configApi.js';
 import { managementPort } from './ports.js';
 import { buildWorkspacesHtml, buildTerminalHtml, buildConfigEditorHtml } from './web/workspaces-html.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ws 是 CJS 模块
 const require = createRequire(import.meta.url);
@@ -58,6 +63,24 @@ export async function startManagementServer(opts = {}) {
                 res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
                 res.end(html);
                 return;
+            }
+
+            // GET /vendor/* → 静态资源（xterm.js 等，本地 vendored 不依赖 CDN）
+            if (method === 'GET' && pathname.startsWith('/vendor/')) {
+                const rel = pathname.slice('/vendor/'.length);
+                if (rel.includes('..')) { sendJson(res, 400, { error: '非法路径' }); return; }
+                const full = path.join(__dirname, 'web', 'vendor', rel);
+                const MIME = { '.js': 'application/javascript', '.css': 'text/css', '.map': 'application/json' };
+                try {
+                    const data = fs.readFileSync(full);
+                    const ext = path.extname(full);
+                    res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream' });
+                    res.end(data);
+                    return;
+                } catch {
+                    sendJson(res, 404, { error: `资源不存在: ${rel}` });
+                    return;
+                }
             }
 
             // GET /api/workspaces

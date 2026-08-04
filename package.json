@@ -24,8 +24,7 @@
   "files": [
     "out/",
     "standalone/",
-    "proxy/server.js",
-    "proxy/config-store.js",
+    "proxy/server.js",    "proxy/config-store.js",
     "proxy/trace-store.js",
     "proxy/logger.js",
     "proxy/package.json",
