@@ -73,6 +73,28 @@ function showMsg(text, kind) {
   setTimeout(function() { el.textContent = ''; el.className = ''; }, kind === 'warn' ? 8000 : 4000);
 }
 
+// 从 normal 父配置新建派生配置：取 next-alias-id → POST 派生 → 跳编辑页
+function newDerivedConfig(wsId, parentId, parentName) {
+  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/next-alias-id')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error || d.id == null) { showMsg('取派生编号失败: ' + (d.error || '未知'), 'err'); return; }
+      var idx = d.id;
+      var body = { name: (parentName || 'cfg') + ' #' + idx, derivedFrom: parentId, derivedIndex: idx };
+      return fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(function(r) { return r.json(); }).then(function(dd) {
+        if (dd.error) { showMsg('建派生配置失败: ' + dd.error, 'err'); return; }
+        showMsg('已建派生配置 #' + idx + '，请在编辑页配别名', 'ok');
+        setTimeout(function() {
+          window.location.href = API + '/workspace/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(dd.config.id) + '/edit';
+        }, 300);
+      });
+    })
+    .catch(function(e) { showMsg('建派生配置异常: ' + e.message, 'err'); });
+}
+
 // 新建 normal 终端（基于 active config）
 function newTerminal(wsId) {
   fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/terminals', { method: 'POST' })
@@ -283,6 +305,15 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
     actBtn.textContent = '激活';
     actBtn.onclick = function() { activateCfg(ws.id, cfg.id, actBtn); };
     row.appendChild(actBtn);
+  }
+  // normal 配置：可新建派生配置
+  if (!isDerived) {
+    var derBtn = document.createElement('button');
+    derBtn.className = 'cfg-new-term';
+    derBtn.textContent = '+ 派生';
+    derBtn.title = '基于此配置创建派生节点（env 注入别名，运行时可改模型）';
+    derBtn.onclick = function() { newDerivedConfig(ws.id, cfg.id, cfg.name); };
+    row.appendChild(derBtn);
   }
   // 派生配置：自己的「新建终端」入口
   if (isDerived) {

@@ -41,6 +41,13 @@ test('T1d: 派生配置终端入口（POST /api/workspaces/:id/configs/:cfgId/te
     assert.ok(html.match(/\/configs\/.*\/terminals/), '应有 /configs/:cfgId/terminals 入口');
 });
 
+test('T1g: normal 配置有「+ 派生」入口（newDerivedConfig + next-alias-id）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(html.includes('newDerivedConfig'), '应有 newDerivedConfig 函数');
+    assert.ok(html.includes('+ 派生'), 'normal 配置行应有「+ 派生」按钮');
+    assert.ok(html.includes('/next-alias-id'), '建派生应取 next-alias-id');
+});
+
 test('T1e: 不含旧 /workspace/:id/terminal 链接', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
     assert.ok(!html.match(/\/workspace\/.*\/terminal/), '不应残留旧 /workspace/:id/terminal 链接');
