@@ -9,6 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -217,4 +218,142 @@ test('T3c: buildTerminalHtml terminalId 通过 encodeURIComponent 入 URL', () =
     const wsUrlLine = html.split('\n').find(l => l.includes('wsUrl') || (l.includes('/api/terminals/') && l.includes('ws')));
     assert.ok(wsUrlLine, '应有 wsUrl 构造');
     assert.ok(wsUrlLine.includes('encodeURIComponent'), 'wsUrl 应通过 encodeURIComponent(tid) 构造');
+});
+
+// ════════════════════════════════════════════════════════════
+// T3d/T3e 别名终端顶栏实时查映射（目标6）
+// ════════════════════════════════════════════════════════════
+test('T3d: buildTerminalHtml 顶栏 fetch alias-resolve（含顶栏容器）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    assert.ok(html.includes('alias-resolve'), '顶栏应 fetch /api/terminals/:tid/alias-resolve');
+    assert.ok(html.includes('id="barInfo"') || html.includes('bar-info'), '应有顶栏信息容器');
+});
+
+test('T3e: buildTerminalHtml 渲染别名→真实模型（[别名] #N ccp-xxx→model）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    // 顶栏 JS 应有渲染别名映射的逻辑（ccp-<tier>-N → 真实模型）
+    assert.ok(html.includes('别名'), '顶栏应渲染 [别名] 标记');
+    assert.ok(/resolvedModel|真实模型|→/.test(html), '顶栏应渲染 别名→真实模型 映射');
+});
+
+// ════════════════════════════════════════════════════════════
+// 目标6 代码审查 TDD：前端 6 类怀疑点逐条确认
+// ════════════════════════════════════════════════════════════
+
+// 怀疑点 G1-fe（时序：refreshBarInfo 在 xterm 加载前调用）
+//   refreshBarInfo() 在 xterm 检查（typeof Terminal === 'undefined'）之前调用。
+//   "bug 存在"断言：refreshBarInfo 依赖 xterm → 在 xterm 加载前调会崩。
+//   若 refreshBarInfo 不依赖 xterm（只更新 barInfo textContent）则非 bug。
+test('G1-fe: refreshBarInfo 不依赖 xterm（在 xterm 检查前调用，非 bug）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    // refreshBarInfo 调用应在 typeof Terminal 检查之前
+    const refreshCallPos = html.indexOf('refreshBarInfo()');
+    const xtermCheckPos = html.indexOf("typeof Terminal === 'undefined'");
+    assert.ok(refreshCallPos > 0, '应调用 refreshBarInfo()');
+    assert.ok(xtermCheckPos > 0, '应有 xterm 加载检查');
+    assert.ok(refreshCallPos < xtermCheckPos, 'refreshBarInfo 应在 xterm 检查前调用（不依赖 xterm）');
+    // refreshBarInfo 函数体不应引用 Terminal/FitAddon
+    const refreshFnMatch = html.match(/function refreshBarInfo[\s\S]*?^  }/m);
+    assert.ok(refreshFnMatch, '应存在 refreshBarInfo 函数');
+    assert.ok(!/Terminal|FitAddon|term\b/.test(refreshFnMatch[0]), 'refreshBarInfo 不应引用 xterm 相关对象');
+});
+
+// 怀疑点 G2-fe（异常：fetch 失败/JSON 异常时前端不崩）
+//   "bug 存在"断言：refreshBarInfo 无 .catch → fetch 失败或 r.json() 抛 → 崩。
+//   若有 .catch 则非 bug。
+test('G2-fe: refreshBarInfo 有 .catch 兜底（fetch 失败不崩）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    const refreshFnMatch = html.match(/function refreshBarInfo[\s\S]*?^  }/m);
+    assert.ok(refreshFnMatch, '应存在 refreshBarInfo 函数');
+    assert.ok(/\.catch\s*\(/.test(refreshFnMatch[0]), 'refreshBarInfo 应有 .catch 兜底（fetch/json 失败不崩）');
+});
+
+// 怀疑点 G3-fe（类型安全：modelAliases 为空对象时顶栏显示什么）
+//   别名终端但 modelAliases 为 {}（用户没配任何档）→ tiers.forEach 不 push（real 为 falsy）。
+//   顶栏只显示 '[别名] #N'（无映射）。
+//   "bug 存在"断言：modelAliases 为空时 parts 为空 → barInfo.textContent = '' → 顶栏空白。
+//   若 parts 至少含 '[别名] #N' 则非 bug。
+test('G3-fe: modelAliases 为空时顶栏仍显示 [别名] #N（非空白）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    // 验证 parts 初始含 '[别名] #' + idx（即使 modelAliases 为空也有编号）
+    const refreshFnMatch = html.match(/function refreshBarInfo[\s\S]*?^  }/m);
+    assert.ok(refreshFnMatch, '应存在 refreshBarInfo 函数');
+    // parts 应初始化为 ['[别名] #' + idx]（至少一项，空 modelAliases 也有编号）
+    assert.ok(/\[别名\]\s*#\s*['"]?\s*\+/.test(refreshFnMatch[0]) ||
+              /parts\s*=\s*\[.*别名.*\]/.test(refreshFnMatch[0]),
+              'parts 应初始化含 [别名] #N（modelAliases 空时不空白）');
+});
+
+// 怀疑点 G3-source（类型安全：路由 modelAliases 有 || {} 兜底）
+//   managementServer.js alias-resolve 路由：result.modelAliases = cfg.modelAliases || {}
+//   "bug 存在"断言：路由无兜底 → cfg.modelAliases 为 undefined 传前端 → aliases[t[0]] 崩。
+//   若有 || {} 则非 bug。
+test('G3-source: alias-resolve 路由 modelAliases 有 || {} 兜底', () => {
+    // 读 managementServer.js 源码验证兜底
+    const src = readFileSync(resolve(__dirname, '..', '..', 'standalone', 'managementServer.js'), 'utf8');
+    // alias-resolve 路由块应有 modelAliases || {} 兜底
+    const aliasResolveBlock = src.match(/mAliasResolve[\s\S]*?sendJson\(res, 200, result\)/);
+    assert.ok(aliasResolveBlock, '应找到 alias-resolve 路由块');
+    assert.ok(/modelAliases\s*\|\|\s*\{\}/.test(aliasResolveBlock[0]),
+        'alias-resolve 路由应对 modelAliases 做 || {} 兜底');
+});
+
+// 怀疑点 G4-fe（边界：derivedIndex 为 0 或缺失时前端跳过别名渲染）
+//   前端 if (d.kind === 'derived' && d.derivedIndex) → derivedIndex=0 时 falsy → 跳过。
+//   configApi 校验 derivedIndex >= 1，但手动编辑的 config 文件可能 derivedIndex=0 或缺失。
+//   "bug 存在"断言：derivedIndex=0 的别名终端顶栏不渲染别名（静默降级）。
+//   翻转：derivedIndex >= 1 是创建校验保证的，0 不会出现。但前端 truthy 检查仍隐含风险。
+//   验证：前端用 d.derivedIndex truthy 检查（非显式 >= 1 检查）→ 若 derivedIndex=0 会跳过。
+//   这是设计接受的降级（derivedIndex=0 不合法，不出现），但 truthy 检查比 >= 1 检查脆弱。
+test('G4-fe: 前端 derivedIndex 检查为 truthy（derivedIndex=0 会跳过，但校验保证 >=1）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    const refreshFnMatch = html.match(/function refreshBarInfo[\s\S]*?^  }/m);
+    assert.ok(refreshFnMatch, '应存在 refreshBarInfo 函数');
+    // 前端检查 d.derivedIndex truthy（非 d.derivedIndex >= 1）
+    assert.ok(/d\.derivedIndex/.test(refreshFnMatch[0]), '应检查 d.derivedIndex');
+    // 当前实现用 truthy：d.kind === 'derived' && d.derivedIndex
+    // derivedIndex >= 1 由 configApi 创建校验保证，0 不会出现 → truthy 等价于 >= 1（对合法数据）
+    assert.ok(/d\.kind\s*===\s*['"]derived['"]\s*&&\s*d\.derivedIndex/.test(refreshFnMatch[0]),
+        '前端用 truthy 检查 derivedIndex（合法值 >=1，等价于 >=1 检查）');
+});
+
+// 怀疑点 G5-fe（一致性：前端终端页只调 alias-resolve，不重复调 GET /terminals/:tid）
+//   "bug 存在"断言：前端调两个接口 → 重复。
+//   若只调 alias-resolve 则非 bug。
+test('G5-fe: 终端页只调 alias-resolve（不重复调 GET /terminals/:tid）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    // 终端页 IIFE 内 fetch 只应调 alias-resolve，不调 GET /api/terminals/:tid（非 /alias-resolve）
+    const iifeMatch = html.match(/\(function\(\)\s*\{[\s\S]*?\}\)\(\)/);
+    assert.ok(iifeMatch, '应有 IIFE');
+    const iife = iifeMatch[0];
+    // alias-resolve fetch 应存在
+    assert.ok(/alias-resolve/.test(iife), '应 fetch alias-resolve');
+    // 终端页只有 refreshBarInfo 调 fetch，WS 用 new WebSocket
+    const fetchCalls = iife.match(/fetch\s*\(/g) || [];
+    assert.equal(fetchCalls.length, 1, '终端页 IIFE 应只有 1 个 fetch 调用（alias-resolve），不重复调 GET /terminals/:tid');
+    // 唯一的 fetch 应含 alias-resolve（fetch 调用行内应有 alias-resolve 字样）
+    // 找到 fetch 调用所在行，验证该行含 alias-resolve
+    const fetchLine = iife.split('\n').find(l => /fetch\s*\(/.test(l));
+    assert.ok(fetchLine, '应找到 fetch 调用行');
+    // fetch 行可能跨行，取 fetch 关键字后 200 字符验证
+    const fetchIdx = iife.indexOf('fetch(');
+    const fetchContext = iife.slice(fetchIdx, fetchIdx + 200);
+    assert.ok(/alias-resolve/.test(fetchContext), '唯一的 fetch 应是 alias-resolve（非 GET /terminals/:tid）');
+});
+
+// 怀疑点 G6-fe（一致性：顶栏 tiers 顺序固定 main/haiku/sonnet/opus）
+//   "bug 存在"断言：tiers 顺序不固定 → 顶栏映射顺序随机。
+//   若 tiers 硬编码固定顺序则非 bug。
+test('G6-fe: 顶栏 tiers 顺序固定 main → haiku → sonnet → opus', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    const refreshFnMatch = html.match(/function refreshBarInfo[\s\S]*?^  }/m);
+    assert.ok(refreshFnMatch, '应存在 refreshBarInfo 函数');
+    const fn = refreshFnMatch[0];
+    // 验证 tiers 数组顺序
+    const mainPos = fn.indexOf("'main'");
+    const haikuPos = fn.indexOf("'haiku'");
+    const sonnetPos = fn.indexOf("'sonnet'");
+    const opusPos = fn.indexOf("'opus'");
+    assert.ok(mainPos > 0 && haikuPos > mainPos && sonnetPos > haikuPos && opusPos > sonnetPos,
+        'tiers 顺序应为 main → haiku → sonnet → opus');
 });

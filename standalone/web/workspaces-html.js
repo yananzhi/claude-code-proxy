@@ -394,8 +394,9 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
 <style>
   html, body { height: 100%; margin: 0; }
   body { font-family: system-ui, sans-serif; padding: 0; background: #1e1e1e; color: #ddd; display: flex; flex-direction: column; overflow: hidden; }
-  .bar { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; flex: 0 0 auto; }
+  .bar { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; flex: 0 0 auto; gap: 8px; }
   .bar a { color: #6cf; }
+  .bar-info { color: #9cf; font-size: 12px; }
   #msg { flex: 0 0 auto; }
   #terminal { padding: 4px 8px; flex: 1 1 auto; overflow: hidden; }
   .msg { padding: 4px 8px; font-size: 13px; }
@@ -406,7 +407,7 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
 </head>
 <body>
 <div class="bar">
-  <span>Claude Code 终端</span>
+  <span id="barInfo" class="bar-info">Claude Code 终端</span>
   <span><a href="${escapeHtml(apiBase)}/">← 返回 workspace 列表</a></span>
 </div>
 <div id="msg" class="msg info">正在连接终端...</div>
@@ -418,6 +419,30 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
   var apiBase = ${safeApiBase};
   var tid = ${safeId};
   var msgEl = document.getElementById('msg');
+  var barInfo = document.getElementById('barInfo');
+
+  // 顶栏：查终端详情 + 别名映射（别名终端显示 ccp-<tier>-N → 真实模型）
+  function refreshBarInfo() {
+    fetch(apiBase + '/api/terminals/' + encodeURIComponent(tid) + '/alias-resolve')
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.kind === 'derived' && d.derivedIndex) {
+          var idx = d.derivedIndex;
+          var aliases = d.modelAliases || {};
+          var tiers = [['main','ccp-main-'],['haiku','ccp-haiku-'],['sonnet','ccp-sonnet-'],['opus','ccp-opus-']];
+          var parts = ['[别名] #' + idx];
+          tiers.forEach(function(t) {
+            var real = aliases[t[0]];
+            if (real) parts.push(t[1] + idx + ' → ' + real);
+          });
+          barInfo.textContent = parts.join('  ');
+        } else if (d.kind === 'normal') {
+          barInfo.textContent = '[静态] ' + (d.startedConfigName || '');
+        }
+      })
+      .catch(function() { /* 查询失败不影响终端使用，保留默认文案 */ });
+  }
+  refreshBarInfo();
 
   // 检查 xterm 是否加载成功（CDN 失败时 Terminal 未定义）
   if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {

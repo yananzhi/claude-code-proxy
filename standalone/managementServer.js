@@ -19,7 +19,7 @@ import { WorkspaceManager } from './workspaceManager.js';
 import { ClaudeSessionManager } from './claudeSession.js';
 import { resolveClaudeBinaryStandalone } from './claudeBinaryStandalone.js';
 import {
-    createLocalConfig, updateLocalConfig, deleteLocalConfig, getModelCatalog,
+    createLocalConfig, updateLocalConfig, deleteLocalConfig, getModelCatalog, updateConfigAlias,
     proxyForward, markDefaultConfig, getActiveConfig,
     ensureProjectPermissions, ensureGitignore,
     ValidationError, NotFoundError, ProxyUnavailableError,
@@ -160,8 +160,37 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // DELETE /api/terminals/:tid → 停止终端
+            // GET /api/terminals/:tid/alias-resolve → 终端顶栏别名映射（目标6）
+            const mAliasResolve = pathname.match(/^\/api\/terminals\/([^/]+)\/alias-resolve$/);
+            if (method === 'GET' && mAliasResolve) {
+                const tid = decodeURIComponent(mAliasResolve[1]);
+                const info = sessions.get(tid);
+                if (!info) { sendJson(res, 404, { error: `终端不存在: ${tid}` }); return; }
+                const result = { kind: info.kind, startedConfigName: info.startedConfigName, configId: info.configId };
+                if (info.kind === 'derived' && info.workspaceId && info.configId) {
+                    // 别名终端：查 config.modelAliases + derivedIndex（本地权威，与代理同步）
+                    const configs = await manager.getLocalConfigs(info.workspaceId);
+                    const cfg = configs.find(c => c.id === info.configId);
+                    if (cfg) {
+                        result.derivedIndex = cfg.derivedIndex;
+                        result.modelAliases = cfg.modelAliases || {};
+                    }
+                }
+                sendJson(res, 200, result);
+                return;
+            }
+
+            // GET /api/terminals/:tid → 终端详情
             const mTermStop = pathname.match(/^\/api\/terminals\/([^/]+)$/);
+            if (method === 'GET' && mTermStop) {
+                const tid = decodeURIComponent(mTermStop[1]);
+                const info = sessions.get(tid);
+                if (!info) { sendJson(res, 404, { error: `终端不存在: ${tid}` }); return; }
+                sendJson(res, 200, info);
+                return;
+            }
+
+            // DELETE /api/terminals/:tid → 停止终端
             if (method === 'DELETE' && mTermStop) {
                 const tid = decodeURIComponent(mTermStop[1]);
                 const stopped = await sessions.stop(tid);
@@ -219,7 +248,7 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // POST /api/workspaces/:id/configs/:cfgId/alias → 转发 proxy 设置别名（即时生效）
+            // POST /api/workspaces/:id/configs/:cfgId/alias → 转发 proxy 设置别名（即时生效）+ 回写本地
             const mAlias = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/alias$/);
             if (method === 'POST' && mAlias) {
                 const id = decodeURIComponent(mAlias[1]);
@@ -228,11 +257,15 @@ export async function startManagementServer(opts = {}) {
                 if (err) { sendJson(res, err.status, { error: err.error }); return; }
                 const body = await readJsonBody(req);
                 const r = await proxyForward(opts.proxyPort, '/api/model-alias', 'POST', body);
+                if (r.status >= 200 && r.status < 300) {
+                    // 代理成功后回写本地 modelAliases（保持与代理同步，供 alias-resolve 顶栏读取）
+                    await updateConfigAlias(manager, id, cfgId, body.alias, body.model);
+                }
                 res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
                 res.end(JSON.stringify(r.body));
                 return;
             }
-            // POST /api/workspaces/:id/configs/:cfgId/alias/delete → 转发 proxy 删别名
+            // POST /api/workspaces/:id/configs/:cfgId/alias/delete → 转发 proxy 删别名 + 回写本地
             const mAliasDel = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/alias\/delete$/);
             if (method === 'POST' && mAliasDel) {
                 const id = decodeURIComponent(mAliasDel[1]);
@@ -241,6 +274,9 @@ export async function startManagementServer(opts = {}) {
                 if (err) { sendJson(res, err.status, { error: err.error }); return; }
                 const body = await readJsonBody(req);
                 const r = await proxyForward(opts.proxyPort, '/api/model-alias/delete', 'POST', body);
+                if (r.status >= 200 && r.status < 300) {
+                    await updateConfigAlias(manager, id, cfgId, body.alias, null);
+                }
                 res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
                 res.end(JSON.stringify(r.body));
                 return;

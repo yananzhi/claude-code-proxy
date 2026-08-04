@@ -175,6 +175,21 @@ export class ClaudeSessionManager {
         return this.newId();
     }
 
+    /** 取终端详情。不存在 → null。 */
+    get(terminalId) {
+        const h = this.sessions.get(terminalId);
+        if (!h) return null;
+        return {
+            terminalId,
+            pid: h.pid,
+            kind: h.kind || 'normal',
+            configId: h.configId,
+            startedConfigName: h.startedConfigName,
+            workspaceId: h.workspaceId,
+            startedAt: h.startedAt,
+        };
+    }
+
     /** 停止某终端（kill PTY + 移除 + 清理 configDir）。不存在 → false。 */
     async stop(terminalId) {
         const handle = this.sessions.get(terminalId);

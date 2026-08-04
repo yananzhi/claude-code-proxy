@@ -185,6 +185,45 @@ export async function getModelCatalog(manager, workspaceId) {
 }
 
 /**
+ * 从 alias 串（如 ccp-main-3[1m]）反解 tier。
+ * @returns {string|null} main/haiku/sonnet/opus 或 null（格式不匹配）
+ */
+function tierFromAlias(alias) {
+    if (typeof alias !== 'string') return null;
+    const cleaned = alias.replace(/\[1m\]$/, '');
+    const m = cleaned.match(/^ccp-(main|haiku|sonnet|opus)-\d+$/);
+    return m ? m[1] : null;
+}
+
+/**
+ * 更新（set/delete）别名配置的本地 modelAliases，保持与代理侧同步。
+ * alias 路由转发代理后，调用本函数回写本地 config.modelAliases，
+ * 让 alias-resolve（终端顶栏）读到最新映射。
+ *
+ * @param {string} alias 别名串（ccp-<tier>-N[1m]）
+ * @param {string|null} model 真实模型名；null/空 → 删该 tier
+ */
+export async function updateConfigAlias(manager, workspaceId, cfgId, alias, model) {
+    const tier = tierFromAlias(alias);
+    if (!tier) return; // 非 ccp-<tier>-N 格式，不回写（无法定位 tier）
+    const ctx = await getStoreForWorkspace(manager, workspaceId);
+    if (!ctx) return;
+    const existing = await ctx.store.get(cfgId);
+    if (!existing || existing.derivedFrom === undefined) return; // 非别名配置，不回写
+    const aliases = { ...(existing.modelAliases || {}) };
+    if (model) {
+        aliases[tier] = model;
+    } else {
+        delete aliases[tier];
+    }
+    await ctx.store.upsert({
+        ...existing,
+        modelAliases: aliases,
+        updatedAt: new Date().toISOString(),
+    });
+}
+
+/**
  * 往项目级 `.claude/settings.local.json` 合并 `permissions.defaultMode = bypassPermissions`。
  * 复制自 claudeLauncher.ts（避免改 src/ VS Code 形态）。已设别的 defaultMode 则尊重不覆盖。
  */
