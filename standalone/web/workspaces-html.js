@@ -73,26 +73,26 @@ function showMsg(text, kind) {
   setTimeout(function() { el.textContent = ''; el.className = ''; }, kind === 'warn' ? 8000 : 4000);
 }
 
-// 从 normal 父配置新建派生配置：取 next-alias-id → POST 派生 → 跳编辑页
+// 从静态父配置新建别名配置：取 next-alias-id → POST 别名配置 → 跳编辑页
 function newDerivedConfig(wsId, parentId, parentName) {
   fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/next-alias-id')
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (d.error || d.id == null) { showMsg('取派生编号失败: ' + (d.error || '未知'), 'err'); return; }
+      if (d.error || d.id == null) { showMsg('取别名编号失败: ' + (d.error || '未知'), 'err'); return; }
       var idx = d.id;
       var body = { name: (parentName || 'cfg') + ' #' + idx, derivedFrom: parentId, derivedIndex: idx };
       return fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       }).then(function(r) { return r.json(); }).then(function(dd) {
-        if (dd.error) { showMsg('建派生配置失败: ' + dd.error, 'err'); return; }
-        showMsg('已建派生配置 #' + idx + '，请在编辑页配别名', 'ok');
+        if (dd.error) { showMsg('建别名配置失败: ' + dd.error, 'err'); return; }
+        showMsg('已建别名配置 #' + idx + '，请在编辑页配别名', 'ok');
         setTimeout(function() {
           window.location.href = API + '/workspace/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(dd.config.id) + '/edit';
         }, 300);
       });
     })
-    .catch(function(e) { showMsg('建派生配置异常: ' + e.message, 'err'); });
+    .catch(function(e) { showMsg('建别名配置异常: ' + e.message, 'err'); });
 }
 
 // 新建 normal 终端（基于 active config）
@@ -106,12 +106,12 @@ function newTerminal(wsId) {
     })
     .catch(function(e) { showMsg('新建终端异常: ' + e.message, 'err'); });
 }
-// 新建派生终端
+// 新建别名终端
 function newDerivedTerminal(wsId, cfgId) {
   fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/terminals', { method: 'POST' })
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (d.error) { showMsg('新建派生终端失败: ' + d.error, 'err'); return; }
+      if (d.error) { showMsg('新建别名终端失败: ' + d.error, 'err'); return; }
       window.open(API + '/terminal/' + encodeURIComponent(d.terminalId), '_blank');
       loadList();
     })
@@ -219,12 +219,12 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   var derivedOf = {};
   configs.forEach(function(c){ if (c.derivedFrom !== undefined) { (derivedOf[c.derivedFrom] = derivedOf[c.derivedFrom] || []).push(c); } });
 
-  // Local LLM Configs 分组
+  // 配置 分组
   var cfgGroup = document.createElement('div');
   cfgGroup.className = 'group';
   var cfgTitle = document.createElement('div');
   cfgTitle.className = 'group-title';
-  cfgTitle.textContent = 'Local LLM Configs（' + parents.length + '）';
+  cfgTitle.textContent = '配置（' + parents.length + '）';
   cfgGroup.appendChild(cfgTitle);
 
   // 新建配置链接
@@ -250,18 +250,18 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   }
   body.appendChild(cfgGroup);
 
-  // Terminals 分组（列全部终端：normal + derived 统一挂这里）
+  // 终端 分组（列全部终端：静态 + 别名 统一挂这里）
   var termGroup = document.createElement('div');
   termGroup.className = 'group';
   var termTitle = document.createElement('div');
   termTitle.className = 'group-title';
-  termTitle.textContent = 'Terminals（' + normalTerms.length + '）';
+  termTitle.textContent = '终端（' + normalTerms.length + '）';
   termGroup.appendChild(termTitle);
 
   var newTermBtn = document.createElement('button');
   newTermBtn.className = 'cfg-new-term';
   newTermBtn.textContent = '+ 新建终端';
-  newTermBtn.title = '基于当前 active normal 配置启动';
+  newTermBtn.title = '基于默认配置启动';
   newTermBtn.onclick = function() { newTerminal(ws.id); };
   termGroup.appendChild(newTermBtn);
 
@@ -271,7 +271,7 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   if (normalTerms.length === 0) {
     var tHint = document.createElement('div');
     tHint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
-    tHint.textContent = '（先激活一个 normal 配置，再点「新建终端」）';
+    tHint.textContent = '（先标记一个默认配置，再点「新建终端」）';
     termGroup.appendChild(tHint);
   }
   body.appendChild(termGroup);
@@ -292,37 +292,31 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
   var editLink = document.createElement('a');
   editLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/edit';
   editLink.className = 'cfg-link';
-  var label = (isDerived ? '  ↳ ' : '· ') + (cfg.name || cfg.id) + ' [mode=' + (cfg.mode || 'direct') + ']';
-  if (isDerived && cfg.derivedIndex) label += '  #' + cfg.derivedIndex;
+  var modeLabel = (cfg.mode === 'proxy') ? '[代理]' : '[直连]';
+  var label = (isDerived ? '  ↳ 别名配置 #' + (cfg.derivedIndex || '') + '  ' + (cfg.name || cfg.id) : '· ' + (cfg.name || cfg.id) + ' ' + modeLabel);
   editLink.textContent = label;
   row.appendChild(editLink);
-  if (isDerived) {
-    var tag = document.createElement('span');
-    tag.className = 'derived-tag';
-    tag.textContent = 'derived';
-    row.appendChild(tag);
-  }
-  // 激活态/按钮仅 normal 配置（派生配置不能 active，走 env 不读 settings.json）
+  // 默认配置标记（目标2：激活弱化为只写标记，不写 settings.json）
   if (!isDerived) {
     if (isActive) {
       var badge = document.createElement('span');
       badge.className = 'active-badge';
-      badge.textContent = '✓ 已激活';
+      badge.textContent = '✓ 默认';
       row.appendChild(badge);
     } else {
       var actBtn = document.createElement('button');
       actBtn.className = 'cfg-act';
-      actBtn.textContent = '激活';
+      actBtn.textContent = '设为默认';
       actBtn.onclick = function() { activateCfg(ws.id, cfg.id, actBtn); };
       row.appendChild(actBtn);
     }
   }
-  // normal 配置：可新建派生配置
+  // 静态配置：可新建别名配置
   if (!isDerived) {
     var derBtn = document.createElement('button');
     derBtn.className = 'cfg-new-term';
-    derBtn.textContent = '+ 派生';
-    derBtn.title = '基于此配置创建派生节点（env 注入别名，运行时可改模型）';
+    derBtn.textContent = '+ 别名配置';
+    derBtn.title = '基于此配置创建别名配置（env 注入别名，运行时可改模型）';
     derBtn.onclick = function() { newDerivedConfig(ws.id, cfg.id, cfg.name); };
     row.appendChild(derBtn);
   }
@@ -344,11 +338,12 @@ function buildTerminalRow(t) {
   link.href = API + '/terminal/' + encodeURIComponent(t.terminalId);
   link.className = 'term-link';
   link.target = '_blank';
-  link.textContent = '🖥 terminal ' + t.terminalId + (t.startedConfigName ? ' (' + t.startedConfigName + ')' : '');
+  var kindLabel = t.kind === 'derived' ? '[别名]' : '[静态]';
+  link.textContent = '🖥 ' + kindLabel + ' ' + t.terminalId + (t.startedConfigName ? ' (' + t.startedConfigName + ')' : '');
   row.appendChild(link);
   var meta = document.createElement('span');
   meta.style.cssText = 'color:#888';
-  meta.textContent = 'pid=' + t.pid + '  ' + (t.kind || '');
+  meta.textContent = 'pid=' + t.pid;
   row.appendChild(meta);
   var stopBtn = document.createElement('button');
   stopBtn.className = 'danger';
@@ -577,7 +572,7 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
 </div>
 <div class="row">
   <label>连接模式</label>
-  ${isDerived ? `<div class="hint">派生节点强制代理模式（别名经代理重写为真实模型）</div><input type="hidden" id="mode" value="proxy" />`
+  ${isDerived ? `<div class="hint">别名配置强制代理模式（别名经代理重写为真实模型）</div><input type="hidden" id="mode" value="proxy" />`
     : `<label style="font-weight:normal"><input type="radio" name="mode" value="direct" ${mode === 'direct' ? 'checked' : ''} /> 直连</label>
        <label style="font-weight:normal"><input type="radio" name="mode" value="proxy" ${mode === 'proxy' ? 'checked' : ''} /> 通过代理</label>`}
 </div>
@@ -585,7 +580,7 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
 <div class="row">
   <label for="content">settings.json content${isDerived ? '（只读·继承父）' : ''}</label>
   <textarea id="content" spellcheck="false" ${isDerived ? 'readonly' : ''}>${escapeHtml(content)}</textarea>
-  <div class="hint">${isDerived ? '派生节点继承父配置 content，不可编辑。' : '切换配置时写入 .claude_proxy/settings.json（direct）或作为代理上游（proxy）。'}</div>
+  <div class="hint">${isDerived ? '别名配置继承父配置 content，不可编辑。' : '切换配置时写入 .claude_proxy/settings.json（direct）或作为代理上游（proxy）。'}</div>
 </div>
 <div id="error" aria-live="polite"></div>
 <div class="actions">

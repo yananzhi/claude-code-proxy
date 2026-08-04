@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HTML_JS = resolve(__dirname, '..', '..', 'standalone', 'web', 'workspaces-html.js');
-const { buildWorkspacesHtml, buildTerminalHtml } = await import(pathToFileURL(HTML_JS).href);
+const { buildWorkspacesHtml, buildTerminalHtml, buildConfigEditorHtml } = await import(pathToFileURL(HTML_JS).href);
 
 // ════════════════════════════════════════════════════════════
 // T1 树状结构 + 终端路由
@@ -41,11 +41,11 @@ test('T1d: 派生配置终端入口（POST /api/workspaces/:id/configs/:cfgId/te
     assert.ok(html.match(/\/configs\/.*\/terminals/), '应有 /configs/:cfgId/terminals 入口');
 });
 
-test('T1g: normal 配置有「+ 派生」入口（newDerivedConfig + next-alias-id）', () => {
+test('T1g: 静态配置有「+ 别名配置」入口（newDerivedConfig + next-alias-id）', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
     assert.ok(html.includes('newDerivedConfig'), '应有 newDerivedConfig 函数');
-    assert.ok(html.includes('+ 派生'), 'normal 配置行应有「+ 派生」按钮');
-    assert.ok(html.includes('/next-alias-id'), '建派生应取 next-alias-id');
+    assert.ok(html.includes('+ 别名配置'), '静态配置行应有「+ 别名配置」按钮');
+    assert.ok(html.includes('/next-alias-id'), '建别名配置应取 next-alias-id');
 });
 
 test('T1h: 别名终端统一挂终端组（不再过滤 derived）', () => {
@@ -102,7 +102,7 @@ test('T1h5: buildTerminalRow 透传 t.kind（类型标记不丢失）', () => {
 test('T1h6: 终端组标题计数用 normalTerms.length（含别名终端）', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
     // 标题应引用 normalTerms.length（全部终端），非 normalOnly.length（过滤后）
-    assert.ok(/Terminals（'\s*\+\s*normalTerms\.length/.test(html),
+    assert.ok(/终端（'\s*\+\s*normalTerms\.length/.test(html),
         '终端组标题计数应用 normalTerms.length（含别名终端）');
     assert.ok(!/normalOnly\.length/.test(html), '不应残留 normalOnly.length 计数');
 });
@@ -130,11 +130,12 @@ test('T1h8: buildDerivedConfigRow 不创建终端子节点容器', () => {
     assert.ok(!/\.forEach/.test(drMatch[0]), 'buildDerivedConfigRow 不应遍历终端');
 });
 
-test('T1i: 派生配置不显示「激活」按钮（派生不能 active）', () => {
+test('T1i: 静态配置显示「设为默认」按钮（别名配置不显示，标记仅静态可用）', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
-    // 激活按钮逻辑应被 !isDerived 守卫
-    assert.ok(html.match(/if\s*\(!isDerived\)\s*\{[^}]*激活/s) || html.includes('激活态/按钮仅 normal'),
-        '激活按钮应仅 normal 配置显示');
+    // 有"设为默认"按钮文案，且有 !isDerived 守卫（只在静态配置显示）
+    assert.ok(html.includes('设为默认'), '应有「设为默认」按钮文案');
+    assert.ok(/if\s*\(!isDerived\)/.test(html), '设为默认按钮应有 !isDerived 守卫');
+    assert.ok(!html.includes("'激活'") && !html.includes('"激活"'), '不应残留旧「激活」文案');
 });
 
 test('T1e: 不含旧 /workspace/:id/terminal 链接', () => {
@@ -145,6 +146,41 @@ test('T1e: 不含旧 /workspace/:id/terminal 链接', () => {
 test('T1f: 终端节点打开走 /terminal/:tid', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
     assert.ok(html.includes('/terminal/'), '终端节点应链接到 /terminal/:tid');
+});
+
+// ════════════════════════════════════════════════════════════
+// T1w 文案统一（目标5）：无"派生/derived/Local LLM Configs"残留（用户可见处）
+// ════════════════════════════════════════════════════════════
+test('T1w1: 主列表页无"Local LLM Configs"/"Terminals（"英文残留', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(!html.includes('Local LLM Configs'), '不应残留 Local LLM Configs');
+    assert.ok(!/Terminals（/.test(html), '不应残留 Terminals（ 英文分组标题');
+});
+test('T1w2: 主列表页无"派生配置/派生节点/derived 标签"残留（用户可见文案）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    // 排除代码标识符（derivedFrom/derivedIndex/buildDerivedConfigRow 等），只查用户可见文案
+    // 用户可见的：textContent/label/提示信息里的"派生"
+    assert.ok(!html.includes("'派生") && !html.includes('"派生'), '不应有派生字样的用户可见文案');
+    assert.ok(!html.includes("tag.textContent = 'derived'"), '不应有 derived 文字标签');
+    assert.ok(!html.includes('[mode='), '配置行不应残留 [mode=...] 显示');
+});
+test('T1w3: 终端行标 [静态]/[别名] 标签', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(html.includes('[静态]'), '静态终端应标 [静态]');
+    assert.ok(html.includes('[别名]'), '别名终端应标 [别名]');
+});
+test('T1w4: 配置行显示 [直连]/[代理] 徽标', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(html.includes('[直连]'), '直连配置应标 [直连]');
+    assert.ok(html.includes('[代理]'), '代理配置应标 [代理]');
+});
+test('T1w5: 别名配置编辑页无"派生节点"残留', () => {
+    const html = buildConfigEditorHtml({
+        workspaceId: 'w', workspaceName: 'ws', apiBase: '',
+        config: { id: 'c', name: 'd', derivedFrom: 'p', derivedIndex: 1, content: '{}', mode: 'proxy', modelAliases: {}, sessionContext1m: {} },
+    });
+    assert.ok(!html.includes('派生节点'), '别名配置编辑页不应残留"派生节点"');
+    assert.ok(html.includes('别名配置'), '别名配置编辑页应有"别名配置"文案');
 });
 
 // ════════════════════════════════════════════════════════════
