@@ -279,7 +279,9 @@ export async function launchStandalone(opts = {}) {
     // management API server（workspace 管理 + 网页）
     const { startManagementServer } = await import('./managementServer.js');
     const proxyPort = readListenPort(configPath) || platformPort(process.platform);
-    const mgmtPort = opts.mgmtPort || Number(process.env.CCP_MGMT_PORT) || (platformPort(process.platform) + 100);
+    // management 端口跟随实际 proxy 端口 +100（而非 platformPort+100），
+    // 否则 proxy 用了非默认端口（如 11444）时 management 仍落在 11534 不跟随。
+    const mgmtPort = opts.mgmtPort || Number(process.env.CCP_MGMT_PORT) || (proxyPort + 100);
     let mgmt = null;
     try {
         mgmt = await startManagementServer({ homeDir: opts.homeDir, port: mgmtPort, proxyPort, log });

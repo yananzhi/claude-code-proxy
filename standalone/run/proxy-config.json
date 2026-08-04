@@ -1,0 +1,21 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "",
+    "ANTHROPIC_BASE_URL": "",
+    "API_TIMEOUT_MS": "600000",
+    "ANTHROPIC_MODEL": ""
+  },
+  "effortLevel": "max",
+  "proxy": {
+    "listenHost": "127.0.0.1",
+    "listenPort": 11444,
+    "maxAttempts": 20,
+    "backoffSec": 3,
+    "backoffMaxSec": 16,
+    "passthrough": false,
+    "retryRules": [
+      { "status": 503, "code": 10310 },
+      { "status": 200, "code": 10310 }
+    ]
+  }
+}

@@ -7,3 +7,13 @@ mock/config.*test*.json
 .test-tmp/
 .claude_proxy/
 .claude/
+
+# standalone/run/ 是本地 CCP_HOME（跑验证脚本时的运行时数据：logs/、workspaces.json、*.pid、*.log 等）。
+# proxy-config.json 作为模板提交（端口 11444 + 空 upstream），用户填真实 token 后本地改动不跟踪（防泄露）。
+# *.sh 脚本也提交（跨平台验证脚本）。
+standalone/run/*
+!standalone/run/.gitkeep
+!standalone/run/proxy-config.json
+!standalone/run/run-dev.sh
+!standalone/run/run-global.sh
+!standalone/run/stop.sh
