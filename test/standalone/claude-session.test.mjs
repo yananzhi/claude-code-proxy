@@ -277,6 +277,22 @@ test('D4f: listByWorkspace → 返回该 workspace 的活终端', async () => {
     await mgr.stopAll();
 });
 
+// 目标4 关键保证：别名终端（kind='derived'）也由 listByWorkspace 返回。
+// 终端组统一列全部终端（含别名），前提是 listByWorkspace 不按 kind 过滤。
+// 若此测试失败 → "统一挂终端组"是假的（别名终端不会出现在终端组）。
+test('D4f-derived: listByWorkspace 含别名终端（kind=derived 不过滤）', async () => {
+    const mockPty = makeMockPty();
+    const mgr = new ClaudeSessionManager({ log: () => {}, pty: mockPty });
+    await mgr.start('tn', makeStartParams({ workspaceId: 'wsA', configId: 'c1', kind: 'normal' }));
+    await mgr.start('td', makeStartParams({ workspaceId: 'wsA', configId: 'c2', kind: 'derived' }));
+    const terms = mgr.listByWorkspace('wsA');
+    assert.equal(terms.length, 2, 'listByWorkspace 应返回 normal + derived 两个终端');
+    const derived = terms.find(t => t.kind === 'derived');
+    assert.ok(derived, 'listByWorkspace 应含 kind=derived 的别名终端');
+    assert.equal(derived.terminalId, 'td');
+    await mgr.stopAll();
+});
+
 test('D4g: listByConfig → 返回该 config 的活终端', async () => {
     const mockPty = makeMockPty();
     const mgr = new ClaudeSessionManager({ log: () => {}, pty: mockPty });

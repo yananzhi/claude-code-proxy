@@ -250,13 +250,12 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   }
   body.appendChild(cfgGroup);
 
-  // Terminals 分组（只列 normal 终端；派生终端挂在各自派生配置节点下）
-  var normalOnly = normalTerms.filter(function(t){ return t.kind !== 'derived'; });
+  // Terminals 分组（列全部终端：normal + derived 统一挂这里）
   var termGroup = document.createElement('div');
   termGroup.className = 'group';
   var termTitle = document.createElement('div');
   termTitle.className = 'group-title';
-  termTitle.textContent = 'Terminals（' + normalOnly.length + '）';
+  termTitle.textContent = 'Terminals（' + normalTerms.length + '）';
   termGroup.appendChild(termTitle);
 
   var newTermBtn = document.createElement('button');
@@ -266,10 +265,10 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   newTermBtn.onclick = function() { newTerminal(ws.id); };
   termGroup.appendChild(newTermBtn);
 
-  normalOnly.forEach(function(t) {
+  normalTerms.forEach(function(t) {
     termGroup.appendChild(buildTerminalRow(t));
   });
-  if (normalOnly.length === 0) {
+  if (normalTerms.length === 0) {
     var tHint = document.createElement('div');
     tHint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
     tHint.textContent = '（先激活一个 normal 配置，再点「新建终端」）';
@@ -278,38 +277,11 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   body.appendChild(termGroup);
 }
 
-// 派生配置行：可展开，下挂该派生配置的终端子节点（异步加载）
+// 派生配置行：只渲染配置本身（终端统一挂终端组，不再挂配置节点下）
 function buildDerivedConfigRow(ws, cfg) {
   var wrapper = document.createElement('div');
-  // 配置行本身
   var row = buildConfigRow(ws, cfg, null, true);
   wrapper.appendChild(row);
-  // 终端子节点容器
-  var termBox = document.createElement('div');
-  termBox.className = 'derived-terms';
-  termBox.style.cssText = 'margin-left:44px';
-  termBox.textContent = '终端加载中...';
-  wrapper.appendChild(termBox);
-  // 异步加载该派生配置的活终端
-  fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/terminals')
-    .then(function(r){return r.json();})
-    .then(function(d) {
-      var terms = (d && d.terminals) || [];
-      termBox.textContent = '';
-      if (terms.length === 0) {
-        var hint = document.createElement('div');
-        hint.style.cssText = 'color:#999;font-size:0.78rem';
-        hint.textContent = '（无终端，点上方「新建终端」开启）';
-        termBox.appendChild(hint);
-        return;
-      }
-      terms.forEach(function(t) {
-        var r2 = buildTerminalRow(t);
-        r2.style.marginLeft = '0';
-        termBox.appendChild(r2);
-      });
-    })
-    .catch(function() { termBox.textContent = '终端加载失败'; });
   return wrapper;
 }
 
