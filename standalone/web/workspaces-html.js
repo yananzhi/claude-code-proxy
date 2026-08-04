@@ -236,10 +236,10 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
 
   parents.forEach(function(cfg) {
     cfgGroup.appendChild(buildConfigRow(ws, cfg, activeId, false));
-    // 派生配置挂父下
+    // 派生配置挂父下（派生配置可展开，下挂其派生终端）
     var deriveds = derivedOf[cfg.id] || [];
     deriveds.forEach(function(dc) {
-      cfgGroup.appendChild(buildConfigRow(ws, dc, activeId, true));
+      cfgGroup.appendChild(buildDerivedConfigRow(ws, dc));
     });
   });
   if (parents.length === 0) {
@@ -250,12 +250,13 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   }
   body.appendChild(cfgGroup);
 
-  // Terminals 分组（normal 终端挂 workspace 下，名带启动配置名）
+  // Terminals 分组（只列 normal 终端；派生终端挂在各自派生配置节点下）
+  var normalOnly = normalTerms.filter(function(t){ return t.kind !== 'derived'; });
   var termGroup = document.createElement('div');
   termGroup.className = 'group';
   var termTitle = document.createElement('div');
   termTitle.className = 'group-title';
-  termTitle.textContent = 'Terminals（' + normalTerms.length + '）';
+  termTitle.textContent = 'Terminals（' + normalOnly.length + '）';
   termGroup.appendChild(termTitle);
 
   var newTermBtn = document.createElement('button');
@@ -265,16 +266,51 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   newTermBtn.onclick = function() { newTerminal(ws.id); };
   termGroup.appendChild(newTermBtn);
 
-  normalTerms.forEach(function(t) {
+  normalOnly.forEach(function(t) {
     termGroup.appendChild(buildTerminalRow(t));
   });
-  if (normalTerms.length === 0) {
+  if (normalOnly.length === 0) {
     var tHint = document.createElement('div');
     tHint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
     tHint.textContent = '（先激活一个 normal 配置，再点「新建终端」）';
     termGroup.appendChild(tHint);
   }
   body.appendChild(termGroup);
+}
+
+// 派生配置行：可展开，下挂该派生配置的终端子节点（异步加载）
+function buildDerivedConfigRow(ws, cfg) {
+  var wrapper = document.createElement('div');
+  // 配置行本身
+  var row = buildConfigRow(ws, cfg, null, true);
+  wrapper.appendChild(row);
+  // 终端子节点容器
+  var termBox = document.createElement('div');
+  termBox.className = 'derived-terms';
+  termBox.style.cssText = 'margin-left:44px';
+  termBox.textContent = '终端加载中...';
+  wrapper.appendChild(termBox);
+  // 异步加载该派生配置的活终端
+  fetch(API + '/api/workspaces/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/terminals')
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      var terms = (d && d.terminals) || [];
+      termBox.textContent = '';
+      if (terms.length === 0) {
+        var hint = document.createElement('div');
+        hint.style.cssText = 'color:#999;font-size:0.78rem';
+        hint.textContent = '（无终端，点上方「新建终端」开启）';
+        termBox.appendChild(hint);
+        return;
+      }
+      terms.forEach(function(t) {
+        var r2 = buildTerminalRow(t);
+        r2.style.marginLeft = '0';
+        termBox.appendChild(r2);
+      });
+    })
+    .catch(function() { termBox.textContent = '终端加载失败'; });
+  return wrapper;
 }
 
 function buildConfigRow(ws, cfg, activeId, isDerived) {
@@ -294,17 +330,20 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
     tag.textContent = 'derived';
     row.appendChild(tag);
   }
-  if (isActive) {
-    var badge = document.createElement('span');
-    badge.className = 'active-badge';
-    badge.textContent = '✓ 已激活';
-    row.appendChild(badge);
-  } else {
-    var actBtn = document.createElement('button');
-    actBtn.className = 'cfg-act';
-    actBtn.textContent = '激活';
-    actBtn.onclick = function() { activateCfg(ws.id, cfg.id, actBtn); };
-    row.appendChild(actBtn);
+  // 激活态/按钮仅 normal 配置（派生配置不能 active，走 env 不读 settings.json）
+  if (!isDerived) {
+    if (isActive) {
+      var badge = document.createElement('span');
+      badge.className = 'active-badge';
+      badge.textContent = '✓ 已激活';
+      row.appendChild(badge);
+    } else {
+      var actBtn = document.createElement('button');
+      actBtn.className = 'cfg-act';
+      actBtn.textContent = '激活';
+      actBtn.onclick = function() { activateCfg(ws.id, cfg.id, actBtn); };
+      row.appendChild(actBtn);
+    }
   }
   // normal 配置：可新建派生配置
   if (!isDerived) {

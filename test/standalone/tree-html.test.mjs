@@ -48,6 +48,22 @@ test('T1g: normal 配置有「+ 派生」入口（newDerivedConfig + next-alias-
     assert.ok(html.includes('/next-alias-id'), '建派生应取 next-alias-id');
 });
 
+test('T1h: 派生终端挂派生配置下（buildDerivedConfigRow + listByConfig fetch）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(html.includes('buildDerivedConfigRow'), '应有 buildDerivedConfigRow（派生配置带终端子节点）');
+    // 派生配置下应 fetch /configs/:cfgId/terminals
+    assert.ok(html.match(/\/configs\/.*\/terminals/), '派生配置下应 fetch 该 config 的终端列表');
+    // workspace Terminals 分组应过滤掉 derived（kind !== "derived"）
+    assert.ok(html.includes("t.kind !== 'derived'"), 'workspace Terminals 应过滤派生终端');
+});
+
+test('T1i: 派生配置不显示「激活」按钮（派生不能 active）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    // 激活按钮逻辑应被 !isDerived 守卫
+    assert.ok(html.match(/if\s*\(!isDerived\)\s*\{[^}]*激活/s) || html.includes('激活态/按钮仅 normal'),
+        '激活按钮应仅 normal 配置显示');
+});
+
 test('T1e: 不含旧 /workspace/:id/terminal 链接', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
     assert.ok(!html.match(/\/workspace\/.*\/terminal/), '不应残留旧 /workspace/:id/terminal 链接');
