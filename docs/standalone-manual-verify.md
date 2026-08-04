@@ -19,6 +19,64 @@ node -e "require('node-pty'); require('ws'); console.log('deps OK')"
 claude --version  # 或 where claude / which claude
 ```
 
+## ⚙ 指定端口验证（不关正在运行的插件）——推荐先用这个
+
+**场景**：你的 VS Code 插件代理正占着默认端口 11434，不想关它，又想验证独立后端。
+
+**关键概念**：
+- **CCP_HOME**：独立后端的根目录环境变量，所有数据放它下面（`proxy-config.json` / `logs/` / `workspaces.json`）。不设时默认 `~/.claude-code-proxy/`（即 `C:\Users\HONOR\.claude-code-proxy\`）。
+- **proxy.listenPort**：`$CCP_HOME/proxy-config.json` 里的字段，决定代理转发端口。
+- **management 端口** = proxy 端口 + 100（固定，无单独配置项，见 `standalone/ports.js`）。
+- 默认端口 win32→11434/11534，和你 VS Code 插件代理撞 → 必须**换端口**。
+
+**步骤**：预设一个临时 CCP_HOME + 临时端口（如 11444，management 自动 11544），三全其美：不碰插件配置、不撞插件端口、用完即删。
+
+```bash
+# 1. 建临时目录 + 预设端口 11444 的 proxy-config.json
+#    （Windows bash / WSL / git-bash 都行；纯 PowerShell 用下面的等价命令）
+mkdir -p /tmp/ccp-test
+cat > /tmp/ccp-test/proxy-config.json <<'JSON'
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "你的真实token",
+    "ANTHROPIC_BASE_URL": "你的真实上游",
+    "API_TIMEOUT_MS": "600000",
+    "ANTHROPIC_MODEL": "你的真实model"
+  },
+  "effortLevel": "max",
+  "proxy": {
+    "listenHost": "127.0.0.1",
+    "listenPort": 11444,
+    "maxAttempts": 20,
+    "backoffSec": 3,
+    "backoffMaxSec": 16,
+    "passthrough": false,
+    "retryRules": [{"status":503,"code":10310},{"status":200,"code":10310}]
+  }
+}
+JSON
+
+# 2. 启动（CCP_HOME 指向临时目录）
+CCP_HOME=/tmp/ccp-test node standalone/cli.js
+```
+
+启动后：
+- 代理转发：http://127.0.0.1:11444/
+- **management 网页**（workspace 管理 + 配置编辑 + CLI 终端）：http://127.0.0.1:11544/（= 11444+100）
+- 你插件的 11434 完全不受影响 ✅
+
+> **Windows 纯 PowerShell 等价命令**（heredoc 在 PS 里语法不同）：
+> ```powershell
+> New-Item -ItemType Directory -Force C:\tmp\ccp-test | Out-Null
+> @'
+> { "env": { "ANTHROPIC_AUTH_TOKEN":"你的token", "ANTHROPIC_BASE_URL":"你的上游", "API_TIMEOUT_MS":"600000", "ANTHROPIC_MODEL":"你的model" }, "effortLevel":"max", "proxy": { "listenHost":"127.0.0.1", "listenPort":11444, "maxAttempts":20, "backoffSec":3, "backoffMaxSec":16, "passthrough":false, "retryRules":[{"status":503,"code":10310},{"status":200,"code":10310}] } }
+> '@ | Set-Content C:\tmp\ccp-test\proxy-config.json -Encoding UTF8
+> $env:CCP_HOME = "C:\tmp\ccp-test"
+> node standalone/cli.js
+> ```
+
+> **不想填真实 upstream？** 直接留空（`"ANTHROPIC_BASE_URL":""`）也能起后端，management 网页/配置编辑/CLI 终端都能验证，只是真发 LLM 请求会失败（用来验证转发链路足够）。
+
 ## 方式 A：直接 node 跑（开发自测，最快）
 
 ```bash
@@ -56,6 +114,8 @@ npm uninstall -g claude-code-proxy
 ```
 
 ## 验证清单（逐项手动确认）
+
+> 以下端口按默认 11434/11534 写。若你按上面「指定端口验证」用了 11444，请把 11434→11444、11534→11544 替换。
 
 启动后端后，浏览器打开 **http://127.0.0.1:11534/**（management 端口，workspace 管理页）。
 
