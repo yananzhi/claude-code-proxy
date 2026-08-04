@@ -336,6 +336,35 @@ export async function getActiveConfig(manager, workspaceId) {
 }
 
 /**
+ * 标记某 config 为 workspace 的默认配置（standalone 用，弱化版"激活"）。
+ *
+ * 终端统一走 env 后（目标1），起终端不再依赖 settings.json，激活从"写 settings +
+ * 注入 upstream + permissions/gitignore"降级为"只写默认配置标记"——仅影响
+ * 「+ 新建终端」下拉的默认高亮项。无文件副作用。
+ *
+ * 与 activateConfig 的区别：
+ * - 不写 settings.json、不注入代理 upstream、不碰 permissions/gitignore
+ * - 不校验 content 有效（标记只是指针，config 可后编辑；启动时 buildTerminalEnv 才校验）
+ * - 派生配置也可标记（旧约束"派生不能 active"针对的是"派生不写 settings"，现已都不写）
+ *
+ * activateConfig 原函数保留给 VS Code 侧（claudeLauncher 仍写 settings）。
+ *
+ * @returns {Promise<{ marked: true, cfgId, mode }>}
+ * @throws {NotFoundError} workspace/config 不存在
+ */
+export async function markDefaultConfig(manager, workspaceId, cfgId) {
+    const ws = await manager.get(workspaceId);
+    if (!ws) throw new NotFoundError(`workspace 不存在: ${workspaceId}`);
+    const store = new LocalConfigStore(ws.dir);
+    const cfg = await store.get(cfgId);
+    if (!cfg) throw new NotFoundError(`config 不存在: ${cfgId}`);
+    const mode = cfg.mode === 'proxy' ? 'proxy' : 'direct';
+    const activeStore = new LocalActiveStateStore(ws.dir);
+    await activeStore.write(cfgId, mode);
+    return { marked: true, cfgId, mode };
+}
+
+/**
  * 转发请求到 proxy（别名即时生效 / upstream 注入）。
  * @param proxyPort proxy 端口
  * @param proxyPath 路径（如 /api/model-alias）

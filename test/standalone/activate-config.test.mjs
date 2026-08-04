@@ -1,20 +1,20 @@
-// test/standalone/activate-config.test.mjs — 阶段6: 激活 local config 测试
+// test/standalone/activate-config.test.mjs — 阶段6: 激活弱化为默认配置标记测试
 //
 // 运行：node --test test/standalone/activate-config.test.mjs
 //
-// 维度覆盖（见 plan/tmp/2026-08-04-stage6-activate-config.md）：
-//   D1 direct 模式激活
-//   D2 proxy 模式激活（用真 proxy 11434，若被占则跳过成功路径，只测 502）
-//   D3 upstream 注入失败
-//   D4 timeout 转换
-//   D5 active 标记
-//   D6 permissions + gitignore
-//   D7 不存在/错误路径
+// 重设计（目标2）：终端统一走 env 后，激活从"写 settings.json + 注入 upstream +
+// permissions/gitignore"降级为"只写默认配置标记"。
+// activateConfig 原函数保留给 VS Code 侧，standalone 路由改调 markDefaultConfig。
+//
+// 维度覆盖（见 plan/tmp/2026-08-04-goal2-activate-weaken.md）：
+//   A 标记行为（正常/404/派生可标记）
+//   B 副作用零（不写 settings.json/permissions/gitignore/不注入 upstream）
+//   C 标记读取（GET /active）
+//   D 幂等
+//   E 边界（content 非法/缺字段仍可标记）
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -28,9 +28,7 @@ let mgmtSeq = 0;
 async function startMgmt(label, opts = {}) {
     const home = mkdtempSync(join(tmpdir(), `s6-${label}-`));
     const port = 12000 + (mgmtSeq++ % 40);
-    // ⚠ proxyPort 默认用 19998（无人监听的端口），测试会得 502。
-    // 绝不用真实代理端口 11434——会污染用户正在运行的插件代理进程（upstream last-write-wins + 落盘）。
-    // proxy 模式成功路径（D2）改为独立临时端口起临时代理子进程，不碰用户真实代理。
+    // proxyPort 默认 19998（无人监听）——标记不调代理，proxyPort 仅占位
     const handle = await startManagementServer({ homeDir: home, port, proxyPort: opts.proxyPort ?? 19998 });
     return { handle, home, port };
 }
@@ -53,26 +51,30 @@ async function createConfig(port, wsId, cfg) {
     });
     return (await r.json()).config;
 }
+/** 手写派生 config 到 local-configs.json（绕过依赖代理 next-alias-id 的创建流程）。 */
+function injectDerivedConfig(proj, derivedCfg) {
+    const localCfgPath = join(proj, '.claude_proxy', 'local-configs.json');
+    const arr = JSON.parse(readFileSync(localCfgPath, 'utf8'));
+    arr.push(derivedCfg);
+    writeFileSync(localCfgPath, JSON.stringify(arr), 'utf8');
+}
 
 const DIRECT_CONTENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://direct-up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'm' } });
-const PROXY_CONTENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://real-up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm', API_TIMEOUT_MS: '600000' } });
 
 // ════════════════════════════════════════════════════════════
-// D1 direct 模式激活
+// A 标记行为
 // ════════════════════════════════════════════════════════════
-test('D1a: direct 激活 → writeSettings 原样 content + active 标记', async () => {
-    const { handle, port, home } = await startMgmt('d1a');
-    const { wsId, proj } = await createWorkspace(port, 'd1a');
+test('A1: 标记正常 config → marked:true + active 写入', async () => {
+    const { handle, port, home } = await startMgmt('a1');
+    const { wsId, proj } = await createWorkspace(port, 'a1');
     const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
     try {
         const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
         assert.equal(r.status, 200);
         const data = await r.json();
-        assert.equal(data.activated, true);
+        assert.equal(data.marked, true);
+        assert.equal(data.cfgId, cfg.id);
         assert.equal(data.mode, 'direct');
-        assert.ok(existsSync(join(proj, '.claude_proxy', 'settings.json')), 'settings.json 应生成');
-        const written = readFileSync(join(proj, '.claude_proxy', 'settings.json'), 'utf8');
-        assert.equal(JSON.parse(written).env.ANTHROPIC_BASE_URL, 'http://direct-up', 'direct 原样 content');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -80,17 +82,12 @@ test('D1a: direct 激活 → writeSettings 原样 content + active 标记', asyn
     }
 });
 
-// ════════════════════════════════════════════════════════════
-// D3 upstream 注入失败
-// ════════════════════════════════════════════════════════════
-test('D3a: proxy 模式 + proxy 不可达 → 502', async () => {
-    const { handle, port, home } = await startMgmt('d3a', { proxyPort: 19998 });
-    const { wsId, proj } = await createWorkspace(port, 'd3a');
-    const cfg = await createConfig(port, wsId, { name: 'p', mode: 'proxy', content: PROXY_CONTENT });
+test('A2: config 不存在 → 404', async () => {
+    const { handle, port, home } = await startMgmt('a2');
+    const { wsId, proj } = await createWorkspace(port, 'a2');
     try {
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        assert.equal(r.status, 502);
-        // 注入失败时 settings.json 不应写（或写失败前中止）
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/cfg_nope/activate`, { method: 'POST' });
+        assert.equal(r.status, 404);
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -98,37 +95,37 @@ test('D3a: proxy 模式 + proxy 不可达 → 502', async () => {
     }
 });
 
-test('D3b: proxy 模式缺 BASE_URL → 400', async () => {
-    const { handle, port, home } = await startMgmt('d3b');
-    const { wsId, proj } = await createWorkspace(port, 'd3b');
-    const cfg = await createConfig(port, wsId, { name: 'p', mode: 'proxy', content: JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 't' } }) });
+test('A3: workspace 不存在 → 404', async () => {
+    const { handle, port, home } = await startMgmt('a3');
     try {
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        assert.equal(r.status, 400);
-        assert.match((await r.json()).error, /BASE_URL|TOKEN/);
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/ws_nope/configs/cfg_nope/activate`, { method: 'POST' });
+        assert.equal(r.status, 404);
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
     }
 });
 
-test('D3c: proxy 模式 content 非 JSON → 400', async () => {
-    // 先建一个合法 config，再手改 local-configs.json 让 content 坏？复杂。
-    // 改用：建 direct config 后改 mode 不好。直接用 updateLocalConfig 传坏 content 会被拦。
-    // 这里测 activate 时 content 坏：通过 updateLocalConfig 改 content 为坏 JSON（update 校验会拦）。
-    // 所以 activate 拿到的 content 一定是合法 JSON（create/update 都校验了）。
-    // 此用例实际不可达（content 总是合法 JSON），跳过——记录为设计保证。
-    // 改测：direct 激活坏 content 也会 writeSettings 原样（direct 不校验 JSON）。
-    // 实际上 create 时就校验了 JSON，所以 activate 时 content 必合法。
-    // 用一个边界：proxy 模式 content 合法但 env 不存在
-    const { handle, port, home } = await startMgmt('d3c');
-    const { wsId, proj } = await createWorkspace(port, 'd3c');
-    const cfg = await createConfig(port, wsId, { name: 'p', mode: 'proxy', content: JSON.stringify({ foo: 'bar' }) });
+test('A4: 派生配置可标记为默认（标记只是指针，与旧"派生不能 active"约束无关）', async () => {
+    const { handle, port, home } = await startMgmt('a4');
+    const { wsId, proj } = await createWorkspace(port, 'a4');
+    const parent = await createConfig(port, wsId, { name: 'parent', mode: 'proxy', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm' } }) });
+    // 手写派生 config（绕过依赖代理 next-alias-id 的创建流程）
+    const derivedId = 'derived-test-a4';
+    injectDerivedConfig(proj, {
+        id: derivedId, name: 'deriv', content: parent.content, mode: 'proxy',
+        updatedAt: '2026-01-01T00:00:00Z', derivedFrom: parent.id, derivedIndex: 1,
+        modelAliases: { main: 'pm' },
+        sessionContext1m: { main: false, haiku: false, sonnet: false, opus: false },
+        derivedSnapshot: { baseUrl: 'http://up', token: 'tok', mode: 'proxy' },
+    });
     try {
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        // env 不存在 → extractUpstream 返 {env:{}} → baseUrl 空 → 400
-        assert.equal(r.status, 400);
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}/activate`, { method: 'POST' });
+        assert.equal(r.status, 200);
+        const data = await r.json();
+        assert.equal(data.marked, true);
+        assert.equal(data.cfgId, derivedId);
+        assert.equal(data.mode, 'proxy');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -137,16 +134,79 @@ test('D3c: proxy 模式 content 非 JSON → 400', async () => {
 });
 
 // ════════════════════════════════════════════════════════════
-// D5 active 标记
+// B 副作用零（核心验证：不再写 settings.json/permissions/gitignore/不注入 upstream）
 // ════════════════════════════════════════════════════════════
-test('D5a: direct 激活后 GET /active 返回标记', async () => {
-    const { handle, port, home } = await startMgmt('d5a');
-    const { wsId, proj } = await createWorkspace(port, 'd5a');
+test('B1: 标记后 .claude_proxy/settings.json 不被创建', async () => {
+    const { handle, port, home } = await startMgmt('b1');
+    const { wsId, proj } = await createWorkspace(port, 'b1');
     const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
     try {
         await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/active`);
-        const data = await r.json();
+        assert.ok(!existsSync(join(proj, '.claude_proxy', 'settings.json')), '标记不应写 settings.json');
+        // .claude_proxy 目录可能因 workspace 注册时创建，但 settings.json 文件不应存在
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+test('B2: 标记后 .claude/settings.local.json 未被创建（无 permissions 写入）', async () => {
+    const { handle, port, home } = await startMgmt('b2');
+    const { wsId, proj } = await createWorkspace(port, 'b2');
+    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
+    try {
+        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        assert.ok(!existsSync(join(proj, '.claude', 'settings.local.json')), '标记不应写 .claude/settings.local.json');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+test('B3: 标记后 .gitignore 未被创建', async () => {
+    const { handle, port, home } = await startMgmt('b3');
+    const { wsId, proj } = await createWorkspace(port, 'b3');
+    mkdirSync(join(proj, '.git'), { recursive: true }); // 造 git 仓库（旧实现会写 .gitignore）
+    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
+    try {
+        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        assert.ok(!existsSync(join(proj, '.gitignore')), '标记不应创建 .gitignore');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+test('B4: 标记后代理无 upstream 注入（标记不调代理）', async () => {
+    // proxyPort 指向无人监听端口；若标记调代理会 ECONNREFUSED → 502。
+    // 期望 200（不调代理）。这是标记与旧 activateConfig 的本质区别。
+    const { handle, port, home } = await startMgmt('b4', { proxyPort: 19997 });
+    const { wsId, proj } = await createWorkspace(port, 'b4');
+    const cfg = await createConfig(port, wsId, { name: 'p', mode: 'proxy', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm' } }) });
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        assert.equal(r.status, 200, 'proxy 模式标记也不应调代理（不会 502）');
+        assert.ok(!existsSync(join(proj, '.claude_proxy', 'settings.json')));
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// ════════════════════════════════════════════════════════════
+// C 标记读取
+// ════════════════════════════════════════════════════════════
+test('C1: 标记后 GET /active 返回标记', async () => {
+    const { handle, port, home } = await startMgmt('c1');
+    const { wsId, proj } = await createWorkspace(port, 'c1');
+    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
+    try {
+        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        const data = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/active`)).json();
         assert.equal(data.active.id, cfg.id);
         assert.equal(data.active.mode, 'direct');
     } finally {
@@ -156,9 +216,9 @@ test('D5a: direct 激活后 GET /active 返回标记', async () => {
     }
 });
 
-test('D5c: 无激活 → GET /active 返回 null', async () => {
-    const { handle, port, home } = await startMgmt('d5c');
-    const { wsId, proj } = await createWorkspace(port, 'd5c');
+test('C2: 无标记 → GET /active 返回 null', async () => {
+    const { handle, port, home } = await startMgmt('c2');
+    const { wsId, proj } = await createWorkspace(port, 'c2');
     try {
         const data = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/active`)).json();
         assert.equal(data.active, null);
@@ -169,25 +229,9 @@ test('D5c: 无激活 → GET /active 返回 null', async () => {
     }
 });
 
-test('D5d: 重复激活同 config → active 标记不变（幂等）', async () => {
-    const { handle, port, home } = await startMgmt('d5d');
-    const { wsId, proj } = await createWorkspace(port, 'd5d');
-    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
-    try {
-        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        const data = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/active`)).json();
-        assert.equal(data.active.id, cfg.id);
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
-    }
-});
-
-test('D5e: 切换激活到另一 config → active 更新', async () => {
-    const { handle, port, home } = await startMgmt('d5e');
-    const { wsId, proj } = await createWorkspace(port, 'd5e');
+test('C3: 切换标记到另一 config → active 更新', async () => {
+    const { handle, port, home } = await startMgmt('c3');
+    const { wsId, proj } = await createWorkspace(port, 'c3');
     const cfg1 = await createConfig(port, wsId, { name: 'c1', mode: 'direct', content: DIRECT_CONTENT });
     const cfg2 = await createConfig(port, wsId, { name: 'c2', mode: 'direct', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://c2', ANTHROPIC_AUTH_TOKEN: 't' } }) });
     try {
@@ -203,36 +247,17 @@ test('D5e: 切换激活到另一 config → active 更新', async () => {
 });
 
 // ════════════════════════════════════════════════════════════
-// D6 permissions + gitignore
+// D 幂等
 // ════════════════════════════════════════════════════════════
-test('D6a: 激活时写 .claude/settings.local.json bypassPermissions', async () => {
-    const { handle, port, home } = await startMgmt('d6a');
-    const { wsId, proj } = await createWorkspace(port, 'd6a');
+test('D1: 重复标记同 config → active 不变（幂等）', async () => {
+    const { handle, port, home } = await startMgmt('d1');
+    const { wsId, proj } = await createWorkspace(port, 'd1');
     const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
     try {
         await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        const p = join(proj, '.claude', 'settings.local.json');
-        assert.ok(existsSync(p), '应写 .claude/settings.local.json');
-        const perms = JSON.parse(readFileSync(p, 'utf8')).permissions;
-        assert.equal(perms.defaultMode, 'bypassPermissions');
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
-    }
-});
-
-test('D6b: 已设别的 defaultMode → 不覆盖', async () => {
-    const { handle, port, home } = await startMgmt('d6b');
-    const { wsId, proj } = await createWorkspace(port, 'd6b');
-    // 预设 acceptEdits
-    mkdirSync(join(proj, '.claude'), { recursive: true });
-    writeFileSync(join(proj, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { defaultMode: 'acceptEdits' } }));
-    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
-    try {
         await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        const perms = JSON.parse(readFileSync(join(proj, '.claude', 'settings.local.json'), 'utf8')).permissions;
-        assert.equal(perms.defaultMode, 'acceptEdits', '应保留用户选择不覆盖');
+        const data = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/active`)).json();
+        assert.equal(data.active.id, cfg.id);
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -240,182 +265,180 @@ test('D6b: 已设别的 defaultMode → 不覆盖', async () => {
     }
 });
 
-test('D6c: git 仓库 → .gitignore 加 .claude_proxy/', async () => {
-    const { handle, port, home } = await startMgmt('d6c');
-    const { wsId, proj } = await createWorkspace(port, 'd6c');
-    mkdirSync(join(proj, '.git'), { recursive: true }); // 造 git 仓库
+// ════════════════════════════════════════════════════════════
+// E 边界（标记不校验 content，与旧 activateConfig 不同）
+// ════════════════════════════════════════════════════════════
+test('E1: content 非法 JSON 的 config 仍可标记（标记不校验 content）', async () => {
+    const { handle, port, home } = await startMgmt('e1');
+    const { wsId, proj } = await createWorkspace(port, 'e1');
+    // 先建合法 config，再手改 local-configs.json 让 content 坏
     const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
+    // 直接改 local-configs.json 让 content 变坏 JSON
+    const localCfgPath = join(proj, '.claude_proxy', 'local-configs.json');
+    const arr = JSON.parse(readFileSync(localCfgPath, 'utf8'));
+    arr[0].content = '{ not valid json';
+    writeFileSync(localCfgPath, JSON.stringify(arr), 'utf8');
     try {
-        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        const gi = readFileSync(join(proj, '.gitignore'), 'utf8');
-        assert.ok(gi.includes('.claude_proxy/'), '应加 .claude_proxy/ 到 .gitignore');
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
-    }
-});
-
-test('D6d: 非 git 仓库 → 不创建 .gitignore', async () => {
-    const { handle, port, home } = await startMgmt('d6d');
-    const { wsId, proj } = await createWorkspace(port, 'd6d');
-    // 不建 .git
-    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
-    try {
-        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        assert.ok(!existsSync(join(proj, '.gitignore')), '非 git 仓库不应创建 .gitignore');
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
-    }
-});
-
-// ════════════════════════════════════════════════════════════
-// D7 不存在/错误路径
-// ════════════════════════════════════════════════════════════
-test('D7a: workspace 不存在 → 404', async () => {
-    const { handle, port, home } = await startMgmt('d7a');
-    try {
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/ws_nope/configs/cfg_nope/activate`, { method: 'POST' });
-        assert.equal(r.status, 404);
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-    }
-});
-
-test('D7b: config 不存在 → 404', async () => {
-    const { handle, port, home } = await startMgmt('d7b');
-    const { wsId, proj } = await createWorkspace(port, 'd7b');
-    try {
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/cfg_nope/activate`, { method: 'POST' });
-        assert.equal(r.status, 404);
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
-    }
-});
-
-// ════════════════════════════════════════════════════════════
-// D2 proxy 模式成功路径（用临时代理子进程，绝不用真实代理 11434）
-// ════════════════════════════════════════════════════════════
-test('D2: proxy 模式 + 临时代理可达 → 合成 settings BASE_URL=localhost:port', async () => {
-    // 起临时 proxy 子进程：监听临时端口 11621，CCP_HOME 指向临时目录（upstream 落盘到临时目录，不碰用户真实代理）
-    const TMP_PROXY_HOME = mkdtempSync(join(tmpdir(), 's6-tmpproxy-'));
-    const tmpProxyPort = 11621;
-    fs.writeFileSync(join(TMP_PROXY_HOME, 'proxy-config.json'), JSON.stringify({
-        env: { ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_BASE_URL: '', API_TIMEOUT_MS: '600000', ANTHROPIC_MODEL: '' },
-        effortLevel: 'max',
-        proxy: { listenHost: '127.0.0.1', listenPort: tmpProxyPort, maxAttempts: 5, backoffSec: 1, backoffMaxSec: 16, passthrough: true, retryRules: [] },
-    }));
-    fs.mkdirSync(join(TMP_PROXY_HOME, 'logs'), { recursive: true });
-
-    const { spawn } = await import('node:child_process');
-    const SERVER_JS = resolve(__dirname, '..', '..', 'proxy', 'server.js');
-    const proxyChild = spawn(process.execPath, [SERVER_JS], {
-        env: { ...process.env, CCP_CONFIG_PATH: join(TMP_PROXY_HOME, 'proxy-config.json'), CCP_LOGS_DIR: join(TMP_PROXY_HOME, 'logs'), CCP_LOGS_CONFIG_PATH: join(TMP_PROXY_HOME, 'logs', 'logs-config.json'), ELECTRON_RUN_AS_NODE: '1' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-    });
-    let proxyOut = '';
-    proxyChild.stdout.on('data', (c) => { proxyOut += c.toString(); });
-    proxyChild.stderr.on('data', (c) => { proxyOut += c.toString(); });
-
-    // 等临时代理就绪（healthz）
-    const proxyReady = await new Promise((res) => {
-        const to = setTimeout(() => res(false), 5000);
-        const check = setInterval(async () => {
-            try {
-                const r = await fetch(`http://127.0.0.1:${tmpProxyPort}/healthz`);
-                if (r.ok) { clearTimeout(to); clearInterval(check); res(true); }
-            } catch {}
-        }, 200);
-    });
-
-    const { handle, port, home } = await startMgmt('d2', { proxyPort: tmpProxyPort });
-    const { wsId, proj } = await createWorkspace(port, 'd2');
-    const cfg = await createConfig(port, wsId, { name: 'p', mode: 'proxy', content: PROXY_CONTENT });
-    try {
-        if (!proxyReady) {
-            // 临时代理没起来（环境问题），跳过成功路径（D3a 已测 502）
-            return;
-        }
         const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        assert.equal(r.status, 200);
-        const written = JSON.parse(readFileSync(join(proj, '.claude_proxy', 'settings.json'), 'utf8'));
-        assert.equal(written.env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${tmpProxyPort}`, '应合成指向临时代理');
-        assert.equal(written.env.ANTHROPIC_AUTH_TOKEN, 'tok', 'token 保留');
+        assert.equal(r.status, 200, '坏 content 也应可标记（标记不解析 content）');
         const data = await r.json();
-        assert.equal(data.mode, 'proxy');
+        assert.equal(data.marked, true);
     } finally {
         await handle.stop();
-        proxyChild.kill('SIGTERM');
-        await new Promise(r => proxyChild.on('exit', () => r()));
         rmSync(home, { recursive: true, force: true });
         rmSync(proj, { recursive: true, force: true });
-        rmSync(TMP_PROXY_HOME, { recursive: true, force: true });
+    }
+});
+
+test('E2: 缺 BASE_URL 的 config 仍可标记（标记 ≠ 启动，启动时才校验）', async () => {
+    const { handle, port, home } = await startMgmt('e2');
+    const { wsId, proj } = await createWorkspace(port, 'e2');
+    // content 合法 JSON 但缺 BASE_URL（旧 activateConfig proxy 模式会 400，标记不会）
+    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'tok' } }) });
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        assert.equal(r.status, 200, '缺 BASE_URL 也应可标记');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
     }
 });
 
 // ════════════════════════════════════════════════════════════
-// 跨阶段审查：proxy 返回非 2xx（upstream 被拒）→ activate 不应假成功
-// proxyForward 只在连接失败时 reject（ProxyUnavailableError → 502），
-// 但 proxy 返回 400（如 baseUrl 格式错误）时 resolve {status:400}。
-// activateConfig 旧实现忽略 r.status 直接写 settings + active 标记 → 假成功。
-// 期望：proxy 非 2xx → 抛 ProxyUnavailableError（或对应错误）→ 502，不写 settings。
+// F 审查 TDD：边界/状态转换/一致性
 // ════════════════════════════════════════════════════════════
-async function startTmpProxy(tmpProxyPort) {
-    const TMP_PROXY_HOME = mkdtempSync(join(tmpdir(), 's6-rev-tmpproxy-'));
-    fs.writeFileSync(join(TMP_PROXY_HOME, 'proxy-config.json'), JSON.stringify({
-        env: { ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_BASE_URL: '', API_TIMEOUT_MS: '600000', ANTHROPIC_MODEL: '' },
-        effortLevel: 'max',
-        proxy: { listenHost: '127.0.0.1', listenPort: tmpProxyPort, maxAttempts: 5, backoffSec: 1, backoffMaxSec: 16, passthrough: true, retryRules: [] },
-    }));
-    fs.mkdirSync(join(TMP_PROXY_HOME, 'logs'), { recursive: true });
-    const { spawn } = await import('node:child_process');
-    const SERVER_JS = resolve(__dirname, '..', '..', 'proxy', 'server.js');
-    const proxyChild = spawn(process.execPath, [SERVER_JS], {
-        env: { ...process.env, CCP_CONFIG_PATH: join(TMP_PROXY_HOME, 'proxy-config.json'), CCP_LOGS_DIR: join(TMP_PROXY_HOME, 'logs'), CCP_LOGS_CONFIG_PATH: join(TMP_PROXY_HOME, 'logs', 'logs-config.json'), ELECTRON_RUN_AS_NODE: '1' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-    });
-    // 等就绪
-    const ready = await new Promise((res) => {
-        const to = setTimeout(() => res(false), 5000);
-        const check = setInterval(async () => {
-            try {
-                const r = await fetch(`http://127.0.0.1:${tmpProxyPort}/healthz`);
-                if (r.ok) { clearTimeout(to); clearInterval(check); res(true); }
-            } catch {}
-        }, 200);
-    });
-    return { proxyChild, ready, TMP_PROXY_HOME };
-}
 
-test('REVIEW: proxy 返回 400（baseUrl 格式错误）→ activate 应失败，不假成功', async () => {
-    const tmpProxyPort = 11655;
-    const { proxyChild, ready, TMP_PROXY_HOME } = await startTmpProxy(tmpProxyPort);
-    const { handle, port, home } = await startMgmt('rev400', { proxyPort: tmpProxyPort });
-    const { wsId, proj } = await createWorkspace(port, 'rev400');
-    // content 的 baseUrl 是 "not-a-url" → proxy updateUpstream 抛 "Base URL 格式错误" → proxy 返回 400
-    const BAD_PROXY_CONTENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'not-a-url', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm' } });
-    const cfg = await createConfig(port, wsId, { name: 'p', mode: 'proxy', content: BAD_PROXY_CONTENT });
+// F1（怀疑点4·状态转换一致性）：派生配置可标记为默认，但起终端路由拒绝派生 active。
+// 断言"bug 存在"：标记派生为默认后，POST /terminals 应 400（路由 line 132-135 拒绝派生 active）。
+test('F1: 派生配置标记为默认后，workspace 级起终端被拒（400）— 标记与起终端入口不一致', async () => {
+    const { handle, port, home } = await startMgmt('f1');
+    const { wsId, proj } = await createWorkspace(port, 'f1');
+    const parent = await createConfig(port, wsId, { name: 'parent', mode: 'proxy', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm' } }) });
+    const derivedId = 'derived-test-f1';
+    injectDerivedConfig(proj, {
+        id: derivedId, name: 'deriv', content: parent.content, mode: 'proxy',
+        updatedAt: '2026-01-01T00:00:00Z', derivedFrom: parent.id, derivedIndex: 1,
+        modelAliases: { main: 'pm' },
+        sessionContext1m: { main: false, haiku: false, sonnet: false, opus: false },
+        derivedSnapshot: { baseUrl: 'http://up', token: 'tok', mode: 'proxy' },
+    });
     try {
-        if (!ready) return; // 环境问题跳过
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
-        // 期望：非 200（502 或 400），不应假成功 200
-        assert.notEqual(r.status, 200, `proxy 拒绝 upstream 时 activate 不应假成功 200，实际 ${r.status}`);
-        // settings.json 不应被写（注入失败应中止）
-        assert.ok(!existsSync(join(proj, '.claude_proxy', 'settings.json')),
-            'proxy 拒绝 upstream 时不应写 settings.json（假成功）');
+        // 标记派生为默认（A4 已验证可标记）
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}/activate`, { method: 'POST' });
+        assert.equal(r.status, 200, '派生应可标记为默认');
+        // 起终端：路由拒绝派生 active → 400
+        const r2 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`, { method: 'POST' });
+        assert.equal(r2.status, 400, 'workspace 级起终端应拒绝派生 active（路由 line 132-135）');
+        const data = await r2.json();
+        assert.ok(/派生配置/.test(data.error), `错误应提及派生配置，实际: ${data.error}`);
     } finally {
         await handle.stop();
-        proxyChild.kill('SIGTERM');
-        await new Promise(r => proxyChild.on('exit', () => r()));
         rmSync(home, { recursive: true, force: true });
         rmSync(proj, { recursive: true, force: true });
-        rmSync(TMP_PROXY_HOME, { recursive: true, force: true });
+    }
+});
+
+// F2（怀疑点1·边界条件）：标记 config 后删除该 config → active 标记变悬空指针。
+// 断言"bug 存在"：删除后 GET /active 仍返回已删除 config 的 id（悬空指针未清理）。
+test('F2: 标记后删除 config → active 标记悬空（GET /active 返回已删 id）', async () => {
+    const { handle, port, home } = await startMgmt('f2');
+    const { wsId, proj } = await createWorkspace(port, 'f2');
+    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
+    try {
+        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        // 删除被标记的 config
+        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}`, { method: 'DELETE' });
+        // GET /active 仍返回已删 config 的 id（悬空指针）
+        const data = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/active`)).json();
+        assert.notEqual(data.active, null, 'active 标记未被清理（悬空指针存在）');
+        assert.equal(data.active.id, cfg.id, '悬空指针指向已删 config');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// F3（怀疑点3·类型安全）：markDefaultConfig 对 mode 字段缺省/异常值的兜底。
+// config.mode 缺省 → 默认 'direct'（line 361 三元）。验证不抛错、mode 正确兜底。
+test('F3: config.mode 缺省时标记 → mode 兜底 direct（类型安全）', async () => {
+    const { handle, port, home } = await startMgmt('f3');
+    const { wsId, proj } = await createWorkspace(port, 'f3');
+    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
+    // 手改 local-configs.json 去掉 mode 字段
+    const localCfgPath = join(proj, '.claude_proxy', 'local-configs.json');
+    const arr = JSON.parse(readFileSync(localCfgPath, 'utf8'));
+    delete arr[0].mode;
+    writeFileSync(localCfgPath, JSON.stringify(arr), 'utf8');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        assert.equal(r.status, 200, 'mode 缺省也应可标记');
+        const data = await r.json();
+        assert.equal(data.mode, 'direct', 'mode 缺省应兜底为 direct');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// F4（怀疑点6·错误处理一致性）：markDefaultConfig 对 store.get 抛异常（如 local-configs.json 损坏）的处理。
+// 非 bug：store.load 损坏时 catch 返回空列表 → store.get 返回 null → NotFoundError → 404（优雅降级）。
+test('F4: local-configs.json 损坏时标记 → 404（store 优雅降级，不 500）', async () => {
+    const { handle, port, home } = await startMgmt('f4');
+    const { wsId, proj } = await createWorkspace(port, 'f4');
+    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'direct', content: DIRECT_CONTENT });
+    // 手改 local-configs.json 让整体 JSON 损坏
+    const localCfgPath = join(proj, '.claude_proxy', 'local-configs.json');
+    writeFileSync(localCfgPath, '{ broken json !!!', 'utf8');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        // store.load catch → 空列表 → get null → NotFoundError → 404（不 500）
+        assert.equal(r.status, 404, '损坏的 local-configs.json 应优雅降级为 404（不 500）');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// F5（怀疑点5·并发竞态）：标记与删除并发 → 可能写入悬空指针。
+// 此测试验证当前行为（不防竞态）：先 get 到 config，write 前被删，仍写入悬空标记。
+// 由于纯 HTTP 测试难以精确卡时序，这里验证"标记已删 config"的 404 路径（get 返回 null → NotFoundError）。
+test('F5: 标记不存在的 config → 404（get 返回 null 时 NotFoundError）', async () => {
+    const { handle, port, home } = await startMgmt('f5');
+    const { wsId, proj } = await createWorkspace(port, 'f5');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/cfg_ghost/activate`, { method: 'POST' });
+        assert.equal(r.status, 404, '不存在的 config 标记应 404');
+        const data = await r.json();
+        assert.ok(/config 不存在/.test(data.error), `错误应提及 config 不存在，实际: ${data.error}`);
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// F6（怀疑点·副作用完整性）：标记后 local-active.json 写入但无其他文件副作用。
+// 验证"零副作用"的完整面：settings.json / .claude/settings.local.json / .gitignore 全无。
+test('F6: 标记后仅 local-active.json 存在，其余文件均未创建（副作用完整性）', async () => {
+    const { handle, port, home } = await startMgmt('f6');
+    const { wsId, proj } = await createWorkspace(port, 'f6');
+    mkdirSync(join(proj, '.git'), { recursive: true });
+    const cfg = await createConfig(port, wsId, { name: 'd', mode: 'proxy', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'm' } }) });
+    try {
+        await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.id}/activate`, { method: 'POST' });
+        // local-active.json 应存在
+        assert.ok(existsSync(join(proj, '.claude_proxy', 'local-active.json')), 'local-active.json 应被创建');
+        // 其余文件均不应存在
+        assert.ok(!existsSync(join(proj, '.claude_proxy', 'settings.json')), '不应写 settings.json');
+        assert.ok(!existsSync(join(proj, '.claude', 'settings.local.json')), '不应写 .claude/settings.local.json');
+        assert.ok(!existsSync(join(proj, '.gitignore')), '不应写 .gitignore');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
     }
 });

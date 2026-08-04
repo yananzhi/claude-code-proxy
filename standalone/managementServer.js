@@ -20,7 +20,7 @@ import { ClaudeSessionManager } from './claudeSession.js';
 import { resolveClaudeBinaryStandalone } from './claudeBinaryStandalone.js';
 import {
     createLocalConfig, updateLocalConfig, deleteLocalConfig, getModelCatalog,
-    proxyForward, activateConfig, getActiveConfig,
+    proxyForward, markDefaultConfig, getActiveConfig,
     ensureProjectPermissions, ensureGitignore,
     ValidationError, NotFoundError, ProxyUnavailableError,
 } from './configApi.js';
@@ -305,19 +305,14 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // POST /api/workspaces/:id/configs/:cfgId/activate → 激活 config（阶段 6）
+            // POST /api/workspaces/:id/configs/:cfgId/activate → 标记默认配置（弱化版激活）
+            // 重设计目标2：终端统一走 env，激活降级为"只写默认配置标记"，不再写 settings.json/注入 upstream。
+            // 仅影响「+ 新建终端」下拉默认高亮项。activateConfig 原函数保留给 VS Code 侧。
             const mActivate = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/activate$/);
             if (method === 'POST' && mActivate) {
                 const id = decodeURIComponent(mActivate[1]);
                 const cfgId = decodeURIComponent(mActivate[2]);
-                const result = await activateConfig(manager, opts.proxyPort, id, cfgId, { log: opts.log });
-                // 警告：若 workspace 下已有存活 normal 终端，提示用户已开的 session 可能受影响（settings.json 已被覆盖），
-                // 建议退出后通过 resume 再进入。
-                const liveTerminals = sessions.listByWorkspace(id);
-                if (liveTerminals.length > 0) {
-                    result.warning = `workspace 下已有 ${liveTerminals.length} 个存活终端（基于之前的 active 配置启动）。` +
-                        `本次激活已覆盖 settings.json，已开的 session 可能受影响，建议退出后通过 resume 再进入。`;
-                }
+                const result = await markDefaultConfig(manager, id, cfgId);
                 sendJson(res, 200, result);
                 return;
             }

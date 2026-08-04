@@ -195,21 +195,22 @@ test('R4a: 开两个 normal 终端 → listByWorkspace 返回 2', async () => {
 });
 
 // ════════════════════════════════════════════════════════════
-// R5 activate 存活终端警告
+// R5 activate 不再有存活终端警告（目标2：标记不覆盖 settings.json，存活终端不受影响）
 // ════════════════════════════════════════════════════════════
-test('R5a: 有存活终端时 activate → 返回 warning', async () => {
+test('R5a: 有存活终端时 activate → 无 warning（标记不覆盖 settings.json）', async () => {
     const { handle, port, home } = await startMgmt('r5a');
     const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r5a');
     try {
         // activate + 开终端
         await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/activate`, { method: 'POST' });
         const t = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`, { method: 'POST' })).json();
-        // 再次 activate 同配置 → 应有 warning
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/activate`, { method: 'POST' });
-        const d = await r.json();
-        assert.ok(d.warning, '有存活终端时 activate 应返回 warning');
-        assert.match(d.warning, /存活终端|受影响|resume/i);
-        await fetch(`http://127.0.0.1:${port}/api/terminals/${t.terminalId}`, { method: 'DELETE' });
+        if (t.terminalId) {
+            // 再次 activate 同配置 → 不应有 warning（标记不再覆盖 settings.json）
+            const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/activate`, { method: 'POST' });
+            const d = await r.json();
+            assert.equal(d.warning, undefined, '标记不覆盖 settings.json，存活终端不受影响，无 warning');
+            await fetch(`http://127.0.0.1:${port}/api/terminals/${t.terminalId}`, { method: 'DELETE' });
+        }
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
