@@ -429,3 +429,59 @@ async function waitForPort(port, timeoutMs) {
     }
     throw new Error(`proxy port ${port} 未就绪`);
 }
+
+// ════════════════════════════════════════════════════════════
+// D5 configDir 共享假设约束（修复问题2：避免重复引导）
+// ════════════════════════════════════════════════════════════
+test('D5a: 同 workspace 两次起终端 → configDir 路径相同（共享，onboarding 复用）', async () => {
+    // 约束假设：共享 configDir 是避免重复引导的前提。若两次 configDir 不同，共享失效。
+    const wsDir = newTmpDir('d5a');
+    const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
+    const fwd = makeMockForward();
+    const r1 = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't_aaa', proxyForwardFn: fwd });
+    const r2 = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't_bbb', proxyForwardFn: fwd });
+    assert.equal(r1.configDir, r2.configDir, '同 workspace 不同 terminalId 应共享 configDir');
+    assert.equal(r1.configDir, join(wsDir, '.claude_proxy'), '应为 {ws}/.claude_proxy');
+    assert.notEqual(r1.configDir, join(wsDir, '.claude_proxy', 'sessions', 't_aaa'), '不应是 per-terminal');
+});
+
+test('D5b: 不同 workspace → configDir 不同（隔离，不串引导）', async () => {
+    const ws1 = newTmpDir('d5b1');
+    const ws2 = newTmpDir('d5b2');
+    const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
+    const fwd = makeMockForward();
+    const r1 = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: ws1, terminalId: 't1', proxyForwardFn: fwd });
+    const r2 = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: ws2, terminalId: 't1', proxyForwardFn: fwd });
+    assert.notEqual(r1.configDir, r2.configDir, '不同 workspace 应隔离 configDir');
+});
+
+// ════════════════════════════════════════════════════════════
+// D6 settings.json 检测覆盖所有 config 类型（修复问题2 附加：env 与 settings.json 不共存）
+// ════════════════════════════════════════════════════════════
+test('D6a: 普通代理模式 + settings.json 存在 → throw（不因代理模式跳过检测）', async () => {
+    const wsDir = newTmpDir('d6a');
+    mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{}}', 'utf8');
+    const cfg = { id: 'c1', name: 'n', content: proxyContent(), mode: 'proxy' };
+    const fwd = makeMockForward({ 'POST /api/upstream': { status: 200, body: {} } });
+    await assert.rejects(
+        () => buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd }),
+        /settings\.json.*存在|不支持共存|ValidationError/i,
+    );
+});
+
+test('D6b: 派生配置 + settings.json 存在 → throw（不因派生模式跳过检测）', async () => {
+    const wsDir = newTmpDir('d6b');
+    mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{}}', 'utf8');
+    const cfg = derivedCfg();
+    const fwd = makeMockForward({
+        'POST /api/upstream': { status: 200, body: {} },
+        'GET /api/config': { status: 200, body: { modelAliases: {} } },
+        'POST /api/model-alias': { status: 200, body: {} },
+    });
+    await assert.rejects(
+        () => buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd }),
+        /settings\.json.*存在|不支持共存|ValidationError/i,
+    );
+});
