@@ -3,14 +3,15 @@
 // 职责：
 //   - buildTerminalEnv(cfg, parentCfg, proxyPort, deps) → { env, configDir }
 //     按 config 类型（normal-direct / normal-proxy / derived）构建 spawn env：
-//       normal：env 只注入 CLAUDE_CONFIG_DIR，LLM 配置走 settings.json（由 activateConfig 写）
-//       derived：env 注入 BASE_URL/token + 四档别名 env，configDir 用 per-terminal 空目录
+//       normal：env 注入 ANTHROPIC_BASE_URL/TOKEN/MODEL（终端走 env，不读 settings.json）
+//       derived：env 注入 BASE_URL/token + 四档别名 env，configDir 共享 {ws}/.claude_proxy
 //   - syncDerivedAliases(cfg, proxyPort, deps) → 派生别名补齐到代理全局表（幂等）
 //
 // 复用 out/（与 configApi.js 同模式）：extractUpstream / buildAliasEnv / resolveDerivedUpstream /
 //   computeAliasSyncActions；configApi.js 的 proxyForward + error 类。
 
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -42,11 +43,11 @@ const WORKSPACE_CONFIG_DIR = '.claude_proxy';
  * 构建终端 spawn env + configDir。
  *
  * - normal（direct/proxy）：env 注入 ANTHROPIC_BASE_URL/TOKEN/MODEL（+ 可选 SMALL_FAST_MODEL/TIMEOUT），
- *   configDir 用 per-terminal 空目录（与 derived 一致，防 settings.json 覆盖 env）。
+ *   configDir 共享 {ws}/.claude_proxy（与 derived 一致，防 settings.json 覆盖 env）。
  *   不再依赖 settings.json——所有终端统一走 env。
  *   - direct：BASE_URL = 上游真实地址，不碰代理。
  *   - proxy：BASE_URL = http://127.0.0.1:proxyPort，起终端前注入 upstream 到代理。
- * - derived：env 注入 BASE_URL=proxy + TOKEN + 四档别名 env，configDir 用 per-terminal 空目录。
+ * - derived：env 注入 BASE_URL=proxy + TOKEN + 四档别名 env，configDir 共享 {ws}/.claude_proxy。
  *   启动前注入 upstream + 同步别名表。
  *
  * @param {object} cfg LLMConfig（normal 或 derived）
@@ -54,12 +55,12 @@ const WORKSPACE_CONFIG_DIR = '.claude_proxy';
  * @param {number} proxyPort 代理端口
  * @param {object} opts
  *   @param {string} opts.workspaceDir workspace 磁盘目录（算 configDir 用）
- *   @param {string} opts.terminalId 终端 id（算 per-terminal configDir）
+ *   @param {string} opts.terminalId 终端 id（算 configDir）
  *   @param {Function} [opts.proxyForwardFn] 注入的 proxyForward（测试 mock），默认用 configApi 的
  *   @param {Function} [opts.log]
  * @returns {Promise<{ env: object, configDir: string }>}
  *   env = spawn env 覆盖层（含 ANTHROPIC_* 配置特定 key）
- *   configDir = 该终端的 CLAUDE_CONFIG_DIR 路径（per-terminal 空目录）
+ *   configDir = 共享 CLAUDE_CONFIG_DIR 路径
  * @throws {ValidationError} direct/proxy 缺 BASE_URL/TOKEN、derived 无法解上游
  * @throws {ProxyUnavailableError} proxy/derived 模式代理不可达/拒绝 upstream/别名同步失败
  */
@@ -71,8 +72,22 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
 
     const isDerived = cfg && cfg.derivedFrom !== undefined;
 
-    // per-terminal 空目录（normal 与 derived 一致，防 settings.json 覆盖 env）
-    const configDir = path.join(workspaceDir, WORKSPACE_CONFIG_DIR, 'sessions', terminalId);
+    // configDir 共享 {ws}/.claude_proxy（与插件 claudeLauncher 一致）：
+    // 终端走 env 注入（settings.json 不写 env），故共享目录的 settings.json 不会覆盖 env。
+    // 共享让 CLI 的 onboarding 标记/numStartups/主题/skipDangerousModePermissionPrompt 跨终端复用，
+    // 避免每个终端首次启动都重走引导（per-terminal 旧做法导致每次都进 onboarding）。
+    const configDir = path.join(workspaceDir, WORKSPACE_CONFIG_DIR);
+
+    // ⚠ 终端走 env 注入 modelname，settings.json 的 env 会覆盖进程 env（CLI Object.assign 语义）。
+    // 若共享 settings.json 存在（多为旧 activateConfig/插件模式遗留，含 env 指向旧代理），
+    // 会覆盖终端注入的 env 致配置错乱。故检测到 settings.json 存在即拒绝起终端，提示用户清理。
+    const settingsPath = path.join(configDir, 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+        throw new ValidationError(
+            `检测到 ${settingsPath} 存在。当前终端通过 env 注入 modelname，` +
+            `settings.json 的 env 会覆盖注入值，不支持共存。请删除该 settings.json 后重试。`,
+        );
+    }
 
     // ── normal：env 注入 ANTHROPIC_* 真实配置，不再读 settings.json ──
     if (!isDerived) {
@@ -119,7 +134,7 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
         return { env, configDir };
     }
 
-    // ── derived：env 注入 BASE_URL=proxy/token/别名，configDir 用 per-terminal 空目录 ──
+    // ── derived：env 注入 BASE_URL=proxy/token/别名，configDir 共享 {ws}/.claude_proxy ──
     const upstream = resolveDerivedUpstream(cfg, parentCfg);
     if (!upstream) {
         throw new ValidationError(
@@ -141,7 +156,7 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
     // 同步别名表（缺则补，幂等）
     await syncDerivedAliases(cfg, proxyPort, { proxyForwardFn: fwd, log });
 
-    // configDir 已在顶部统一算（per-terminal 空目录）
+    // configDir 已在顶部统一算（共享 {ws}/.claude_proxy）
 
     // env 注入 BASE_URL=proxy + token + 四档别名
     const aliasEnv = buildAliasEnv(cfg.derivedIndex, { sessionContext1m: cfg.sessionContext1m });

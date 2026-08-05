@@ -251,6 +251,8 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   body.appendChild(cfgGroup);
 
   // 终端 分组（列全部终端：静态 + 别名 统一挂这里）
+  // 起终端入口在配置行内（静态/别名配置行都有「新建终端」按钮，带 cfgId），
+  // 终端组不另设起终端按钮（无 cfgId 会依赖默认配置，未标记时报错）。
   var termGroup = document.createElement('div');
   termGroup.className = 'group';
   var termTitle = document.createElement('div');
@@ -258,20 +260,13 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   termTitle.textContent = '终端（' + normalTerms.length + '）';
   termGroup.appendChild(termTitle);
 
-  var newTermBtn = document.createElement('button');
-  newTermBtn.className = 'cfg-new-term';
-  newTermBtn.textContent = '+ 新建终端';
-  newTermBtn.title = '基于默认配置启动';
-  newTermBtn.onclick = function() { newTerminal(ws.id); };
-  termGroup.appendChild(newTermBtn);
-
   normalTerms.forEach(function(t) {
     termGroup.appendChild(buildTerminalRow(t));
   });
   if (normalTerms.length === 0) {
     var tHint = document.createElement('div');
     tHint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
-    tHint.textContent = '（先标记一个默认配置，再点「新建终端」）';
+    tHint.textContent = '（无终端，点上方配置行的「新建终端」开启）';
     termGroup.appendChild(tHint);
   }
   body.appendChild(termGroup);

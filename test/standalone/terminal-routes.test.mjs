@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -967,18 +967,58 @@ test('C5: GET /api/workspaces/:id/terminals → 200 列表（不被 POST 路由�
 //   路由参数 tid 仅用于内存 Map 查找或 HTML 渲染（不进 path.join/fs）。
 //   翻转：configDir 路径安全，非 bug。回归锁定。
 //   验证：起终端后 configDir 为 {ws}/.claude_proxy/sessions/t_xxxxxxxx 格式。
-test('C6: 起终端后 configDir 为 per-terminal 安全路径（t_+hex，非 bug）', async () => {
+test('C6: 起终端后 configDir 为共享 {ws}/.claude_proxy（与插件一致，onboarding 复用）', async () => {
     const { handle, port, home } = await startMgmt('c6');
     const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'c6');
     try {
         const t1 = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' })).json();
         // terminalId 应为 t_ + hex 格式
         assert.match(t1.terminalId, /^t_[0-9a-f]+$/, 'terminalId 应为 t_+hex 格式（安全）');
-        // configDir 路径应为 {ws}/.claude_proxy/sessions/{tid}
-        const sessDir = join(proj, '.claude_proxy', 'sessions', t1.terminalId);
-        const { existsSync } = await import('node:fs');
-        assert.ok(existsSync(sessDir), 'configDir 应为 per-terminal 安全路径（sessions/{tid}）');
+        // configDir 路径应为共享 {ws}/.claude_proxy（不再 per-terminal，避免重复引导）
+        
+        assert.ok(existsSync(join(proj, '.claude_proxy')), 'configDir 应为共享 {ws}/.claude_proxy');
         await fetch(`http://127.0.0.1:${port}/api/terminals/${t1.terminalId}`, { method: 'DELETE' });
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// ════════════════════════════════════════════════════════════
+// R7 settings.json 存在时拒绝起终端（终端走 env，settings.json env 会覆盖注入值）
+// ════════════════════════════════════════════════════════════
+test('R7a: 共享 settings.json 存在 → 起终端 400 拒绝', async () => {
+    const { handle, port, home } = await startMgmt('r7a');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r7a');
+    // 手写一个 settings.json（模拟旧 activateConfig/插件模式遗留）
+    
+    mkdirSync(join(proj, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(proj, '.claude_proxy', 'settings.json'), JSON.stringify({
+        env: { ANTHROPIC_BASE_URL: 'http://old-proxy:11434', ANTHROPIC_AUTH_TOKEN: 'old-tok' },
+    }), 'utf8');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' });
+        assert.equal(r.status, 400, '有 settings.json 应拒绝起终端');
+        const d = await r.json();
+        assert.match(d.error, /settings\.json.*存在|env 注入|不支持共存/, '应提示 settings.json 冲突');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+test('R7b: 无 settings.json → 正常起终端（201）', async () => {
+    const { handle, port, home } = await startMgmt('r7b');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r7b');
+    try {
+        // 不写 settings.json，正常起
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' });
+        assert.equal(r.status, 201);
+        const d = await r.json();
+        assert.ok(d.terminalId);
+        await fetch(`http://127.0.0.1:${port}/api/terminals/${d.terminalId}`, { method: 'DELETE' });
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });

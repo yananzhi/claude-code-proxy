@@ -33,7 +33,7 @@
 | 终端类型 | 现状启动方式 |
 |---|---|
 | 静态终端（normal） | `CLAUDE_CONFIG_DIR` 指向 `.claude_proxy/`，读 settings.json（`terminalApi.js` buildTerminalEnv） |
-| 别名终端（derived） | env 注入 `ANTHROPIC_BASE_URL`(代理) + `ANTHROPIC_AUTH_TOKEN` + 四档别名 env，configDir 用 per-terminal 空目录 |
+| 别名终端（derived） | env 注入 `ANTHROPIC_BASE_URL`(代理) + `ANTHROPIC_AUTH_TOKEN` + 四档别名 env，configDir 共享 {ws}/.claude_proxy（与插件一致） |
 
 静态终端依赖 settings.json，导致必须先「激活配置」写 settings.json 才能起终端——这是设计失误的根源。
 
@@ -44,7 +44,7 @@
 ANTHROPIC_BASE_URL   = 上游 baseUrl（直连）或 http://127.0.0.1:<proxyPort>（代理模式）
 ANTHROPIC_AUTH_TOKEN = 上游 token
 ANTHROPIC_MODEL      = 真实模型名（从 content.env.ANTHROPIC_MODEL 提取）
-CLAUDE_CONFIG_DIR    = per-terminal 空目录（与别名终端一致，不再指向 .claude_proxy/）
+CLAUDE_CONFIG_DIR    = 共享 {ws}/.claude_proxy（与插件 claudeLauncher 一致，onboarding 标记跨终端复用，避免重复引导）
 ```
 - 直连模式：BASE_URL = 上游真实地址，CLI 直连。
 - 代理模式：BASE_URL = `http://127.0.0.1:<proxyPort>`，上游通过 `/api/upstream` 注入代理（沿用现有 `activateConfig` 的 proxy 注入逻辑，但改为起终端时注入而非激活时）。
@@ -57,7 +57,7 @@ ANTHROPIC_MODEL           = ccp-main-N
 ANTHROPIC_DEFAULT_HAIKU_MODEL  = ccp-haiku-N
 ANTHROPIC_DEFAULT_SONNET_MODEL = ccp-sonnet-N
 ANTHROPIC_DEFAULT_OPUS_MODEL   = ccp-opus-N
-CLAUDE_CONFIG_DIR         = per-terminal 空目录
+CLAUDE_CONFIG_DIR         = 共享 {ws}/.claude_proxy（与插件一致，onboarding 复用）
 ```
 
 ### 连带影响：「激活」概念弱化/去掉
@@ -242,7 +242,7 @@ workspace 节点
 
 ### 5.2 `standalone/terminalApi.js`（终端统一走 env）
 
-- `buildTerminalEnv` 静态配置分支：改为注入 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL` env，`CLAUDE_CONFIG_DIR` 用 per-terminal 空目录，不再依赖 settings.json。
+- `buildTerminalEnv` 静态配置分支：改为注入 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL` env，`CLAUDE_CONFIG_DIR` 用共享 {ws}/.claude_proxy（与插件一致，onboarding 复用），检测到 settings.json 存在则拒绝起终端（env 注入与 settings.json env 不共存）。
 - 代理模式的静态终端：起终端时调 `/api/upstream` 注入上游（复用 `configApi.proxyForward`），BASE_URL 指向代理。
 - 别名终端分支：基本不变。
 

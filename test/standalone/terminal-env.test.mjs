@@ -5,7 +5,7 @@
 // 维度：
 //   D1 normal-direct env 构建
 //   D2 normal-proxy env 构建（注入 upstream 到代理）
-//   D3 derived env 构建（注入 upstream + 别名 env + per-terminal configDir）
+//   D3 derived env 构建（注入 upstream + 别名 env + 共享 configDir）
 //   D4 syncDerivedAliases（幂等/补全/代理不可达）
 //
 // 代理用 mock proxyForward（spy），不连真实代理。D4d 集成用例用临时代理子进程（端口 11621）。
@@ -82,9 +82,9 @@ function makeMockForward(responses = {}) {
 
 // ════════════════════════════════════════════════════════════
 // D1 normal-direct
-// （重设计：env 注入 ANTHROPIC_* 真实配置 + per-terminal configDir，不再读 settings.json）
+// （重设计：env 注入 ANTHROPIC_* 真实配置 + 共享 configDir，不再读 settings.json）
 // ════════════════════════════════════════════════════════════
-test('D1a: direct config → env 含上游 BASE_URL/TOKEN/MODEL + per-terminal configDir + 不碰代理', async () => {
+test('D1a: direct config → env 含上游 BASE_URL/TOKEN/MODEL + 共享 configDir + 不碰代理', async () => {
     const wsDir = newTmpDir('d1a');
     const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
     const fwd = makeMockForward();
@@ -94,7 +94,7 @@ test('D1a: direct config → env 含上游 BASE_URL/TOKEN/MODEL + per-terminal c
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-direct');
     assert.equal(env.ANTHROPIC_MODEL, 'real-model');
     // configDir 用 per-terminal 空目录（与 derived 一致，防 settings.json 覆盖 env）
-    assert.equal(configDir, join(wsDir, '.claude_proxy', 'sessions', 't1'));
+    assert.equal(configDir, join(wsDir, '.claude_proxy'));
     // direct 不碰代理
     assert.equal(fwd.calls.length, 0);
 });
@@ -150,9 +150,9 @@ test('D1g: direct → env 含 SMALL_FAST_MODEL + TIMEOUT（毫秒字符串）', 
 
 // ════════════════════════════════════════════════════════════
 // D2 normal-proxy
-// （重设计：env BASE_URL 指向代理 + per-terminal configDir + 注入 upstream）
+// （重设计：env BASE_URL 指向代理 + 共享 configDir + 注入 upstream）
 // ════════════════════════════════════════════════════════════
-test('D2a: proxy config → env BASE_URL=代理 + TOKEN + MODEL + per-terminal configDir + 注入 upstream', async () => {
+test('D2a: proxy config → env BASE_URL=代理 + TOKEN + MODEL + 共享 configDir + 注入 upstream', async () => {
     const wsDir = newTmpDir('d2a');
     const cfg = { id: 'c1', name: 'n', content: proxyContent(), mode: 'proxy' };
     const fwd = makeMockForward();
@@ -163,7 +163,7 @@ test('D2a: proxy config → env BASE_URL=代理 + TOKEN + MODEL + per-terminal c
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-proxy');
     assert.equal(env.ANTHROPIC_MODEL, 'proxy-model');
     // configDir per-terminal 空目录
-    assert.equal(configDir, join(wsDir, '.claude_proxy', 'sessions', 't1'));
+    assert.equal(configDir, join(wsDir, '.claude_proxy'));
     // 注入了 upstream（真实上游地址）
     const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
     assert.ok(upCall, '应 POST /api/upstream');
@@ -298,7 +298,7 @@ test('D3a: derived config → env 含 BASE_URL=proxy + token + 四档别名', as
     // 不设 SMALL_FAST_MODEL（derived 用别名）
     assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, undefined);
     // configDir 用 per-terminal 独立目录
-    assert.equal(configDir, join(wsDir, '.claude_proxy', 'sessions', 't7'));
+    assert.equal(configDir, join(wsDir, '.claude_proxy'));
     // 注入了 upstream（用快照 baseUrl/token）
     const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
     assert.ok(upCall);
