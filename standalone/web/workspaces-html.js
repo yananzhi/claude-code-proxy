@@ -557,7 +557,8 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
     const isDerived = cfg && cfg.derivedFrom !== undefined;
     const name = cfg?.name || '';
     const content = cfg?.content || TEMPLATE;
-    const mode = cfg?.mode === 'proxy' ? 'proxy' : 'direct';
+    // 新建配置默认 proxy（cfg 无 mode 时）；已有配置按自身 mode
+    const mode = cfg?.mode ? (cfg.mode === 'proxy' ? 'proxy' : 'direct') : 'proxy';
     const cfgId = cfg?.id || '';
 
     // 安全插值：JSON.stringify 嵌 JS 字面量（需转义 </script> 防 HTML 解析器提前结束 script 块），
