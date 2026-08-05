@@ -461,7 +461,7 @@ test('D5b: 不同 workspace → configDir 不同（隔离，不串引导）', as
 test('D6a: 普通代理模式 + settings.json 存在 → throw（不因代理模式跳过检测）', async () => {
     const wsDir = newTmpDir('d6a');
     mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
-    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{}}', 'utf8');
+    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{"ANTHROPIC_MODEL":"stale-m"}}', 'utf8');
     const cfg = { id: 'c1', name: 'n', content: proxyContent(), mode: 'proxy' };
     const fwd = makeMockForward({ 'POST /api/upstream': { status: 200, body: {} } });
     await assert.rejects(
@@ -473,7 +473,7 @@ test('D6a: 普通代理模式 + settings.json 存在 → throw（不因代理模
 test('D6b: 派生配置 + settings.json 存在 → throw（不因派生模式跳过检测）', async () => {
     const wsDir = newTmpDir('d6b');
     mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
-    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{}}', 'utf8');
+    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{"ANTHROPIC_MODEL":"stale-m"}}', 'utf8');
     const cfg = derivedCfg();
     const fwd = makeMockForward({
         'POST /api/upstream': { status: 200, body: {} },
@@ -484,4 +484,35 @@ test('D6b: 派生配置 + settings.json 存在 → throw（不因派生模式跳
         () => buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd }),
         /settings\.json.*存在|不支持共存|ValidationError/i,
     );
+});
+
+test('D6c: settings.json 仅 theme/skipDangerous（无 env 冲突 key）→ 放行（不 throw）', async () => {
+    // CLI 自己写的引导标记，无 env，不冲突，放行（第二次起终端能成功的保证）
+    const wsDir = newTmpDir('d6c');
+    mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"theme":"dark","skipDangerousModePermissionPrompt":true}', 'utf8');
+    const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
+    const { env, configDir } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.ANTHROPIC_MODEL, 'real-model', '无冲突 key 应放行，env 正常注入');
+    assert.ok(configDir);
+});
+
+test('D6d: settings.json env 含 ANTHROPIC_BASE_URL → throw（冲突 key 覆盖路由）', async () => {
+    const wsDir = newTmpDir('d6d');
+    mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{"ANTHROPIC_BASE_URL":"http://stale"}}', 'utf8');
+    const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
+    await assert.rejects(
+        () => buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: makeMockForward() }),
+        /ANTHROPIC_BASE_URL|覆盖.*modelname|不支持共存/i,
+    );
+});
+
+test('D6e: settings.json 损坏（非 JSON）→ 不 throw（让 CLI 自己处理）', async () => {
+    const wsDir = newTmpDir('d6e');
+    mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{ not valid json', 'utf8');
+    const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.ANTHROPIC_MODEL, 'real-model', '损坏 settings.json 不视为冲突，放行');
 });

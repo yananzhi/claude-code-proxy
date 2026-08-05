@@ -986,22 +986,21 @@ test('C6: 起终端后 configDir 为共享 {ws}/.claude_proxy（与插件一致�
 });
 
 // ════════════════════════════════════════════════════════════
-// R7 settings.json 存在时拒绝起终端（终端走 env，settings.json env 会覆盖注入值）
+// R7 settings.json 含 modelname 冲突 key 时拒绝起终端（终端走 env，settings.json env 会覆盖注入值）
 // ════════════════════════════════════════════════════════════
-test('R7a: 共享 settings.json 存在 → 起终端 400 拒绝', async () => {
+test('R7a: settings.json 含 ANTHROPIC_BASE_URL → 起终端 400 拒绝', async () => {
     const { handle, port, home } = await startMgmt('r7a');
     const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r7a');
-    // 手写一个 settings.json（模拟旧 activateConfig/插件模式遗留）
-    
+    // 手写 settings.json（模拟旧 activateConfig/插件模式遗留，含冲突 key）
     mkdirSync(join(proj, '.claude_proxy'), { recursive: true });
     writeFileSync(join(proj, '.claude_proxy', 'settings.json'), JSON.stringify({
         env: { ANTHROPIC_BASE_URL: 'http://old-proxy:11434', ANTHROPIC_AUTH_TOKEN: 'old-tok' },
     }), 'utf8');
     try {
         const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' });
-        assert.equal(r.status, 400, '有 settings.json 应拒绝起终端');
+        assert.equal(r.status, 400, '含 BASE_URL 冲突 key 应拒绝');
         const d = await r.json();
-        assert.match(d.error, /settings\.json.*存在|env 注入|不支持共存/, '应提示 settings.json 冲突');
+        assert.match(d.error, /ANTHROPIC_BASE_URL|覆盖.*modelname|不支持共存/, '应提示冲突 key');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -1019,6 +1018,46 @@ test('R7b: 无 settings.json → 正常起终端（201）', async () => {
         const d = await r.json();
         assert.ok(d.terminalId);
         await fetch(`http://127.0.0.1:${port}/api/terminals/${d.terminalId}`, { method: 'DELETE' });
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+test('R7c: settings.json 仅 theme/skipDangerous（无 env 冲突 key）→ 放行起终端（201）', async () => {
+    // CLI 走完引导后自己写 {theme, skipDangerousModePermissionPrompt}，无 env，不冲突，应放行。
+    // 这是第二次起终端能成功的保证。
+    const { handle, port, home } = await startMgmt('r7c');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r7c');
+    mkdirSync(join(proj, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(proj, '.claude_proxy', 'settings.json'), JSON.stringify({
+        theme: 'dark',
+        skipDangerousModePermissionPrompt: true,
+    }), 'utf8');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' });
+        assert.equal(r.status, 201, '仅 theme/skipDangerous 无 env 冲突应放行');
+        const d = await r.json();
+        assert.ok(d.terminalId);
+        await fetch(`http://127.0.0.1:${port}/api/terminals/${d.terminalId}`, { method: 'DELETE' });
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+test('R7d: settings.json env 含三档别名 key（ANTHROPIC_DEFAULT_SONNET_MODEL）→ 拒绝', async () => {
+    const { handle, port, home } = await startMgmt('r7d');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r7d');
+    mkdirSync(join(proj, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(proj, '.claude_proxy', 'settings.json'), JSON.stringify({
+        env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'stale-sonnet' },
+    }), 'utf8');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' });
+        assert.equal(r.status, 400, '含三档别名冲突 key 应拒绝');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });

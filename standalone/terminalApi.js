@@ -78,15 +78,31 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
     // 避免每个终端首次启动都重走引导（per-terminal 旧做法导致每次都进 onboarding）。
     const configDir = path.join(workspaceDir, WORKSPACE_CONFIG_DIR);
 
-    // ⚠ 终端走 env 注入 modelname，settings.json 的 env 会覆盖进程 env（CLI Object.assign 语义）。
-    // 若共享 settings.json 存在（多为旧 activateConfig/插件模式遗留，含 env 指向旧代理），
-    // 会覆盖终端注入的 env 致配置错乱。故检测到 settings.json 存在即拒绝起终端，提示用户清理。
+    // ⚠ 终端走 env 注入 modelname，settings.json 的 env 会覆盖进程 env（CLI Object.assign 语义，
+    // 仅覆盖 settings.env 里存在的 key）。CLI 自己写的 settings.json（{theme, skipDangerous...}）
+    // 无 env 字段，不冲突，是引导完成标记，应放行（否则第二次起终端会被误拒）。
+    // 仅当 settings.json 的 env 含会覆盖 modelname/路由的 key 时才拒绝（多为旧 activateConfig/插件遗留）。
+    const CONFLICT_KEYS = [
+        'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
+        'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    ];
     const settingsPath = path.join(configDir, 'settings.json');
     if (fs.existsSync(settingsPath)) {
-        throw new ValidationError(
-            `检测到 ${settingsPath} 存在。当前终端通过 env 注入 modelname，` +
-            `settings.json 的 env 会覆盖注入值，不支持共存。请删除该 settings.json 后重试。`,
-        );
+        let conflictKey = null;
+        try {
+            const raw = fs.readFileSync(settingsPath, 'utf8');
+            const parsed = JSON.parse(raw);
+            const env = (parsed && typeof parsed === 'object' && parsed.env) ? parsed.env : null;
+            if (env && typeof env === 'object') {
+                conflictKey = CONFLICT_KEYS.find(k => env[k] !== undefined && env[k] !== '');
+            }
+        } catch { /* settings.json 损坏无法解析 → 不视为冲突，让 CLI 自己处理 */ }
+        if (conflictKey) {
+            throw new ValidationError(
+                `检测到 ${settingsPath} 的 env.${conflictKey} 会覆盖终端注入的 modelname。` +
+                `当前终端通过 env 注入，settings.json 的 env.${conflictKey} 不支持共存，请删除该 key 后重试。`,
+            );
+        }
     }
 
     // ── normal：env 注入 ANTHROPIC_* 真实配置，不再读 settings.json ──
