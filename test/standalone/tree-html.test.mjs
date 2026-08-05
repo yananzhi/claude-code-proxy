@@ -160,6 +160,52 @@ test('T1k: buildWorkspacesHtml 内联 <script> JS 语法合法', () => {
     assert.doesNotThrow(() => new Function(m[1]), '内联 JS 应语法合法（无跨行字符串/未转义字符）');
 });
 
+// ════════════════════════════════════════════════════════════
+// T8 目录选择器 + 树状美化（图标/折叠/hover图标）
+// ════════════════════════════════════════════════════════════
+test('T8a: 目录选择器入口（browseDir 函数 + 选择目录按钮 + /api/browse-dir fetch）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(html.includes('browseDir'), '应有 browseDir 函数');
+    assert.ok(html.includes('选择目录'), '应有「选择目录」按钮');
+    assert.ok(html.includes('/api/browse-dir'), '应 fetch /api/browse-dir');
+    assert.ok(html.includes('id="dirPicker"'), '应有目录选择器弹出层容器');
+});
+
+test('T8b: 树含类型图标（📁 workspace / 📄 静态配置 / 🔀 别名配置 / 🖥 终端）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(html.includes('📁'), 'workspace 应有 📁 图标');
+    assert.ok(html.includes('📄'), '静态配置组标题或配置行应有 📄 图标');
+    assert.ok(html.includes('🔀'), '别名配置应有 🔀 图标');
+    assert.ok(html.includes('🖥'), '终端应有 🖥 图标');
+});
+
+test('T8c: 配置组/终端组可折叠（buildGroup toggle + group-body）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    // renderWsBody 应有 buildGroup 构造器（toggle + group-body）
+    const rMatch = html.match(/function renderWsBody[\s\S]*?^}/m);
+    assert.ok(rMatch, '应找到 renderWsBody');
+    assert.ok(/buildGroup/.test(rMatch[0]), '应有 buildGroup 构造器');
+    assert.ok(/group-body/.test(rMatch[0]), '应有 group-body 折叠容器');
+    assert.ok(/tog\.textContent\s*=\s*['"]▼['"]/.test(rMatch[0]), '应有 toggle 折叠逻辑');
+});
+
+test('T8d: 次要操作 hover 图标按钮（.icon-btn + ✎/✕ + title）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(html.includes('.icon-btn'), '应有 .icon-btn CSS class');
+    assert.ok(/opacity:\s*0/.test(html) && /hover.*icon-btn.*opacity:\s*1/.test(html.replace(/\n/g,'')), '应有 hover 显示规则');
+    assert.ok(html.includes('✎') && html.includes('✕'), '应有 ✎ 重命名 / ✕ 删除 图标');
+    assert.ok(/\.title\s*=\s*['"]重命名['"]/.test(html) && /\.title\s*=\s*['"]删除['"]/.test(html), '图标应有 title tooltip');
+});
+
+test('T8e: 目录选择器渲染不用 innerHTML 拼变量（DOM 构建，过 T2a 守卫）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    // renderDirPicker 不应 innerHTML = 变量
+    const rMatch = html.match(/function renderDirPicker[\s\S]*?^}/m);
+    assert.ok(rMatch, '应找到 renderDirPicker');
+    assert.ok(!/innerHTML\s*=\s*[a-zA-Z_]/.test(rMatch[0]), 'renderDirPicker 不应 innerHTML = 变量');
+    assert.ok(/textContent/.test(rMatch[0]), '应用 textContent 渲染目录名');
+});
+
 test('T1e: 不含旧 /workspace/:id/terminal 链接', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
     assert.ok(!html.match(/\/workspace\/.*\/terminal/), '不应残留旧 /workspace/:id/terminal 链接');

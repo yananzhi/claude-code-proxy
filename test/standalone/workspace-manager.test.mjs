@@ -388,3 +388,51 @@ test('持久化: 建 workspace + 配置 → 重启服务 → 配置仍在', asyn
     rmSync(home, { recursive: true, force: true });
     rmSync(proj, { recursive: true, force: true });
 });
+
+// ════════════════════════════════════════════════════════════
+// D8 目录浏览器路由 /api/browse-dir
+// ════════════════════════════════════════════════════════════
+test('D8a: GET /api/browse-dir?parent=xxx → 列子目录（entries 数组 + name/path/dir）', async () => {
+    const { handle, home, port } = await startMgmt('d8a');
+    // 在 home 下建两个子目录
+    fs.mkdirSync(path.join(home, 'sub1'), { recursive: true });
+    fs.mkdirSync(path.join(home, 'sub2'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'a-file.txt'), 'x'); // 文件不应出现
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/browse-dir?parent=${encodeURIComponent(home)}`);
+        assert.equal(r.status, 200);
+        const d = await r.json();
+        assert.ok(Array.isArray(d.entries), '应返回 entries 数组');
+        const names = d.entries.map(e => e.name);
+        assert.ok(names.includes('sub1') && names.includes('sub2'), '应含子目录 sub1/sub2');
+        assert.ok(!names.includes('a-file.txt'), '不应含文件');
+        assert.ok(d.entries.every(e => typeof e.name === 'string' && typeof e.path === 'string' && e.dir === true), '每项应有 name/path/dir');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test('D8b: GET /api/browse-dir parent 含 .. → 400（防路径遍历）', async () => {
+    const { handle, home, port } = await startMgmt('d8b');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/browse-dir?parent=${encodeURIComponent(home + '/..')}`);
+        assert.equal(r.status, 400);
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test('D8c: GET /api/browse-dir 无 parent → 200 + entries 数组（盘符/根）', async () => {
+    const { handle, home, port } = await startMgmt('d8c');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/browse-dir`);
+        assert.equal(r.status, 200);
+        const d = await r.json();
+        assert.ok(Array.isArray(d.entries), '应返回 entries 数组');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+    }
+});

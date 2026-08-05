@@ -100,6 +100,39 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
+            // GET /api/browse-dir?parent=xxx → 列子目录（供前端目录选择器）
+            // 浏览器安全沙箱拿不到绝对路径，由后端 Node fs 列目录。只列目录（不列文件）。
+            if (method === 'GET' && pathname === '/api/browse-dir') {
+                const parent = url.searchParams.get('parent') || '';
+                // 防路径遍历
+                if (parent.includes('..')) { sendJson(res, 400, { error: '不允许 .. 路径遍历' }); return; }
+                try {
+                    const entries = [];
+                    if (process.platform === 'win32' && !parent) {
+                        // Windows 无 parent → 列盘符（A-Z 探测可访问盘）
+                        for (let c = 65; c <= 90; c++) {
+                            const drive = String.fromCharCode(c) + ':\\';
+                            try { fs.accessSync(drive); entries.push({ name: String.fromCharCode(c) + ':', path: drive, dir: true }); } catch {}
+                        }
+                    } else {
+                        const resolved = path.resolve(parent || (process.platform === 'win32' ? 'C:\\' : '/'));
+                        const dirents = fs.readdirSync(resolved, { withFileTypes: true });
+                        for (const d of dirents) {
+                            if (d.isDirectory()) {
+                                entries.push({ name: d.name, path: path.join(resolved, d.name), dir: true });
+                            }
+                        }
+                        // 上一级入口（非根）
+                        const up = path.dirname(resolved);
+                        if (up !== resolved) entries.unshift({ name: '..', path: up, dir: true, up: true });
+                    }
+                    sendJson(res, 200, { entries, current: parent });
+                } catch (e) {
+                    sendJson(res, 400, { error: `无法读取目录: ${e.message}` });
+                }
+                return;
+            }
+
             // ── 终端路由（per-config / active 驱动，keyed by terminalId）──────────
             // GET /terminal/:tid → 终端页 HTML（xterm.js + WS）。终端已存在时打开此页重入。
             const mTermPage = pathname.match(/^\/terminal\/([^/]+)$/);

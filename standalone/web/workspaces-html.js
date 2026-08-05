@@ -29,7 +29,7 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
   .ws-body { padding: 6px 12px 10px 12px; }
   .toggle { cursor: pointer; user-select: none; width: 16px; display: inline-block; color: #555; }
   .group { margin: 6px 0 6px 24px; }
-  .group-title { font-size: 0.85rem; color: #555; font-weight: 600; margin: 6px 0 2px 0; }
+  .group-title { font-size: 0.85rem; color: #555; font-weight: 600; margin: 6px 0 2px 0; cursor: pointer; user-select: none; }
   .config-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; margin-left: 8px; }
   .derived-row { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 28px; }
   .term-row { display: flex; align-items: center; gap: 8px; padding: 2px 0 2px 44px; font-size: 0.85rem; }
@@ -40,6 +40,10 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
   .cfg-act { padding: 2px 8px; font-size: 0.8rem; cursor: pointer; }
   .cfg-new-term { padding: 2px 8px; font-size: 0.8rem; cursor: pointer; background: #eef; border: 1px solid #ccd; border-radius: 3px; }
   .active-badge { color: #060; background: #efe; padding: 2px 6px; border-radius: 3px; font-size: 0.78rem; font-weight: 600; }
+  .icon-btn { padding: 1px 5px; font-size: 0.85rem; cursor: pointer; background: transparent; border: none; color: #888; opacity: 0; transition: opacity 0.1s; }
+  .config-row:hover .icon-btn, .derived-row:hover .icon-btn, .term-row:hover .icon-btn { opacity: 1; }
+  .icon-btn:hover { color: #c00; }
+  .config-row:hover, .derived-row:hover, .term-row:hover { background: #f5f5f5; border-radius: 3px; }
   .derived-tag { color: #649; font-size: 0.78rem; }
   .danger { color: #c00; }
   .msg { padding: 8px; margin: 8px 0; border-radius: 4px; }
@@ -47,6 +51,13 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
   .msg.ok { background: #efe; color: #060; }
   .msg.warn { background: #ffd; color: #960; }
   .proxy-link { margin: 8px 0; }
+  .dir-picker { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); width: 560px; max-height: 70vh; overflow: auto; background: #fff; border: 1px solid #888; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.2); z-index: 1000; padding: 12px; }
+  .dir-picker .dp-head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .dir-picker .dp-path { flex: 1; font-family: monospace; font-size: 0.82rem; color: #555; word-break: break-all; }
+  .dir-picker .dp-list { max-height: 40vh; overflow: auto; border: 1px solid #eee; border-radius: 4px; }
+  .dir-picker .dp-item { padding: 4px 8px; cursor: pointer; font-size: 0.85rem; }
+  .dir-picker .dp-item:hover { background: #eef; }
+  .dir-picker .dp-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -56,9 +67,11 @@ ${proxyLink ? `<div class="proxy-link">代理控制台（trace/统计）：<a hr
 <h2>新建 Workspace</h2>
 <div class="row">
   <input id="name" type="text" placeholder="名字（如 my-project）">
-  <input id="dir" type="text" placeholder="磁盘目录绝对路径（如 D:/code/my-project）" style="min-width:400px">
+  <input id="dir" type="text" placeholder="磁盘目录绝对路径（如 D:/code/my-project）" style="min-width:360px">
+  <button onclick="browseDir()">选择目录</button>
   <button onclick="createWs()">创建</button>
 </div>
+<div id="dirPicker" class="dir-picker" style="display:none"></div>
 <div id="msg"></div>
 
 <h2>已注册 Workspaces</h2>
@@ -71,6 +84,59 @@ function showMsg(text, kind) {
   el.className = 'msg ' + (kind || 'ok');
   el.textContent = text;
   setTimeout(function() { el.textContent = ''; el.className = ''; }, kind === 'warn' ? 8000 : 4000);
+}
+
+// 目录选择器：后端 fs 列目录（浏览器沙箱拿不到绝对路径）
+var dirPickerCurrent = '';
+function browseDir(initial) {
+  var picker = document.getElementById('dirPicker');
+  picker.style.display = 'block';
+  dirPickerCurrent = initial || document.getElementById('dir').value || '';
+  renderDirPicker(dirPickerCurrent);
+}
+function renderDirPicker(parent) {
+  var picker = document.getElementById('dirPicker');
+  var url = API + '/api/browse-dir?parent=' + encodeURIComponent(parent || '');
+  fetch(url).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) { showMsg('列目录失败: ' + d.error, 'err'); return; }
+    dirPickerCurrent = d.current || parent;
+    // DOM 构建（不用 innerHTML 拼变量，防 XSS + 过 T2a 守卫）
+    picker.textContent = '';
+    var head = document.createElement('div');
+    head.className = 'dp-head';
+    var pathSpan = document.createElement('span');
+    pathSpan.className = 'dp-path';
+    pathSpan.textContent = dirPickerCurrent || '(选择盘符/目录)';
+    head.appendChild(pathSpan);
+    var refreshBtn = document.createElement('button');
+    refreshBtn.textContent = '刷新';
+    refreshBtn.onclick = function() { renderDirPicker(dirPickerCurrent); };
+    head.appendChild(refreshBtn);
+    var cancelBtn = document.createElement('button');
+    cancelBtn.textContent = '取消';
+    cancelBtn.onclick = closeDirPicker;
+    head.appendChild(cancelBtn);
+    var okBtn = document.createElement('button');
+    okBtn.textContent = '确定';
+    okBtn.onclick = confirmDirPicker;
+    head.appendChild(okBtn);
+    picker.appendChild(head);
+    var list = document.createElement('div');
+    list.className = 'dp-list';
+    (d.entries || []).forEach(function(e) {
+      var item = document.createElement('div');
+      item.className = 'dp-item';
+      item.textContent = (e.up ? '⬆ ..' : '📁 ' + e.name);
+      item.onclick = function() { renderDirPicker(e.path); };
+      list.appendChild(item);
+    });
+    picker.appendChild(list);
+  }).catch(function(e) { showMsg('列目录异常: ' + e.message, 'err'); });
+}
+function closeDirPicker() { document.getElementById('dirPicker').style.display = 'none'; }
+function confirmDirPicker() {
+  document.getElementById('dir').value = dirPickerCurrent;
+  closeDirPicker();
 }
 
 // 从静态父配置新建别名配置：取 next-alias-id → POST 别名配置 → 跳编辑页
@@ -196,7 +262,7 @@ function buildWsNode(ws) {
   head.appendChild(tog);
   var name = document.createElement('span');
   name.className = 'name';
-  name.textContent = ws.name;
+  name.textContent = '📁 ' + ws.name;
   head.appendChild(name);
   var idTag = document.createElement('span');
   idTag.className = 'meta';
@@ -247,57 +313,66 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   var derivedOf = {};
   configs.forEach(function(c){ if (c.derivedFrom !== undefined) { (derivedOf[c.derivedFrom] = derivedOf[c.derivedFrom] || []).push(c); } });
 
-  // 配置 分组
-  var cfgGroup = document.createElement('div');
-  cfgGroup.className = 'group';
-  var cfgTitle = document.createElement('div');
-  cfgTitle.className = 'group-title';
-  cfgTitle.textContent = '配置（' + parents.length + '）';
-  cfgGroup.appendChild(cfgTitle);
+  // 可折叠 group 构造器：标题（▶/▼ + 文字）点击切 body 显示
+  function buildGroup(titleText, icon) {
+    var group = document.createElement('div');
+    group.className = 'group';
+    var head = document.createElement('div');
+    head.className = 'group-title';
+    var tog = document.createElement('span');
+    tog.className = 'toggle';
+    tog.textContent = '▼';
+    head.appendChild(tog);
+    head.appendChild(document.createTextNode(' ' + (icon || '') + ' ' + titleText));
+    var gb = document.createElement('div');
+    gb.className = 'group-body';
+    head.onclick = function() {
+      var hidden = gb.style.display === 'none';
+      gb.style.display = hidden ? '' : 'none';
+      tog.textContent = hidden ? '▼' : '▶';
+    };
+    group.appendChild(head);
+    group.appendChild(gb);
+    return { group: group, body: gb };
+  }
 
+  // 配置 分组
+  var cfgG = buildGroup('配置（' + parents.length + '）', '📄');
+  var cfgBody = cfgG.body;
   // 新建配置链接
   var newCfgLink = document.createElement('a');
   newCfgLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/new/edit';
   newCfgLink.textContent = '+ 新建配置';
   newCfgLink.className = 'cfg-link';
-  cfgGroup.appendChild(newCfgLink);
+  cfgBody.appendChild(newCfgLink);
 
   parents.forEach(function(cfg) {
-    cfgGroup.appendChild(buildConfigRow(ws, cfg, activeId, false));
-    // 派生配置挂父下（派生配置可展开，下挂其派生终端）
+    cfgBody.appendChild(buildConfigRow(ws, cfg, activeId, false));
     var deriveds = derivedOf[cfg.id] || [];
     deriveds.forEach(function(dc) {
-      cfgGroup.appendChild(buildDerivedConfigRow(ws, dc));
+      cfgBody.appendChild(buildDerivedConfigRow(ws, dc));
     });
   });
   if (parents.length === 0) {
     var hint = document.createElement('div');
     hint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
     hint.textContent = '（无配置，点上面「新建配置」创建）';
-    cfgGroup.appendChild(hint);
+    cfgBody.appendChild(hint);
   }
-  body.appendChild(cfgGroup);
+  body.appendChild(cfgG.group);
 
   // 终端 分组（列全部终端：静态 + 别名 统一挂这里）
-  // 起终端入口在配置行内（静态/别名配置行都有「新建终端」按钮，带 cfgId），
-  // 终端组不另设起终端按钮（无 cfgId 会依赖默认配置，未标记时报错）。
-  var termGroup = document.createElement('div');
-  termGroup.className = 'group';
-  var termTitle = document.createElement('div');
-  termTitle.className = 'group-title';
-  termTitle.textContent = '终端（' + normalTerms.length + '）';
-  termGroup.appendChild(termTitle);
-
+  var termG = buildGroup('终端（' + normalTerms.length + '）', '🖥');
   normalTerms.forEach(function(t) {
-    termGroup.appendChild(buildTerminalRow(t));
+    termG.body.appendChild(buildTerminalRow(t));
   });
   if (normalTerms.length === 0) {
     var tHint = document.createElement('div');
     tHint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
     tHint.textContent = '（无终端，点上方配置行的「新建终端」开启）';
-    termGroup.appendChild(tHint);
+    termG.body.appendChild(tHint);
   }
-  body.appendChild(termGroup);
+  body.appendChild(termG.group);
 }
 
 // 派生配置行：只渲染配置本身（终端统一挂终端组，不再挂配置节点下）
@@ -316,7 +391,8 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
   editLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/edit';
   editLink.className = 'cfg-link';
   var modeLabel = (cfg.mode === 'proxy') ? '[代理]' : '[直连]';
-  var label = (isDerived ? '  ↳ 别名配置 #' + (cfg.derivedIndex || '') + '  ' + (cfg.name || cfg.id) : '· ' + (cfg.name || cfg.id) + ' ' + modeLabel);
+  var icon = isDerived ? '🔀' : '📄';
+  var label = (isDerived ? ' ↳ 别名配置 #' + (cfg.derivedIndex || '') + '  ' + (cfg.name || cfg.id) : icon + ' ' + (cfg.name || cfg.id) + ' ' + modeLabel);
   editLink.textContent = label;
   row.appendChild(editLink);
   // 默认配置标记（目标2：激活弱化为只写标记，不写 settings.json）
@@ -334,7 +410,7 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
       row.appendChild(actBtn);
     }
   }
-  // 静态配置：可新建终端 + 新建别名配置
+  // 静态配置：可新建终端 + 新建别名配置（主操作显文字）
   if (!isDerived) {
     var stBtn = document.createElement('button');
     stBtn.className = 'cfg-new-term';
@@ -357,16 +433,17 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
     dtBtn.onclick = function() { newConfigTerminal(ws.id, cfg.id); };
     row.appendChild(dtBtn);
   }
-  // 重命名 + 删除（静态/别名都有；别名重命名只改 name，#N 编号后端保留）
+  // 重命名 + 删除（次要操作，hover 图标按钮；别名重命名只改 name，#N 编号后端保留）
   var rnBtn = document.createElement('button');
-  rnBtn.className = 'cfg-act';
-  rnBtn.textContent = '重命名';
+  rnBtn.className = 'icon-btn';
+  rnBtn.textContent = '✎';
+  rnBtn.title = '重命名';
   rnBtn.onclick = function() { renameConfig(ws.id, cfg, cfg.name); };
   row.appendChild(rnBtn);
   var delCfgBtn = document.createElement('button');
-  delCfgBtn.className = 'danger';
-  delCfgBtn.style.cssText = 'padding:2px 8px;font-size:0.8rem';
-  delCfgBtn.textContent = '删除';
+  delCfgBtn.className = 'icon-btn';
+  delCfgBtn.textContent = '✕';
+  delCfgBtn.title = '删除';
   delCfgBtn.onclick = function() { deleteConfig(ws.id, cfg); };
   row.appendChild(delCfgBtn);
   return row;
@@ -387,9 +464,9 @@ function buildTerminalRow(t) {
   meta.textContent = 'pid=' + t.pid;
   row.appendChild(meta);
   var stopBtn = document.createElement('button');
-  stopBtn.className = 'danger';
-  stopBtn.style.cssText = 'padding:1px 6px;font-size:0.75rem';
-  stopBtn.textContent = '停止';
+  stopBtn.className = 'icon-btn';
+  stopBtn.textContent = '✕';
+  stopBtn.title = '停止';
   stopBtn.onclick = function() { stopTerminal(t.terminalId, stopBtn); };
   row.appendChild(stopBtn);
   return row;
