@@ -343,3 +343,48 @@ test('managementPort: linux → 11535', () => {
 test('managementPort: darwin → 11536', () => {
     assert.equal(managementPort('darwin'), 11536);
 });
+
+// ════════════════════════════════════════════════════════════
+// 持久化：建配置 → 停服务 → 重启 → 配置仍在（防数据丢失回归）
+// ════════════════════════════════════════════════════════════
+test('持久化: 建 workspace + 配置 → 重启服务 → 配置仍在', async () => {
+    const MAIN_JS = resolve(__dirname, '..', '..', 'standalone', 'main.js');
+    const { launchStandalone, ensureConfig } = await import(pathToFileURL(MAIN_JS).href);
+    const home = newTmpHome('persist');
+    // 改 config 端口避开真实代理
+    const ensured = await ensureConfig(home);
+    const cfg = JSON.parse(fs.readFileSync(ensured.configPath, 'utf8'));
+    cfg.proxy.listenPort = 11760;
+    fs.writeFileSync(ensured.configPath, JSON.stringify(cfg), 'utf8');
+    const proj = newTmpProjectDir('persist');
+
+    // 第一次启动：建 workspace + 2 配置
+    const s1 = await launchStandalone({ homeDir: home, mgmtPort: 11860, log: () => {} });
+    const port1 = s1.mgmt.port;
+    const wsRes = await fetch(`http://127.0.0.1:${port1}/api/workspaces`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'w', dir: proj }),
+    });
+    const wsId = (await wsRes.json()).workspace.id;
+    const DIRECT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'm' } });
+    await fetch(`http://127.0.0.1:${port1}/api/workspaces/${wsId}/configs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'c1', content: DIRECT, mode: 'direct' }) });
+    await fetch(`http://127.0.0.1:${port1}/api/workspaces/${wsId}/configs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'c2', content: DIRECT, mode: 'proxy' }) });
+    const before = await (await fetch(`http://127.0.0.1:${port1}/api/workspaces/${wsId}`)).json();
+    assert.equal((before.configs || []).length, 2, '建后应有 2 配置');
+    await s1.stop();
+    await new Promise(r => setTimeout(r, 300));
+
+    // 重启：用同一 CCP_HOME
+    const s2 = await launchStandalone({ homeDir: home, mgmtPort: 11861, log: () => {} });
+    const port2 = s2.mgmt.port;
+    const wsList = await (await fetch(`http://127.0.0.1:${port2}/api/workspaces`)).json();
+    const ws = wsList.workspaces.find(w => w.id === wsId);
+    assert.ok(ws, '重启后 workspace 仍在');
+    const after = await (await fetch(`http://127.0.0.1:${port2}/api/workspaces/${wsId}`)).json();
+    assert.equal((after.configs || []).length, 2, '重启后配置应仍在（持久化）');
+    assert.ok(after.configs.find(c => c.name === 'c1'), 'c1 在');
+    assert.ok(after.configs.find(c => c.name === 'c2'), 'c2 在');
+    await s2.stop();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(proj, { recursive: true, force: true });
+});

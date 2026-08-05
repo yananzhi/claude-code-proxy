@@ -45,7 +45,7 @@ export function defaultNewId() {
  * 与旧版（per-workspace 单会话、reuse-on-exist）区别：
  *   - start 永远 spawn 新 PTY（不 reuse）——支持同一 workspace/config 多终端
  *   - handle 多存 configId/workspaceId/startedConfigName/kind/configDir，供 listBy* 查询
- *   - stop 时 rmSync 清理 per-terminal configDir（派生终端的独立目录）
+ *   - 不清理 configDir（目标1 后共享 {ws}/.claude_proxy，删它丢 local-configs.json + CLI 引导标记）
  */
 export class ClaudeSessionManager {
     constructor(opts = {}) {
@@ -145,14 +145,9 @@ export class ClaudeSessionManager {
             this.log(`[claudeSession] 终端 ${terminalId} 退出 code=${exitCode} signal=${signal}`);
             handle.disposed = true; // 防 ws message 在 close 前仍写死 PTY
             this.sessions.delete(terminalId);
-            // 清理 per-terminal configDir（派生终端的独立空目录；normal 终端 configDir=.claude_proxy，rmSync force 忽略）
-            if (handle.configDir && handle.kind === 'derived') {
-                try {
-                    fs.rmSync(handle.configDir, { recursive: true, force: true });
-                } catch (e) {
-                    this.log(`[claudeSession] 清理 configDir 失败（忽略）: ${e?.message || String(e)}`);
-                }
-            }
+            // ⚠ 不 rmSync configDir：目标1 后 configDir 共享 {ws}/.claude_proxy（含 local-configs.json
+            // + CLI 的 .claude.json/onboarding 标记），删它会导致配置丢失 + 重新引导。per-terminal 时代的
+            // 清理逻辑已不适用（共享目录不能删）。CLI 会在 configDir 写状态，但不该被我们清。
             // 通知所有 WS 客户端
             for (const ws of handle.wsClients) {
                 if (ws.readyState === ws.OPEN) {
@@ -202,14 +197,8 @@ export class ClaudeSessionManager {
             this.log(`[claudeSession] kill ${terminalId} 异常: ${e?.message || String(e)}`);
         }
         this.sessions.delete(terminalId);
-        // 清理 per-terminal configDir（派生终端的独立空目录）
-        if (handle.configDir && handle.kind === 'derived') {
-            try {
-                fs.rmSync(handle.configDir, { recursive: true, force: true });
-            } catch (e) {
-                this.log(`[claudeSession] 清理 configDir 失败（忽略）: ${e?.message || String(e)}`);
-            }
-        }
+        // ⚠ 不 rmSync configDir：configDir 共享 {ws}/.claude_proxy（含 local-configs.json），
+        // 删它会丢配置。per-terminal 时代的清理已不适用。
         // 关闭所有 WS
         for (const ws of handle.wsClients) {
             if (ws.readyState === ws.OPEN) {

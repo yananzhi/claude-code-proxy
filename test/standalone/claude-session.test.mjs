@@ -263,6 +263,40 @@ test('D4e: PTY 自然退出 → onExit 清 Map', async () => {
     assert.equal(mgr.status('t4'), null);
 });
 
+// 看护：PTY 退出后 configDir 里的 local-configs.json 不被删（防数据丢失回归）
+// 旧 bug：configDir 改共享 {ws}/.claude_proxy 后，onExit/stop 仍 rmSync configDir
+// → 终端退出即删整个 .claude_proxy（含 local-configs.json），配置全丢。
+test('D4e2: PTY 退出后 configDir 的 local-configs.json 仍在（不 rmSync 共享 configDir）', async () => {
+    const mockPty = makeMockPty();
+    const mgr = new ClaudeSessionManager({ log: () => {}, pty: mockPty });
+    // configDir 模拟共享 {ws}/.claude_proxy（含 local-configs.json）
+    const configDir = newTmpDir('shareddir');
+    const { writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    writeFileSync(join(configDir, 'local-configs.json'), '[]', 'utf8');
+    await mgr.start('t', makeStartParams({ configDir, kind: 'derived' }));
+    // 触发 PTY 退出
+    mockPty._handles[0]._emitExit(0);
+    // local-configs.json 应仍在（旧 bug 会 rmSync 整个 configDir）
+    const { existsSync } = await import('node:fs');
+    assert.ok(existsSync(join(configDir, 'local-configs.json')), 'PTY 退出不应删 local-configs.json');
+    assert.ok(existsSync(configDir), 'configDir 不应被删');
+});
+
+// 看护：stop() 也不删 configDir 的 local-configs.json（防 stop 路径 rmSync）
+test('D4e3: stop() 后 configDir 的 local-configs.json 仍在', async () => {
+    const mockPty = makeMockPty();
+    const mgr = new ClaudeSessionManager({ log: () => {}, pty: mockPty });
+    const configDir = newTmpDir('stopdir');
+    const { writeFileSync, existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    writeFileSync(join(configDir, 'local-configs.json'), '[]', 'utf8');
+    await mgr.start('t', makeStartParams({ configDir, kind: 'derived' }));
+    await mgr.stop('t');
+    assert.ok(existsSync(join(configDir, 'local-configs.json')), 'stop 不应删 local-configs.json');
+    assert.ok(existsSync(configDir), 'stop 不应删 configDir');
+});
+
 test('D4f: listByWorkspace → 返回该 workspace 的活终端', async () => {
     const mockPty = makeMockPty();
     const mgr = new ClaudeSessionManager({ log: () => {}, pty: mockPty });
