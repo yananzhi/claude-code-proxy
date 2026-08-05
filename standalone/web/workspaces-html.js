@@ -423,27 +423,42 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
   var barInfo = document.getElementById('barInfo');
 
   // 顶栏：查终端详情 + 别名映射（别名终端显示 ccp-<tier>-N → 真实模型）
+  // polling：别名映射在配置编辑页可被实时修改，终端页打开期间需轮询保持顶栏最新。
+  // 变化检测：只在新旧文本不同时更新 DOM，避免无谓重绘。页面隐藏时暂停省资源。
+  var lastBarText = '';
+  function renderBarInfo(d) {
+    var text = '';
+    if (d.kind === 'derived' && d.derivedIndex) {
+      var idx = d.derivedIndex;
+      var aliases = d.modelAliases || {};
+      var tiers = [['main','ccp-main-'],['haiku','ccp-haiku-'],['sonnet','ccp-sonnet-'],['opus','ccp-opus-']];
+      var parts = ['[别名] #' + idx];
+      tiers.forEach(function(t) {
+        var real = aliases[t[0]];
+        if (real) parts.push(t[1] + idx + ' → ' + real);
+      });
+      text = parts.join(', ');
+    } else if (d.kind === 'normal') {
+      text = '[静态] ' + (d.startedConfigName || '');
+    }
+    if (text && text !== lastBarText) {
+      barInfo.textContent = text;
+      lastBarText = text;
+    }
+  }
   function refreshBarInfo() {
     fetch(apiBase + '/api/terminals/' + encodeURIComponent(tid) + '/alias-resolve')
       .then(function(r) { return r.json(); })
-      .then(function(d) {
-        if (d.kind === 'derived' && d.derivedIndex) {
-          var idx = d.derivedIndex;
-          var aliases = d.modelAliases || {};
-          var tiers = [['main','ccp-main-'],['haiku','ccp-haiku-'],['sonnet','ccp-sonnet-'],['opus','ccp-opus-']];
-          var parts = ['[别名] #' + idx];
-          tiers.forEach(function(t) {
-            var real = aliases[t[0]];
-            if (real) parts.push(t[1] + idx + ' → ' + real);
-          });
-          barInfo.textContent = parts.join('  ');
-        } else if (d.kind === 'normal') {
-          barInfo.textContent = '[静态] ' + (d.startedConfigName || '');
-        }
-      })
+      .then(renderBarInfo)
       .catch(function() { /* 查询失败不影响终端使用，保留默认文案 */ });
   }
   refreshBarInfo();
+  // polling：页面可见时每 4s 轮询别名映射（别名变更是低频用户操作，4s 足够）
+  var pollTimer = setInterval(function() {
+    if (!document.hidden) refreshBarInfo();
+  }, 4000);
+  // 页面卸载时清理
+  window.addEventListener('beforeunload', function() { clearInterval(pollTimer); });
 
   // 检查 xterm 是否加载成功（CDN 失败时 Terminal 未定义）
   if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {

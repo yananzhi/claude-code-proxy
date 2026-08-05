@@ -236,6 +236,23 @@ test('T3e: buildTerminalHtml 渲染别名→真实模型（[别名] #N ccp-xxx�
     assert.ok(/resolvedModel|真实模型|→/.test(html), '顶栏应渲染 别名→真实模型 映射');
 });
 
+test('T3f: 别名各档之间用逗号分隔（非空格粘连）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    // parts.join 应为 ', '（逗号分隔），非 '  '（空格粘连）
+    assert.ok(html.includes("parts.join(', ')"), '各档应逗号分隔');
+    assert.ok(!html.includes("parts.join('  ')"), '不应空格粘连');
+});
+
+test('T3g: 顶栏别名映射 polling 实时刷新（setInterval + 可见性暂停 + 清理）', () => {
+    const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
+    // 应有 setInterval 轮询 alias-resolve（别名映射变更后顶栏自动更新）
+    assert.ok(/setInterval/.test(html), '应有 setInterval 轮询');
+    assert.ok(/document\.hidden/.test(html), '页面隐藏时应暂停轮询省资源');
+    assert.ok(/beforeunload|clearInterval/.test(html), '页面卸载应清理轮询定时器');
+    // 变化检测：只在新旧文本不同时更新 DOM
+    assert.ok(/lastBarText|text !== lastBarText/.test(html), '应有变化检测避免无谓重绘');
+});
+
 // ════════════════════════════════════════════════════════════
 // 目标6 代码审查 TDD：前端 6 类怀疑点逐条确认
 // ════════════════════════════════════════════════════════════
@@ -276,7 +293,7 @@ test('G2-fe: refreshBarInfo 有 .catch 兜底（fetch 失败不崩）', () => {
 test('G3-fe: modelAliases 为空时顶栏仍显示 [别名] #N（非空白）', () => {
     const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
     // 验证 parts 初始含 '[别名] #' + idx（即使 modelAliases 为空也有编号）
-    const refreshFnMatch = html.match(/function refreshBarInfo[\s\S]*?^  }/m);
+    const refreshFnMatch = html.match(/function renderBarInfo[\s\S]*?^  }/m);
     assert.ok(refreshFnMatch, '应存在 refreshBarInfo 函数');
     // parts 应初始化为 ['[别名] #' + idx]（至少一项，空 modelAliases 也有编号）
     assert.ok(/\[别名\]\s*#\s*['"]?\s*\+/.test(refreshFnMatch[0]) ||
@@ -307,7 +324,7 @@ test('G3-source: alias-resolve 路由 modelAliases 有 || {} 兜底', () => {
 //   这是设计接受的降级（derivedIndex=0 不合法，不出现），但 truthy 检查比 >= 1 检查脆弱。
 test('G4-fe: 前端 derivedIndex 检查为 truthy（derivedIndex=0 会跳过，但校验保证 >=1）', () => {
     const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
-    const refreshFnMatch = html.match(/function refreshBarInfo[\s\S]*?^  }/m);
+    const refreshFnMatch = html.match(/function renderBarInfo[\s\S]*?^  }/m);
     assert.ok(refreshFnMatch, '应存在 refreshBarInfo 函数');
     // 前端检查 d.derivedIndex truthy（非 d.derivedIndex >= 1）
     assert.ok(/d\.derivedIndex/.test(refreshFnMatch[0]), '应检查 d.derivedIndex');
@@ -346,7 +363,7 @@ test('G5-fe: 终端页只调 alias-resolve（不重复调 GET /terminals/:tid）
 //   若 tiers 硬编码固定顺序则非 bug。
 test('G6-fe: 顶栏 tiers 顺序固定 main → haiku → sonnet → opus', () => {
     const html = buildTerminalHtml({ terminalId: 't_x', apiBase: '' });
-    const refreshFnMatch = html.match(/function refreshBarInfo[\s\S]*?^  }/m);
+    const refreshFnMatch = html.match(/function renderBarInfo[\s\S]*?^  }/m);
     assert.ok(refreshFnMatch, '应存在 refreshBarInfo 函数');
     const fn = refreshFnMatch[0];
     // 验证 tiers 数组顺序
