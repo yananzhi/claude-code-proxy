@@ -139,6 +139,27 @@ test('T1i: 静态配置显示「设为默认」按钮（别名配置不显示，
     assert.ok(!html.includes("'激活'") && !html.includes('"激活"'), '不应残留旧「激活」文案');
 });
 
+test('T1j: 配置行有「重命名」+「删除」按钮 + renameConfig/deleteConfig 函数', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    assert.ok(html.includes('renameConfig'), '应有 renameConfig 函数');
+    assert.ok(html.includes('deleteConfig'), '应有 deleteConfig 函数');
+    assert.ok(html.includes('重命名'), '应有「重命名」按钮文案');
+    // 删除按钮（配置行，非 workspace 的删除）
+    assert.ok(/delCfgBtn/.test(html), '应有配置删除按钮变量');
+    // 重命名提示 #N 不变
+    assert.ok(/编号.*不变|derivedIndex.*不变|cfg\.derivedIndex/.test(html), '重命名应提示 #N 编号不变');
+});
+
+// 看护：生成的内联 JS 必须语法合法（防模板字符串里 \n 误用导致整 script 解析失败）
+// 之前 deleteConfig 的 confirm('...\n...') 里 \n 在外层模板字符串里被解析成真实换行，
+// 致单引号字符串跨行 → JS 语法错 → loadList 不执行 → 配置组不渲染（e2e 才抓得到，单测盲区）。
+test('T1k: buildWorkspacesHtml 内联 <script> JS 语法合法', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    const m = html.match(/<script>([\s\S]*?)<\/script>/);
+    assert.ok(m, '应有内联 <script>');
+    assert.doesNotThrow(() => new Function(m[1]), '内联 JS 应语法合法（无跨行字符串/未转义字符）');
+});
+
 test('T1e: 不含旧 /workspace/:id/terminal 链接', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
     assert.ok(!html.match(/\/workspace\/.*\/terminal/), '不应残留旧 /workspace/:id/terminal 链接');

@@ -159,6 +159,61 @@ test('D1c: DELETE config → 200', async () => {
     }
 });
 
+// 重命名别名配置：只改 name，#N（derivedIndex）不变（后端 updateLocalConfig 用 ...existing 保留）
+test('D1h: 重命名别名配置 → name 变，derivedIndex 不变', async () => {
+    const { handle, port, home } = await startMgmt('d1h');
+    const { wsId, proj } = await createWorkspace(port, 'd1h');
+    try {
+        const parent = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'p', mode: 'proxy', content: PARENT_CONTENT }),
+        })).json();
+        const dc = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'old-name', derivedFrom: parent.config.id, derivedIndex: 5 }),
+        })).json();
+        // 重命名
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${dc.config.id}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'new-name' }),
+        });
+        assert.equal(r.status, 200);
+        const updated = (await r.json()).config;
+        assert.equal(updated.name, 'new-name', 'name 应更新');
+        assert.equal(updated.derivedIndex, 5, 'derivedIndex 不应变（#N 是唯一 id）');
+        assert.equal(updated.derivedFrom, parent.config.id, 'derivedFrom 不应变');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// 删除别名配置
+test('D1i: DELETE 别名配置 → 200 + 列表减少', async () => {
+    const { handle, port, home } = await startMgmt('d1i');
+    const { wsId, proj } = await createWorkspace(port, 'd1i');
+    try {
+        const parent = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'p', mode: 'proxy', content: PARENT_CONTENT }),
+        })).json();
+        const dc = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'c', derivedFrom: parent.config.id, derivedIndex: 1 }),
+        })).json();
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${dc.config.id}`, { method: 'DELETE' });
+        assert.equal(r.status, 200);
+        const list = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`)).json();
+        assert.ok(!list.configs.find(c => c.id === dc.config.id), '别名配置应已删除');
+        assert.ok(list.configs.find(c => c.id === parent.config.id), '父配置应保留');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
+    }
+});
+
 test('D1g: 更新/删除不存在的 config → 404', async () => {
     const { handle, port, home } = await startMgmt('d1g');
     const { wsId, proj } = await createWorkspace(port, 'd1g');

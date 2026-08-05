@@ -138,6 +138,34 @@ function stopTerminal(tid, btn) {
     .then(function(d) { loadList(); })
     .catch(function(e) { showMsg(e.message, 'err'); });
 }
+// 重命名配置（只改 name，#N 编号不动——后端 updateLocalConfig 保留 derivedIndex）
+function renameConfig(wsId, cfg, oldName) {
+  var newName = prompt('重命名配置：', oldName || cfg.id);
+  if (newName === null) return;
+  newName = String(newName).trim();
+  if (!newName) { showMsg('名字不能为空', 'err'); return; }
+  if (newName === oldName) return;
+  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfg.id), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: newName }),
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) { showMsg('重命名失败: ' + d.error, 'err'); return; }
+    showMsg('已重命名' + (cfg.derivedIndex ? '（编号 #' + cfg.derivedIndex + ' 不变）' : ''), 'ok');
+    loadList();
+  }).catch(function(e) { showMsg('重命名异常: ' + e.message, 'err'); });
+}
+// 删除配置
+function deleteConfig(wsId, cfg) {
+  var label = cfg.name || cfg.id;
+  if (cfg.derivedIndex) label += ' #' + cfg.derivedIndex;
+  if (!confirm('删除配置 "' + label + '"？（别名配置删除后，代理侧的别名映射建议一并清理）')) return;
+  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfg.id), { method: 'DELETE' })
+    .then(function(r) { return r.json(); }).then(function(d) {
+      if (d.error) { showMsg('删除失败: ' + d.error, 'err'); return; }
+      showMsg('已删除', 'ok');
+      loadList();
+    }).catch(function(e) { showMsg('删除异常: ' + e.message, 'err'); });
+}
 
 async function loadList() {
   try {
@@ -329,6 +357,18 @@ function buildConfigRow(ws, cfg, activeId, isDerived) {
     dtBtn.onclick = function() { newConfigTerminal(ws.id, cfg.id); };
     row.appendChild(dtBtn);
   }
+  // 重命名 + 删除（静态/别名都有；别名重命名只改 name，#N 编号后端保留）
+  var rnBtn = document.createElement('button');
+  rnBtn.className = 'cfg-act';
+  rnBtn.textContent = '重命名';
+  rnBtn.onclick = function() { renameConfig(ws.id, cfg, cfg.name); };
+  row.appendChild(rnBtn);
+  var delCfgBtn = document.createElement('button');
+  delCfgBtn.className = 'danger';
+  delCfgBtn.style.cssText = 'padding:2px 8px;font-size:0.8rem';
+  delCfgBtn.textContent = '删除';
+  delCfgBtn.onclick = function() { deleteConfig(ws.id, cfg); };
+  row.appendChild(delCfgBtn);
   return row;
 }
 
