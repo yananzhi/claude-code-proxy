@@ -38,6 +38,22 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 
 **规则**：扩展宿主侧调本地代理接口**一律用裸 `net` socket**（`proxyHost.rawHttp`），不用 `http.get`/`http.request`/`fetch`。新增 wrapper 照 `rawHttp` 模式写。服务端 `res.end` 出口仍配 `Content-Length`（为非扩展宿主客户端）。
 
+### 插件模式普通配置必须走 settings.json 注入（不能改成纯 env）
+
+**⚠ 约束（别动）**：插件模式普通配置（direct/proxy，非派生）启动 CLI 时，`ANTHROPIC_BASE_URL`/token 等路由 key **必须写入 `.claude_proxy/settings.json` 的 `env` 字段**，由 CLI 从文件读——**不能**像 standalone 那样改成纯进程 env 注入。
+
+**原因**：插件模式下 Claude Code 有**两种启动入口**：
+1. **本扩展起的集成终端**（`claudeLauncher.launch()`）——能注入 shell env，理论上能走 env。
+2. **官方 Claude Code 插件的聊天框**（`anthropic.claude-code` 扩展的 chat panel）——**不在本扩展进程树里，拿不到本扩展注入的 shell env**，只能读 `CLAUDE_CONFIG_DIR` 指向目录下的 `settings.json`。
+
+如果改成纯 env 注入，入口 2 会因读不到 `ANTHROPIC_BASE_URL`/token 而连不上代理/上游。除非**主动放弃官方插件的聊天框、只用本扩展的终端**，才能去掉 settings.json 路由。当前产品决策：**保留聊天框入口 → 保留 settings.json 注入**。
+
+**派生节点（derived）是例外**：派生节点的四档别名走 shell env（`buildAliasEnv`），`launchDerived` 会**显式删除** settings.env 里的同名别名 key（`claudeLauncher.ts:467-470`），防覆盖 shell env。这是"冻结前提"——settings.env 不能含同名别名 key，否则覆盖 shell env 致别名失效。派生节点能这么做，是因为派生会话只从本扩展终端启动、不走官方聊天框。
+
+**与 standalone 混用同一 workspace 的坑**：standalone 启动终端前检测 `.claude_proxy/settings.json` 的 `env` 是否含路由 key（`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_*_MODEL`），**有则拒绝启动**（`standalone/terminalApi.js:85-106`，因 standalone 走 env 注入、认为 settings 同名 key 会覆盖 env 致路由错乱）。所以插件模式用过的普通配置（settings.json 留了路由 key），切到 standalone 起同一 workspace 的终端会被拦。派生配置因 settings 不留路由 key，两种模式混用反而顺。
+
+**规则**：插件模式普通配置的路由 key **保持写 settings.json**，不要为"统一成 env"去改 `launch()`。standalone 的冲突检测也别放宽（放宽=容忍 settings 路由 key，会让 standalone 的 env 注入被 settings 覆盖、路由错乱）。两模式混用同一 workspace 时，普通配置天然不互通——这是已知且可接受的取舍。
+
 ## 架构速览
 
 - `src/`：VS Code 扩展 TS（编译到 `out/`，CommonJS）。
