@@ -4,8 +4,7 @@ import * as vscode from 'vscode';
 import type { LLMConfig } from './types';
 import type { LocalConfigStore, LocalActiveStateStore } from './localConfigStore';
 import { ProxyHost, UpstreamEnv } from './proxyHost';
-import { writeSettings } from './claudeConfig';
-import { extractUpstream, synthesizeProxySettings } from './upstream';
+import { extractUpstream } from './upstream';
 import { resolveDerivedUpstream, computeAliasSyncActions, buildAliasEnv } from './derivedLogic';
 import { resolveClaudeBinary } from './claudeBinary';
 
@@ -18,14 +17,20 @@ const WORKSPACE_CONFIG_DIR = '.claude_proxy';
  * 在 VS Code 集成终端里启动一个 workspace 独立的 Claude Code CLI 会话。
  *
  * 通过 `CLAUDE_CONFIG_DIR` 环境变量把会话配置目录指向 `{workspace}/.claude_proxy/`，
- * 使该 workspace 的 Claude 状态独立于全局 `~/.claude/`。启动前把当前 workspace-local
- * active 配置写进该目录的 settings.json（proxy 模式走本地代理合成，与全局 doSwitch 一致）；
- * 无 local active 则不写 settings.json，claude 用默认。不再读取 global activeState。
+ * 使该 workspace 的 Claude 状态独立于全局 `~/.claude/`。路由 key（BASE_URL/token/model 等）
+ * 通过 createTerminal 的 env 选项进程级注入，**不写 `.claude_proxy/settings.json` 的路由 env**
+ * （与 standalone `buildTerminalEnv` 一致）——这样插件终端与 standalone 可无缝共用同一 workspace
+ * 文件夹（standalone 冲突检测不会被触发）。无 local active 则不注入路由 env，claude 用默认。
+ * permissions 由 `ensureProjectPermissions` 写 `.claude/settings.local.json`。
+ *
+ * 与 global 链路的边界：`doSwitch`（global config）仍写 `~/.claude/settings.json` 供官方聊天框读
+ * （聊天框拿不到本扩展注入的 `CLAUDE_CONFIG_DIR`，走默认 `~/.claude/`）。workspace-local 链路
+ * （本类 launch/launchDerived）与 global 链路各读各的 settings、互不污染。
  *
  * 硬约束：
  * - shell：Windows 强制 PowerShell——启动命令用 PowerShell 调用操作符 `& "path"`，
  *   若默认终端是 Git Bash 会因不认 `&` 报错；统一 PowerShell 保证命令语法正确解析。
- *   （路径转义不是问题：env 进程级注入、settings.json 由扩展写、二进制路径用引号包。）
+ *   （路径转义不是问题：env 进程级注入、二进制路径用引号包。）
  *   Linux/macOS 不传 shellPath，用平台默认 shell。
  * - env 用 createTerminal 的 env 选项进程级注入，跨 shell 无需区分语法。
  * - 二进制用完整绝对路径调用，不依赖 PATH。
@@ -52,62 +57,78 @@ export class ClaudeLauncher {
     }
 
     /**
-     * 合成要写入 `.claude_proxy/settings.json` 的内容。
-     * - 直连模式：原样使用 cfg.content。
-     * - proxy 模式：确保本地代理在跑 + 注入上游 + 合成指向 localhost 的 settings（与 doSwitch 一致）。
+     * 为 workspace-local 终端构建进程级 env（路由 key 注入，不写 settings.json）。
+     * 镜像 standalone `buildTerminalEnv` 的 normal 分支（standalone/terminalApi.js）。
+     * - direct：env 注入上游真实 BASE_URL/token/model，不碰代理。
+     * - proxy：确保代理运行 + 注入上游 + BASE_URL 指向 http://127.0.0.1:<port>。
      * 返回 null 表示因配置/代理问题应中止（已向用户报错）。
      */
-    private async resolveSettingsContent(cfg: LLMConfig): Promise<string | null> {
-        const mode = cfg.mode === 'proxy' ? 'proxy' : 'direct';
-        if (mode === 'direct') {
-            return cfg.content;
+    private async buildWorkspaceEnv(cfg: LLMConfig): Promise<Record<string, string> | null> {
+        const parsed = extractUpstream(cfg.content);
+        if (!parsed) {
+            void vscode.window.showErrorMessage(`'${cfg.name}' content 不是有效 JSON，无法解析 env`);
+            return null;
+        }
+        const baseUrl = parsed.env.ANTHROPIC_BASE_URL;
+        const token = parsed.env.ANTHROPIC_AUTH_TOKEN;
+        // 类型守卫：extractUpstream 把 obj.env 强转为 Record<string,string>，但实际值可能是数字/对象。
+        // 非字符串的 baseUrl/token 视为缺失（与 standalone buildTerminalEnv typeof 守卫一致）。
+        if (typeof baseUrl !== 'string' || !baseUrl || typeof token !== 'string' || !token) {
+            void vscode.window.showErrorMessage(`'${cfg.name}' 缺少 env.ANTHROPIC_BASE_URL 或 ANTHROPIC_AUTH_TOKEN`);
+            return null;
         }
 
-        // proxy 模式：复用 doSwitch 的代理注入 + 合成逻辑
-        const upstream = extractUpstream(cfg.content);
-        if (!upstream || !upstream.env.ANTHROPIC_BASE_URL || !upstream.env.ANTHROPIC_AUTH_TOKEN) {
-            void vscode.window.showErrorMessage(
-                `'${cfg.name}' 缺少 env.ANTHROPIC_BASE_URL 或 ANTHROPIC_AUTH_TOKEN，无法走代理。`,
-            );
-            return null;
+        // timeoutSec：API_TIMEOUT_MS 毫秒→秒，空/非数/非正→undefined（与 derived normalizeTimeoutSec 一致）
+        const tNum = Number(parsed.env.API_TIMEOUT_MS);
+        const timeoutSec = Number.isFinite(tNum) && tNum > 0 ? Math.round(tNum / 1000) : undefined;
+
+        const env: Record<string, string> = {};
+
+        if (cfg.mode === 'proxy') {
+            if (!this.proxyHost) {
+                void vscode.window.showErrorMessage('代理尚未初始化');
+                return null;
+            }
+            try {
+                await this.proxyHost.ensureRunning();
+                const upstreamEnv: UpstreamEnv = {
+                    baseUrl,
+                    token,
+                    model: typeof parsed.env.ANTHROPIC_MODEL === 'string' && parsed.env.ANTHROPIC_MODEL
+                        ? parsed.env.ANTHROPIC_MODEL : undefined,
+                    smallFastModel: typeof parsed.env.ANTHROPIC_SMALL_FAST_MODEL === 'string' && parsed.env.ANTHROPIC_SMALL_FAST_MODEL
+                        ? parsed.env.ANTHROPIC_SMALL_FAST_MODEL : undefined,
+                    timeoutSec,
+                };
+                await this.proxyHost.setUpstream(upstreamEnv);
+                // ⚠️ 代理上游是全局共享单例（见 docs/pitfall-proxy-shared-upstream.md）：
+                // 若同时有别的 proxy 会话用了不同上游，此处会把全局上游改成本配置的上游，
+                // 导致旧会话的请求被转发到错误后端（静默串味，无报错）。记日志便于事后排查。
+                this.output.appendLine(
+                    `[launcher] 已注入全局代理上游: baseUrl=${baseUrl} model=${upstreamEnv.model ?? '(unset)'}（来自 local 配置 '${cfg.name}'）。` +
+                    `注意：代理进程全局共享，若并发的其它 proxy 会话用不同上游，会互相串味。`,
+                );
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(`代理模式启动/注入失败: ${msg}`);
+                return null;
+            }
+            env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${this.proxyHost.getPort()}`;
+        } else {
+            env.ANTHROPIC_BASE_URL = baseUrl;
         }
-        if (!this.proxyHost) {
-            void vscode.window.showErrorMessage('代理尚未初始化');
-            return null;
+
+        env.ANTHROPIC_AUTH_TOKEN = token;
+        if (typeof parsed.env.ANTHROPIC_MODEL === 'string' && parsed.env.ANTHROPIC_MODEL) {
+            env.ANTHROPIC_MODEL = parsed.env.ANTHROPIC_MODEL;
         }
-        try {
-            await this.proxyHost.ensureRunning();
-            const upstreamEnv: UpstreamEnv = {
-                baseUrl: upstream.env.ANTHROPIC_BASE_URL,
-                token: upstream.env.ANTHROPIC_AUTH_TOKEN,
-                model: upstream.env.ANTHROPIC_MODEL,
-                smallFastModel: upstream.env.ANTHROPIC_SMALL_FAST_MODEL,
-                timeoutSec: upstream.env.API_TIMEOUT_MS
-                    ? Math.round(Number(upstream.env.API_TIMEOUT_MS) / 1000)
-                    : undefined,
-            };
-            await this.proxyHost.setUpstream(upstreamEnv);
-            // ⚠️ 代理上游是全局共享单例（见 docs/pitfall-proxy-shared-upstream.md）：
-            // 若同时有别的 proxy 会话用了不同上游，此处会把全局上游改成本配置的上游，
-            // 导致旧会话的请求被转发到错误后端（静默串味，无报错）。记日志便于事后排查。
-            this.output.appendLine(
-                `[launcher] 已注入全局代理上游: baseUrl=${upstreamEnv.baseUrl} model=${upstreamEnv.model ?? '(unset)'}（来自 local 配置 '${cfg.name}'）。` +
-                `注意：代理进程全局共享，若并发的其它 proxy 会话用不同上游，会互相串味。`,
-            );
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            void vscode.window.showErrorMessage(`代理模式启动/注入失败: ${msg}`);
-            return null;
+        if (typeof parsed.env.ANTHROPIC_SMALL_FAST_MODEL === 'string' && parsed.env.ANTHROPIC_SMALL_FAST_MODEL) {
+            env.ANTHROPIC_SMALL_FAST_MODEL = parsed.env.ANTHROPIC_SMALL_FAST_MODEL;
         }
-        const port = this.proxyHost.getPort();
-        const synthesized = synthesizeProxySettings(cfg.content, port);
-        if (!synthesized) {
-            void vscode.window.showErrorMessage(
-                `'${cfg.name}' content 不是有效 JSON，无法合成代理 settings。`,
-            );
-            return null;
+        if (timeoutSec != null) {
+            env.API_TIMEOUT_MS = String(timeoutSec * 1000);
         }
-        return synthesized;
+        return env;
     }
 
     /**
@@ -218,7 +239,7 @@ export class ClaudeLauncher {
             await this.ensureGitignore(workspaceRoot);
             await fs.promises.mkdir(configDir, { recursive: true });
 
-            // d. 只用 workspace-local active（不再碰 global activeState）
+            // d. 只用 workspace-local active（不再碰 global activeState）。路由走 env 注入，不写 settings.json。
             const localStore = this.getLocalStore();
             const localActiveState = this.getLocalActiveState();
             if (!localStore || !localActiveState) {
@@ -226,23 +247,23 @@ export class ClaudeLauncher {
                 return;
             }
             const state = await localActiveState.load();
+            const routeEnv: Record<string, string> = {};
             if (state) {
                 const cfg = await localStore.get(state.id);
                 if (cfg) {
-                    const settingsContent = await this.resolveSettingsContent(cfg);
-                    if (settingsContent === null) {
+                    const built = await this.buildWorkspaceEnv(cfg);
+                    if (built === null) {
                         return; // 配置/代理问题已报错，中止
                     }
-                    const settingsPath = path.join(configDir, 'settings.json');
-                    await writeSettings(settingsPath, settingsContent);
+                    Object.assign(routeEnv, built);
                     this.output.appendLine(
-                        `[launcher] 已写入 workspace 独立配置: ${settingsPath} (mode=${cfg.mode ?? 'direct'})`,
+                        `[launcher] 已构建 workspace 终端 env (mode=${cfg.mode ?? 'direct'}, ${Object.keys(built).length} keys)，不写 settings.json`,
                     );
                 } else {
-                    this.output.appendLine(`[launcher] local active id=${state.id} 已不存在，跳过写 settings`);
+                    this.output.appendLine(`[launcher] local active id=${state.id} 已不存在，跳过 env 注入`);
                 }
             } else {
-                this.output.appendLine('[launcher] 无 workspace-local active 配置，不写 settings.json，claude 用默认设置');
+                this.output.appendLine('[launcher] 无 workspace-local active 配置，不注入路由 env，claude 用默认设置');
             }
 
             // d2. 项目级 permissions：往 {workspace}/.claude/settings.local.json 合并 bypassPermissions
@@ -263,6 +284,7 @@ export class ClaudeLauncher {
                 env: {
                     CLAUDE_CONFIG_DIR: configDir,
                     CLAUDE_BIN: binaryPath,
+                    ...routeEnv,
                 },
             };
             if (isWin) {
@@ -287,8 +309,8 @@ export class ClaudeLauncher {
      * 启动派生节点绑定的 Claude 会话（§6.5 launchDerived）。
      *
      * 与 launch() 区别：跳过 localActiveState，直接用传入的 derivedCfg；继承父上游
-     * （快照优先）；三档别名走 shell env（冻结，§5.4）；BASE_URL/token 走 settings.env
-     * （沿用 synthesizeProxySettings，不降级安全，§6.6 P4）；启动前同步代理映射表（缺则补）。
+     * （快照优先）；BASE_URL/token/四档别名全走 shell env（与 standalone derived 分支一致），
+     * 不写 settings.json——冻结前提（settings.env 不含别名 key）自动满足；启动前同步代理映射表（缺则补）。
      *
      * 终端 name 带 `#N` 标记，供 deleteDerivedConfig 匹配活终端（§6.8 P6）。
      * 内部吞掉所有错误并 showErrorMessage，不向调用方抛。
@@ -361,16 +383,8 @@ export class ClaudeLauncher {
                 this.output.appendLine(`[launcher] 同步代理映射表失败（已忽略，继续启动）: ${msg}`);
             }
 
-            // d. 合成 settings.json：BASE_URL 恒指代理（派生节点强制 proxy），token 走 settings.env，
-            //    三档别名走 shell env（不进 settings，§5.4 冻结前提）
-            const settingsContent = this.synthesizeDerivedSettings(derivedCfg, parentCfg, upstream, port);
-            if (settingsContent === null) {
-                void vscode.window.showErrorMessage(
-                    `派生节点 '${derivedCfg.name}' 无法合成 settings：父 content 不是有效 JSON。`,
-                );
-                return;
-            }
-
+            // d. 终端 env：BASE_URL=代理 + token + 四档别名全走 shell env（不写 settings.json，
+            //    冻结前提自动满足）。port 在下方终端 env 注入处使用。
             // e. workspace + 二进制 + 独立配置目录
             const workspace = vscode.workspace.workspaceFolders?.[0];
             if (!workspace) {
@@ -388,12 +402,9 @@ export class ClaudeLauncher {
             const configDir = path.join(workspaceRoot, WORKSPACE_CONFIG_DIR);
             await this.ensureGitignore(workspaceRoot);
             await fs.promises.mkdir(configDir, { recursive: true });
-            const settingsPath = path.join(configDir, 'settings.json');
-            await writeSettings(settingsPath, settingsContent);
             await this.ensureProjectPermissions(workspaceRoot);
-            this.output.appendLine(`[launcher] 已写入派生节点 settings: ${settingsPath}`);
 
-            // f. 起终端：三档别名走 shell env（冻结），CLAUDE_CONFIG_DIR/CLAUDE_BIN 同 launch()
+            // f. 起终端：BASE_URL/token/四档别名全走 shell env，CLAUDE_CONFIG_DIR/CLAUDE_BIN 同 launch()
             //    终端 name 带 #N 供 deleteDerivedConfig 匹配活终端
             const isWin = process.platform === 'win32';
             const idx = derivedCfg.derivedIndex;
@@ -409,6 +420,11 @@ export class ClaudeLauncher {
                     CLAUDE_BIN: binaryPath,
                     CCP_DERIVED_ID: String(idx),
                     ...aliasEnv,
+                    ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
+                    ANTHROPIC_AUTH_TOKEN: upstream.token,
+                    ...(upstream.timeoutSec != null
+                        ? { API_TIMEOUT_MS: String(Math.round(upstream.timeoutSec * 1000)) }
+                        : {}),
                 },
             };
             if (isWin) {
@@ -427,49 +443,6 @@ export class ClaudeLauncher {
             this.output.appendLine(`[launcher] 派生节点启动失败: ${msg}`);
             void vscode.window.showErrorMessage(`派生节点启动失败: ${msg}`);
         }
-    }
-
-    /**
-     * 合成派生节点的 settings.json 内容（§6.6）。
-     * - 以父 content 为基底（保留 permissions 等非 env 字段）。
-     * - 覆盖 env.ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN 为 resolveDerivedUpstream 的结果
-     *   （快照优先，故父 token 轮换不污染派生节点）。
-     * - BASE_URL 恒指代理 http://127.0.0.1:<port>（派生节点强制 proxy，V7 修复——
-     *   别名只有经代理 rewriteModel 才会被重写为真实模型名）。
-     * - **不写入三档别名**（别名走 shell env，settings.env 不含同名 key 是 §5.4 冻结前提）。
-     * - 父 content 无效 JSON 且无快照 → null（调用方报错）。
-     */
-    private synthesizeDerivedSettings(
-        derivedCfg: LLMConfig,
-        parentCfg: LLMConfig | undefined,
-        upstream: { baseUrl: string; token: string; timeoutSec?: number; mode: string },
-        port: number,
-    ): string | null {
-        // 优先用父 content 作基底；父缺/父 content 无效则从最小骨架起（upstream 已由 resolveDerivedUpstream
-        // 解析——快照存在时不依赖父 content，故父 content 无效不应阻断合成）。
-        let obj: Record<string, unknown>;
-        if (parentCfg) {
-            const parsed = extractUpstream(parentCfg.content);
-            obj = parsed ? parsed.obj : {};
-        } else {
-            obj = {};
-        }
-        const env = { ...((obj.env as Record<string, string> | undefined) ?? {}) };
-        env.ANTHROPIC_AUTH_TOKEN = upstream.token;
-        env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
-        if (upstream.timeoutSec != null) {
-            env.API_TIMEOUT_MS = String(Math.round(upstream.timeoutSec * 1000));
-        }
-        // 显式删除可能残留的别名 key（防父 content 恰好带同名 key 破坏 §5.4 冻结前提）。
-        // 四档别名均走 shell env（buildAliasEnv），settings.env 不能含同名 key，否则 shell env 被覆盖、
-        // 别名失效。ANTHROPIC_MODEL 尤其要删：父 content 的真名若留在 settings.env，会覆盖 shell env 的
-        // ccp-main-N 别名，导致主对话模型不经代理重写（约束 4/§5.4）。
-        delete env.ANTHROPIC_MODEL;
-        delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-        delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
-        delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
-        obj.env = env;
-        return JSON.stringify(obj, null, 2);
     }
 }
 

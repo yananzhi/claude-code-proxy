@@ -38,28 +38,26 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 
 **规则**：扩展宿主侧调本地代理接口**一律用裸 `net` socket**（`proxyHost.rawHttp`），不用 `http.get`/`http.request`/`fetch`。新增 wrapper 照 `rawHttp` 模式写。服务端 `res.end` 出口仍配 `Content-Length`（为非扩展宿主客户端）。
 
-### 插件模式普通配置必须走 settings.json 注入（不能改成纯 env）
+### workspace-local 终端走纯 env 注入（global 链路才走 settings.json）
 
-**⚠ 约束（别动）**：插件模式普通配置（direct/proxy，非派生）启动 CLI 时，`ANTHROPIC_BASE_URL`/token 等路由 key **必须写入 `.claude_proxy/settings.json` 的 `env` 字段**，由 CLI 从文件读——**不能**像 standalone 那样改成纯进程 env 注入。
+**约束**：Claude Code 有两条独立的路由链路，注入方式不同——
 
-**原因**：插件模式下 Claude Code 有**两种启动入口**：
-1. **本扩展起的集成终端**（`claudeLauncher.launch()`）——能注入 shell env，理论上能走 env。
-2. **官方 Claude Code 插件的聊天框**（`anthropic.claude-code` 扩展的 chat panel）——**不在本扩展进程树里，拿不到本扩展注入的 shell env**，只能读 `CLAUDE_CONFIG_DIR` 指向目录下的 `settings.json`。
+1. **global 链路**（`extension.ts` 的 `doSwitch` + 官方 Claude Code 插件聊天框）：切换 global config 时 `doSwitch` 仍写**全局** `~/.claude/settings.json` 的 `env` 字段。**原因**：官方聊天框不在本扩展进程树里、拿不到本扩展注入的 shell env，只能读 `CLAUDE_CONFIG_DIR`（默认 `~/.claude/`）下的 settings.json。这条链路**保持写 settings.json，不动**。
 
-如果改成纯 env 注入，入口 2 会因读不到 `ANTHROPIC_BASE_URL`/token 而连不上代理/上游。除非**主动放弃官方插件的聊天框、只用本扩展的终端**，才能去掉 settings.json 路由。当前产品决策：**保留聊天框入口 → 保留 settings.json 注入**。
+2. **workspace-local 链路**（`claudeLauncher.ts` 的 `launch()`/`launchDerived()` + standalone 的 `terminalApi.js`）：**纯 shell env 注入**，**不写** `.claude_proxy/settings.json` 的路由 key（`ANTHROPIC_BASE_URL`/token/model 等）。**原因**：这些终端都由本扩展（或 standalone 后端）spawn，能拿 shell env，无需文件做路由；且不写路由 key 后，**插件终端与 standalone 终端可无缝共用同一 workspace 文件夹**——standalone 的冲突检测不再被插件遗留的路由 key 触发。`launch()` 用 `buildWorkspaceEnv(cfg)` 镜像 standalone `buildTerminalEnv` 的 normal 分支；`launchDerived()` 镜像 standalone derived 分支（四档别名 + BASE_URL/token 全走 env）。
 
-**派生节点（derived）是例外**：派生节点的四档别名走 shell env（`buildAliasEnv`），`launchDerived` 会**显式删除** settings.env 里的同名别名 key（`claudeLauncher.ts:467-470`），防覆盖 shell env。这是"冻结前提"——settings.env 不能含同名别名 key，否则覆盖 shell env 致别名失效。派生节点能这么做，是因为派生会话只从本扩展终端启动、不走官方聊天框。
+派生节点的"冻结前提"（settings.env 不能含别名 key）自动满足——根本不写 settings.env。
 
-**与 standalone 混用同一 workspace 的坑**：standalone 启动终端前检测 `.claude_proxy/settings.json` 的 `env` 是否含路由 key（`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_*_MODEL`），**有则拒绝启动**（`standalone/terminalApi.js:85-106`，因 standalone 走 env 注入、认为 settings 同名 key 会覆盖 env 致路由错乱）。所以插件模式用过的普通配置（settings.json 留了路由 key），切到 standalone 起同一 workspace 的终端会被拦。派生配置因 settings 不留路由 key，两种模式混用反而顺。
+**与 standalone 混用同一 workspace 的坑**：standalone 启动终端前检测 `.claude_proxy/settings.json` 的 `env` 是否含路由 key（`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_*_MODEL`），**有则拒绝启动**（`standalone/terminalApi.js:85-106`，因 standalone 走 env 注入、认为 settings 同名 key 会覆盖 env 致路由错乱）。改后插件不再写路由 key，正常不触发；残留来源只剩"旧 activateConfig 残留 / 用户手动改过"，错误信息已提示哪个 key，让用户手动删。
 
-**规则**：插件模式普通配置的路由 key **保持写 settings.json**，不要为"统一成 env"去改 `launch()`。standalone 的冲突检测也别放宽（放宽=容忍 settings 路由 key，会让 standalone 的 env 注入被 settings 覆盖、路由错乱）。两模式混用同一 workspace 时，普通配置天然不互通——这是已知且可接受的取舍。
+**规则**：workspace-local 终端（插件 + standalone）路由 key **一律走 shell env**，不要写 `.claude_proxy/settings.json`。global 链路（`doSwitch` + 官方聊天框）保持写 `~/.claude/settings.json` 不动。standalone 的冲突检测也别放宽（放宽=容忍 settings 路由 key，会让 env 注入被 settings 覆盖、路由错乱）。
 
 ## 架构速览
 
 - `src/`：VS Code 扩展 TS（编译到 `out/`，CommonJS）。
   - `proxyHost.ts`：代理宿主/控制器（spawn 独立子进程跑 proxy/server.js，用 `process.execPath` + 净化 env + `ELECTRON_RUN_AS_NODE`，详见下方「Server 独立进程化」）+ 调代理接口的 wrapper（裸 socket）+ 心跳/多窗口协调（端口 bind 单例 + 2s healthz 探测 + child.on('exit') 主动 re-spawn）。
   - `cleanEnv.ts`：净化 `process.env` 给 spawn 子进程用（删 `NODE_OPTIONS`/`VSCODE_*`/`ELECTRON_*`/`CHROME_*`/`PIPE` 注入变量，设 `ELECTRON_RUN_AS_NODE=1` + `CCP_*` 路径）。纯函数，抽出来好单测。
-  - `claudeLauncher.ts`：启动 workspace 隔离 CLI（`CLAUDE_CONFIG_DIR` + 别名走 shell env + token 走 settings.env）。
+  - `claudeLauncher.ts`：启动 workspace 隔离 CLI（`CLAUDE_CONFIG_DIR` + 路由 key/别名全走 shell env；不写 `.claude_proxy/settings.json` 路由）。
   - `derivedLogic.ts`：派生节点纯逻辑（继承快照、别名 env 构造、映射表同步、per-档 1m 上下文 `sessionContext1m`/`normalizeSessionContext1m`/`inheritSessionContext1m`），抽出来好单测。
   - `treeProvider.ts` / `webviewEditor.ts` / `localConfigStore.ts`：配置树 / 编辑器 / 存储。
 - `proxy/`：本地 LLM 代理（ESM JS，不进 tsc）。

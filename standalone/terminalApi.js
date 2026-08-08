@@ -81,7 +81,8 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
     // ⚠ 终端走 env 注入 modelname，settings.json 的 env 会覆盖进程 env（CLI Object.assign 语义，
     // 仅覆盖 settings.env 里存在的 key）。CLI 自己写的 settings.json（{theme, skipDangerous...}）
     // 无 env 字段，不冲突，是引导完成标记，应放行（否则第二次起终端会被误拒）。
-    // 仅当 settings.json 的 env 含会覆盖 modelname/路由的 key 时才拒绝（多为旧 activateConfig/插件遗留）。
+    // 仅当 settings.json 的 env 含会覆盖 modelname/路由的 key 时才拒绝（多为旧 activateConfig 残留或用户手动改过；
+    // 插件 workspace-local 终端已改纯 env，不再写路由 key）。
     const CONFLICT_KEYS = [
         'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
         'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',

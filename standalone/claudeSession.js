@@ -2,8 +2,9 @@
 //
 // 职责：
 //   - 每个终端一个独立 PTY 会话（按 terminalId 索引，不再 per-workspace 单会话）
-//   - normal 终端：基于 active 配置的 settings.json 启动（env 只注入 CLAUDE_CONFIG_DIR）
-//   - derived 终端：env 注入 BASE_URL/token/四档别名，configDir 用 per-terminal 空目录
+//   - normal 终端：env 注入 BASE_URL/token/model（不读 settings.json 做路由）
+//   - derived 终端：env 注入 BASE_URL/token/四档别名
+//   - 两者 configDir 都共享 {ws}/.claude_proxy
 //   - WebSocket 双向流：PTY onData → 广播 WS；WS message → PTY write / resize
 //   - 会话状态 Map 内存管理 + 退出/断线清理 + listByWorkspace/listByConfig
 //
