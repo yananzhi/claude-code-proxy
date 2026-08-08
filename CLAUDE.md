@@ -105,3 +105,13 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 
 - 设计文档：`docs/claude code cli运行时model切换方案.md`（运行时 model 切换方案）、`docs/server独立进程化调研.md`（独立进程化方案 + V1 验证记录 + 最终架构）。
 
+## 工作流规则
+
+### plan 文件副本归档
+
+**规则**：每次 plan mode 产出的 plan 文件，**除了写到 `.claude_proxy/plans/<随机名>.md` 外，必须再抄一份到 `docs/plan/tmp/`**（文件名可沿用原随机名或改为语义化名）。`docs/plan/tmp/` 已建出，作为所有 plan 的归档副本目录，便于回溯和版本控制（plan 原文件在 `.claude_proxy/plans/` 下是 session 级、易被清理）。
+
+**执行时机**：plan 定稿（写完 plan 文件）后立即抄一份；若 plan 后续在实现过程中有重大修订，同步更新 `docs/plan/tmp/` 里的副本。
+
+**抄送方式**：读原 plan 文件全文 → Write 到 `docs/plan/tmp/<同名>.md`。
+
