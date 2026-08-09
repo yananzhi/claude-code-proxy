@@ -13,6 +13,7 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Code Proxy — Workspace 管理</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; color: #222; }
@@ -58,6 +59,20 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
   .dir-picker .dp-item { padding: 4px 8px; cursor: pointer; font-size: 0.85rem; }
   .dir-picker .dp-item:hover { background: #eef; }
   .dir-picker .dp-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+  /* 触屏设备（无 hover）让次要操作图标常显，否则手机上 ✎/✕ 永远不可见 */
+  @media (hover: none) {
+    .icon-btn { opacity: 1; }
+  }
+  /* 小屏自适应：手机浏览器（宽度 <= 600px） */
+  @media (max-width: 600px) {
+    body { margin: 12px auto; padding: 0 10px; }
+    h1 { font-size: 1.2rem; }
+    .row input[type=text] { min-width: 0; flex: 1 1 100%; }
+    .ws-head { flex-wrap: wrap; }
+    .group { margin-left: 12px; }
+    .config-row, .derived-row, .term-row { flex-wrap: wrap; }
+    .dir-picker { width: calc(100vw - 20px); max-width: 560px; left: 10px; right: 10px; transform: none; }
+  }
 </style>
 </head>
 <body>
@@ -67,7 +82,7 @@ ${proxyLink ? `<div class="proxy-link">代理控制台（trace/统计）：<a hr
 <h2>新建 Workspace</h2>
 <div class="row">
   <input id="name" type="text" placeholder="名字（如 my-project）">
-  <input id="dir" type="text" placeholder="磁盘目录绝对路径（如 D:/code/my-project）" style="min-width:360px">
+  <input id="dir" type="text" placeholder="磁盘目录绝对路径（如 D:/code/my-project）">
   <button onclick="browseDir()">选择目录</button>
   <button onclick="createWs()">创建</button>
 </div>

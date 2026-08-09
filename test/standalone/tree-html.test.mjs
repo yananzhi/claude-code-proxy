@@ -197,6 +197,22 @@ test('T8d: 次要操作 hover 图标按钮（.icon-btn + ✎/✕ + title）', ()
     assert.ok(/\.title\s*=\s*['"]重命名['"]/.test(html) && /\.title\s*=\s*['"]删除['"]/.test(html), '图标应有 title tooltip');
 });
 
+test('T8m: 移动端响应式（viewport meta + 触屏 icon-btn 常显 + 小屏断点）', () => {
+    const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
+    // viewport meta（否则手机按 980px 默认视口整体缩小）
+    assert.ok(/name=["']viewport["']\s+content=["']width=device-width,\s*initial-scale=1\.0["']/.test(html), '应有 viewport meta');
+    // 触屏设备无 hover → icon-btn 常显（核心：否则手机上 ✎/✕ 永远不可见）
+    assert.ok(/@media\s*\(\s*hover:\s*none\s*\)/.test(html), '应有 @media (hover: none) 触屏规则');
+    const touchBlock = html.match(/@media\s*\(\s*hover:\s*none\s*\)\s*\{([^}]*)\}/);
+    assert.ok(touchBlock && /\.icon-btn\s*\{[^}]*opacity:\s*1/.test(touchBlock[1]), '触屏规则应让 .icon-btn opacity:1 常显');
+    // 小屏断点
+    assert.ok(/@media\s*\(\s*max-width:\s*600px\s*\)/.test(html), '应有 @media (max-width: 600px) 小屏断点');
+    const smallBlock = html.match(/@media\s*\(\s*max-width:\s*600px\s*\)\s*\{([\s\S]*?)^\s*\}/m);
+    assert.ok(smallBlock, '应能匹配小屏断点块');
+    assert.ok(/dir-picker/.test(smallBlock[1]) && /calc\(100vw/.test(smallBlock[1]), '小屏应让 dir-picker 全宽');
+    assert.ok(/flex-wrap:\s*wrap/.test(smallBlock[1]), '小屏应让配置行换行避免横向溢出');
+});
+
 test('T8e: 目录选择器渲染不用 innerHTML 拼变量（DOM 构建，过 T2a 守卫）', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
     // renderDirPicker 不应 innerHTML = 变量
