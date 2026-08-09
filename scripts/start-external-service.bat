@@ -88,8 +88,11 @@ echo                     %PUBLIC_TRACE_URL% (console)
 echo ============================================================
 
 REM --- Start standalone (new window, foreground; close window = stop) ---
+REM    Inline set CCP_HOME + cd + node. No helper script (the old
+REM    run-standalone.bat was deleted: a missing arg made it fall back to
+REM    the default port 11434 and collide with extension mode).
 call :LOG [1/2] starting standalone web service...
-start "CCP-Standalone" cmd /k ""%~dp0run-standalone.bat" "%STANDALONE_HOME%" "%PROJECT_DIR%""
+start "CCP-Standalone" cmd /k "set "CCP_HOME=%STANDALONE_HOME%" && cd /d "%PROJECT_DIR%" && node standalone/cli.js"
 
 REM --- Wait for standalone to listen on 11444 ---
 call :LOG       waiting for web service to listen on 11444...

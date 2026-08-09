@@ -616,6 +616,55 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
   var termEl = document.getElementById('terminal');
   term.open(termEl);
   try { fit.fit(); } catch (e) {}
+
+  // 自定义按键：修复 xterm 5.3.0 默认映射对 Shift+Enter / Ctrl+V 不友好的问题。
+  // 详见 docs/standalone-web-terminal-keybinding-fix.md
+  //
+  // ⚠ 真正的根因（2026-08-09 经 Playwright + 真实 xterm 5.3.0 vendor 实测确认，
+  //   见 test/e2e/xterm-shift-enter.spec.ts）：xterm 的 attachCustomKeyEventHandler 在
+  //   handler 返回 false 时，_keyDown 直接 return false —— 但【不调 preventDefault】。
+  //   于是浏览器仍为 Enter 触发后续 keypress/input 事件，xterm 的 _keyPress/_inputEvent
+  //   会把它变成 '\\r' 经 onData 泄漏出去（ws.send('\\r') → PTY 收到 → CLI 当提交）。
+  //   结果：handler 发了 '\\n'（换行），紧接着 onData 又泄漏 '\\r'（提交），净效果=提交。
+  //   这正是用户"Shift+Enter 跟 Enter 一样直接发消息"的现象。
+  //   修复：在 keydown handler 里显式 e.preventDefault()+e.stopPropagation()，阻止
+  //   浏览器后续 keypress/input，使 '\\n' 成为唯一发到 PTY 的字节。
+  //
+  // 为什么用 ws.send 而非 term.paste：xterm 的 prepareTextForTerminal 会把 LF 统一替换
+  // 成 CR（结果跟 Enter 一样被 CLI 当提交），故直接 ws.send 原始字节给 PTY 绕过转换。
+  // ws 由 connectWs 赋值；未连上时 readyState 检查自然丢弃，不报错。
+  // Ctrl+V 仍用 term.paste(text)：粘贴多行文本时 LF→CR 是期望行为（整段输入），不受影响。
+  //
+  // Shift+Enter 发什么字节？后端已注入 TERM=xterm-256color 让 Claude CLI 进 raw mode（前提）。
+  // raw mode 下换行序列候选（Gemini 分析 + 实测）：
+  //   C(默认) LF            = Ctrl+J，raw mode 下 CLI 应区别于 CR(Enter=提交)
+  //   A        ESC[13;2u    = CSI u 协议的 Shift+Enter（现代 TUI 标准）
+  //   B        ESC+CR       = Alt+Enter（Ink TextInput 常绑定为换行）
+  // 调试时可在 DevTools 控制台直接改 window.__CCP_NEWLINE_SEQ 切候选，无需改代码重启服务。
+  var ws = null;
+  window.__CCP_NEWLINE_SEQ = window.__CCP_NEWLINE_SEQ || '\\n';
+  term.attachCustomKeyEventHandler(function (e) {
+    if (e.type !== 'keydown') return true;
+    // Shift+Enter → 换行（发可切换的候选字节序列给 PTY，不经 xterm paste 的 LF→CR 转换）
+    if (e.keyCode === 13 && e.shiftKey) {
+      // 必须显式 preventDefault+stopPropagation：仅 return false 不阻止浏览器后续
+      // keypress/input，xterm 会把 Enter 的 keypress 转成 '\\r' 经 onData 泄漏（=提交）。
+      if (e.preventDefault) e.preventDefault();
+      if (e.stopPropagation) e.stopPropagation();
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(window.__CCP_NEWLINE_SEQ);
+      return false;
+    }
+    // Ctrl+V / Cmd+V → 粘贴剪贴板（xterm 默认发 0x16 且 preventDefault，paste 事件不触发）
+    if (e.keyCode === 86 && (e.ctrlKey || e.metaKey)) {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        navigator.clipboard.readText().then(function (text) {
+          if (text) term.paste(text);
+        }).catch(function () {});
+      }
+      return false;
+    }
+    return true;
+  });
   if (typeof ResizeObserver !== 'undefined') {
     var ro = new ResizeObserver(function () {
       try { fit.fit(); } catch (e) {}
@@ -627,7 +676,7 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
   var wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + apiBase + '/api/terminals/' + encodeURIComponent(tid) + '/ws';
 
   function connectWs() {
-    var ws = new WebSocket(wsUrl);
+    ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
 
     function sendResize() {

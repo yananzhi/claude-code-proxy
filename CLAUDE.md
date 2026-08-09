@@ -52,6 +52,30 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 
 **规则**：workspace-local 终端（插件 + standalone）路由 key **一律走 shell env**，不要写 `.claude_proxy/settings.json`。global 链路（`doSwitch` + 官方聊天框）保持写 `~/.claude/settings.json` 不动。standalone 的冲突检测也别放宽（放宽=容忍 settings 路由 key，会让 env 注入被 settings 覆盖、路由错乱）。
 
+### 反引号模板字符串拼 JS：`\r`/`\n`/`\x..` 必须双反斜杠（终端页卡"正在连接"的元凶，已复发一次）
+
+**⚠ 最关键认知（别再绕弯）**：`standalone/web/workspaces-html.js` 的 `buildTerminalHtml` 用**反引号模板字符串**拼整页 HTML，内含 `<script>` 块的 JS 代码。在这段模板里写 JS 字符串字面量或注释时，**任何 `\` 开头的转义序列（`\n` `\r` `\x16` `\t` 等）都会被 Node 在解析模板字符串时解释成真实控制字节**——`\n` 变成真实换行符、`\r` 变成真实 CR(0x0d)。这不是"传给浏览器的字面量"，是模板层的转义。
+
+**坑（已踩 2 次，均耗时定位）**：
+- **第 1 次**：代码 `term.paste('\n')` → 浏览器收到 `term.paste('` + 真实换行 + `')` → 单引号字符串内换行 → `SyntaxError: Invalid or unexpected token`。
+- **第 2 次（修 Shift+Enter 时引入回归）**：注释 `// 转成 '\r' 经 onData 泄漏` → `\r` 被 Node 转成真实 CR(0x0d) 塞进注释行 → **CR 把 `//` 注释从中间断开**，断点后文字变裸代码 → 同样 SyntaxError。**用户当场指出"这不就是刚修过的 bug 吗"**——memory 已记 `\r` 在注释里也危险，写注释提到字节序列时仍要警惕。
+
+**现象**：整个 `<script>` 块因语法错误中止 → 后续 `connectWs()` 不执行 → **网页终端卡在"正在连接终端..."**。表面现象像 WebSocket 连不上，**实际是前端 JS 根本没跑起来**（`connectWs()` 没被调用，WS 压根没尝试连）。别往 WS / 后端 PTY / 路由方向猜。
+
+**为什么难定位**：浏览器控制台 `Uncaught SyntaxError: Invalid or unexpected token (at <page>:<line>)` 是典型症状，行号指向断行处——但若没开 DevTools、只看"卡连接"现象，极易误判为 WS/网络问题。且 **Chromium 对内联 `<script>` 的 SyntaxError 不稳定触发 `pageerror` 事件**（实测本场景不发），不能靠 Playwright `page.on('pageerror')` 看护。
+
+**修复方案（治本）**：
+1. **模板里所有 `\r`/`\n`/`\x..` 写双反斜杠**：`'\\r'`/`'\\n'`（Node 输出字面量 `'\r'`/`'\n'` 文本给浏览器，浏览器 JS 才正确解析为换行符字符串）。`buildTerminalHtml` 内的 JS 字符串字面量 + 注释一律如此。
+2. **注释里提到字节序列时**：优先用 `CR`/`LF`/`0x0d`/`0x0a` 等不含反斜杠的字样，或写 `\\r`/`\\n`，**绝不裸写 `\r`/`\n`**（注释里的也会被 Node 转义，这是第 2 次复发的盲点）。
+3. **验证手法**：把生成的 HTML 里 `<script>` 块 dump 出来 `node --check` 或 `new Function(code)`——能立刻定位 SyntaxError 行号（比猜快得多）：
+   ```js
+   const re = /<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g; let m;
+   while ((m = re.exec(html)) !== null) { try { new Function(m[1]); } catch(e){ console.error(e); } }
+   ```
+4. **回归测试**：`test/e2e/terminal-connect.spec.ts` 已看护——打开真实 `/terminal/:tid` 页面断言 `#msg` 离开"正在连接终端..."（内联 JS 炸了→`connectWs()` 不跑→`#msg` 永远停在"正在连接..."→超时失败），+ 静态抽检内联 `<script>` 用 `new Function(code)` 体检。已验证两条用例在裸写 `\r` 时都失败、修复后都通过。
+
+**规则**：在 `buildTerminalHtml`（及任何反引号模板拼 JS 的地方）写 JS 字符串字面量里的换行/控制符一律 `'\\n'`/`'\\r'`（双反斜杠）；注释里别裸写 `\n`/`\r`/`\x16`，改用 `LF`/`CR`/`0x16` 文字。改完用 `test/e2e/terminal-connect.spec.ts` 验证。相关 memory：`[[template-literal-escape-in-htmlgen]]`、`[[claude-cli-newline-keybinding]]`。
+
 ## 架构速览
 
 - `src/`：VS Code 扩展 TS（编译到 `out/`，CommonJS）。
@@ -86,8 +110,8 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
   node --test --test-concurrency=1 proxy/test/ test/derived-logic/test.mjs test/mock-cli/test/ test/proxyHost/ mock/ test/standalone/
   ```
   ⚠ `--test-concurrency=1` 必须加：`mock/` + `test/standalone/` 套件起真代理子进程 + mock 上游，默认并发会端口抢占/资源竞争卡死。串行才稳定。
-  现状 633 tests / 631 pass / 0 fail / 2 skip（POSIX 专属在 Windows 跳过）+ e2e 8 pass（`npm run test:e2e`）。
-  - `npm run test:e2e`：Playwright e2e（chromium only，worker 串行，起 standalone 子进程 + 临时端口），测管理界面 DOM/用户可见行为，不进 `node --test` 全量命令。配置 `playwright.config.ts`，套件 `test/e2e/`（`package.json` 声明 `type:module` 让 .ts 走 ESM）。不起真终端（PTY 留手动）。
+  现状 633 tests / 631 pass / 0 fail / 2 skip（POSIX 专属在 Windows 跳过）+ e2e 13 pass（`npm run test:e2e`）。
+  - `npm run test:e2e`：Playwright e2e（chromium only，worker 串行，起 standalone 子进程 + 临时端口），测管理界面 DOM/用户可见行为，不进 `node --test` 全量命令。配置 `playwright.config.ts`，套件 `test/e2e/`（`package.json` 声明 `type:module` 让 .ts 走 ESM）。不起真终端（PTY 留手动）。含 `terminal-connect.spec.ts`（终端页卡"正在连接"回归守卫，见上方「反引号模板字符串拼 JS」陷阱）+ `xterm-shift-enter.spec.ts`（Shift+Enter 换行回归守卫）。
 
 - **按目录跑**（改某块时针对性）：
   - `node --test proxy/test/` — server/config/trace 配置层 + e2e（9 文件，153 用例）

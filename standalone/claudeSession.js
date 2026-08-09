@@ -91,8 +91,15 @@ export class ClaudeSessionManager {
             }
         }
 
+        // env 注入 TERM/COLORTERM：standalone 后端常从 Windows cmd 启动，cmd 默认无 TERM，
+        // 若 PTY 子进程拿不到 TERM，Claude CLI（Ink TUI）会退化成 dumb/行缓冲模式——
+        // 此时 \r 与 \n 都被当行结束符=Submit，Shift+Enter 多行输入彻底失效（发什么字节都没用）。
+        // 显式注入 xterm-256color 让 CLI 进 raw mode、启用高级按键监听，是多行输入的前提。
+        // params.env 优先级最高（派生/特殊配置可覆盖），故放最后展开。
         const env = {
             ...process.env,
+            TERM: 'xterm-256color',
+            COLORTERM: 'truecolor',
             CLAUDE_CONFIG_DIR: configDir,
             ...params.env,
         };
@@ -293,6 +300,11 @@ export class ClaudeSessionManager {
                     } catch { /* 非 JSON，按用户输入处理 */ }
                 }
                 // 非 resize 的 text = 用户 string 输入
+                // 调试：CCP_LOG_PTY_INPUT=1 时打印写入 PTY 的字节 hex（排查 Shift+Enter 换行序列、
+                // conpty 是否把 \n 篡改成 \r 等）。默认关，避免污染日志。
+                if (process.env.CCP_LOG_PTY_INPUT === '1') {
+                    this.log(`[claudeSession] pty.write hex=${Buffer.from(text, 'utf8').toString('hex')} len=${text.length}`);
+                }
                 try { handle.pty.write(text); } catch (e) {
                     this.log(`[claudeSession] write PTY 异常: ${e?.message || String(e)}`);
                 }
