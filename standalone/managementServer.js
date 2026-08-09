@@ -22,6 +22,7 @@ import {
     createLocalConfig, updateLocalConfig, deleteLocalConfig, getModelCatalog, updateConfigAlias,
     proxyForward, markDefaultConfig, getActiveConfig,
     ensureProjectPermissions, ensureGitignore,
+    stripConflictKeysFromSettings,
     ValidationError, NotFoundError, ProxyUnavailableError,
 } from './configApi.js';
 import { buildTerminalEnv } from './terminalApi.js';
@@ -344,6 +345,17 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
+            // POST /api/workspaces/:id/settings/strip-conflict-keys → 剥离 settings.json 里与终端 env 注入冲突的 key
+            // 前端起终端遇 code:'CONFLICT_KEYS' 时弹确认框，用户确认后调本接口一键删除冲突 key 再重试起终端。
+            // 剥离范围：CONFLICT_KEYS（5 个路由 key）+ ANTHROPIC_AUTH_TOKEN（token 残留一并清）。幂等。
+            const mStrip = pathname.match(/^\/api\/workspaces\/([^/]+)\/settings\/strip-conflict-keys$/);
+            if (method === 'POST' && mStrip) {
+                const id = decodeURIComponent(mStrip[1]);
+                const result = await stripConflictKeysFromSettings(manager, id);
+                sendJson(res, 200, result);
+                return;
+            }
+
             // GET /api/workspaces/:id/active → 读当前激活的 config
             const mActive = pathname.match(/^\/api\/workspaces\/([^/]+)\/active$/);
             if (method === 'GET' && mActive) {
@@ -438,7 +450,9 @@ export async function startManagementServer(opts = {}) {
                 sendJson(res, 502, { error: msg });
             } else if (err instanceof ValidationError
                 || /不能为空|目录不存在|已注册|不是有效 JSON|请求体过大|不是目录/.test(msg)) {
-                sendJson(res, 400, { error: msg });
+                // ValidationError 可能携带 code（如 'CONFLICT_KEYS'）——前端据此判定可一键修复重试
+                sendJson(res, 400, err instanceof ValidationError && err.code
+                    ? { error: msg, code: err.code } : { error: msg });
             } else {
                 sendJson(res, 500, { error: msg });
             }
@@ -603,7 +617,8 @@ async function startWorkspaceTerminal(deps, wsId, body) {
 function sendTermError(res, e) {
     if (e instanceof NotFoundError) sendJson(res, 404, { error: e.message });
     else if (e instanceof ProxyUnavailableError) sendJson(res, 502, { error: e.message });
-    else if (e instanceof ValidationError) sendJson(res, 400, { error: e.message });
+    // ValidationError 可能携带 code（如 'CONFLICT_KEYS'）——前端据此判定可一键修复重试
+    else if (e instanceof ValidationError) sendJson(res, 400, e.code ? { error: e.message, code: e.code } : { error: e.message });
     else if (e.statusCode) sendJson(res, e.statusCode, { error: e.message });
     else sendJson(res, 500, { error: e.message });
 }

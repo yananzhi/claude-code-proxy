@@ -161,27 +161,44 @@ function newDerivedConfig(wsId, parentId, parentName) {
     .catch(function(e) { showMsg('建别名配置异常: ' + e.message, 'err'); });
 }
 
-// 新建 normal 终端（基于 active config）
-function newTerminal(wsId) {
-  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/terminals', { method: 'POST' })
+// 起终端共享逻辑（newTerminal/newConfigTerminal 共用）。
+// 起终端遇 code:'CONFLICT_KEYS'（settings.json 残留旧版路由 key 会覆盖 env 注入）时弹确认框，
+// 用户确认后调 strip-conflict-keys 一键删除冲突 key 再重试一次（isRetry 防无限循环）。
+function doCreateTerminal(url, isRetry) {
+  fetch(API + url, { method: 'POST' })
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (d.error) { showMsg('新建终端失败: ' + d.error, 'err'); return; }
+      if (d.error) {
+        // 冲突类错误 + 未重试过 → 弹确认框，一键删除冲突 key 后重试
+        if (d.code === 'CONFLICT_KEYS' && !isRetry) {
+          if (confirm('检测到 workspace 的 settings.json 残留旧版路由配置（会覆盖终端注入的 modelname）。\\n是否一键删除冲突 key 并重试创建终端？')) {
+            var wsId = url.split('/')[3]; // /api/workspaces/:id/...
+            fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/settings/strip-conflict-keys', { method: 'POST' })
+              .then(function(r2) { return r2.json(); })
+              .then(function(d2) {
+                if (d2.error) { showMsg('删除冲突 key 失败: ' + d2.error, 'err'); return; }
+                showMsg('已删除 ' + (d2.removed || []).length + ' 个冲突 key，重试创建终端...', 'ok');
+                doCreateTerminal(url, true);
+              })
+              .catch(function(e) { showMsg('删除冲突 key 异常: ' + e.message, 'err'); });
+          }
+          return;
+        }
+        showMsg('新建终端失败: ' + d.error, 'err');
+        return;
+      }
       window.open(API + '/terminal/' + encodeURIComponent(d.terminalId), '_blank');
       loadList();
     })
     .catch(function(e) { showMsg('新建终端异常: ' + e.message, 'err'); });
 }
+// 新建 normal 终端（基于 active config）
+function newTerminal(wsId) {
+  doCreateTerminal('/api/workspaces/' + encodeURIComponent(wsId) + '/terminals', false);
+}
 // 新建终端（基于指定 config，静态/别名都行；走 config 级路由）
 function newConfigTerminal(wsId, cfgId) {
-  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/terminals', { method: 'POST' })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.error) { showMsg('新建终端失败: ' + d.error, 'err'); return; }
-      window.open(API + '/terminal/' + encodeURIComponent(d.terminalId), '_blank');
-      loadList();
-    })
-    .catch(function(e) { showMsg('新建终端异常: ' + e.message, 'err'); });
+  doCreateTerminal('/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/terminals', false);
 }
 // 激活 config
 function activateCfg(wsId, cfgId, btn) {

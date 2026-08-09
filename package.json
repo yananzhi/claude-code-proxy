@@ -2,7 +2,7 @@
   "name": "claude-code-proxy",
   "displayName": "Claude Code Proxy",
   "description": "管理 Claude Code 配置切换 + 本地 LLM 代理（重试 503/10310）+ workspace 隔离 CLI 会话 + 运行时模型切换（派生节点别名，不重启 CLI 切模型）。",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "publisher": "zaczh",
   "repository": {
     "type": "git",

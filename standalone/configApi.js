@@ -18,7 +18,7 @@ const require = createRequire(import.meta.url);
 let LocalConfigStore, LocalActiveStateStore, newId;
 let aggregateModelCatalog, inheritAliasesFromParent, inheritSessionContext1m, normalizeSessionContext1m;
 let extractUpstream, synthesizeProxySettings;
-let writeSettings;
+let readSettings, writeSettings;
 try {
     ({ LocalConfigStore, LocalActiveStateStore, newId } = require(path.join(PROJECT_ROOT, 'out', 'localConfigStore.js')));
     // newId 实际从 configStore 导出，localConfigStore re-export 了
@@ -28,7 +28,7 @@ try {
     const upstreamMod = require(path.join(PROJECT_ROOT, 'out', 'upstream.js'));
     ({ extractUpstream, synthesizeProxySettings } = upstreamMod);
     const claudeConfig = require(path.join(PROJECT_ROOT, 'out', 'claudeConfig.js'));
-    ({ writeSettings } = claudeConfig);
+    ({ readSettings, writeSettings } = claudeConfig);
 } catch (e) {
     console.error('[configApi] 加载 out/ 模块失败，请先 npm run compile:', e.message);
     process.exit(1);
@@ -36,6 +36,17 @@ try {
 
 /** workspace 下独立配置目录名。 */
 const WORKSPACE_CONFIG_DIR = '.claude_proxy';
+
+/**
+ * settings.json 的 env 里会覆盖终端注入的冲突路由 key。
+ * ⚠ 必须与 terminalApi.js 的 CONFLICT_KEYS（检测清单）保持同步——剥离与检测用同一份清单。
+ * terminalApi 通过 createRequire 反向 require 本模块，故不能 ESM import 它（会成环致 require 报错），
+ * 改为本地副本 + 同步注释。改动任一处必须同步另一处。
+ */
+const CONFLICT_KEYS = [
+    'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+];
 
 /** 取某 workspace 的 LocalConfigStore。workspace 不存在返回 null。 */
 async function getStoreForWorkspace(manager, workspaceId) {
@@ -448,9 +459,65 @@ export async function proxyForward(proxyPort, proxyPath, method, body) {
     });
 }
 
-/** 业务校验错误（→ 400）。 */
+/**
+ * 从 workspace 的 .claude_proxy/settings.json 剥离会与终端 env 注入冲突的 key。
+ *
+ * 终端统一走 env 注入后，settings.json 的 env 里若残留路由 key（多为旧版插件 activateConfig 遗留
+ * 或用户手动改过），会覆盖进程 env 致路由错乱——buildTerminalEnv 的冲突检测会拒绝起终端。
+ * 本函数供前端「确认框 + 一键删除」调用：检测到冲突时弹框，用户确认后调本接口剥离冲突 key 再重试起终端。
+ *
+ * 剥离范围：
+ * - CONFLICT_KEYS（5 个路由 key，与 terminalApi 检测清单同源）：ANTHROPIC_BASE_URL / ANTHROPIC_MODEL /
+ *   ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL。
+ * - ANTHROPIC_AUTH_TOKEN：token 残留不被 CONFLICT_KEYS 检测拦（检测只看 modelname/路由 key），但会留在
+ *   文件里被 CLI 当 env 用、可能串味，一并清掉。
+ *
+ * 只删 env 下命中的 key，保留 env 里其余 key（如 CLAUDE_CODE_AUTO_COMPACT_WINDOW）+ 文件其余字段（theme 等）。
+ * 若删完 env 变空对象，删掉 env 字段本身（避免留空 env:{}）。幂等：无命中 key 返回 removed:[] 不报错。
+ *
+ * @param manager WorkspaceManager
+ * @param workspaceId
+ * @returns {Promise<{ removed: string[], settingsPath: string }>}
+ * @throws {NotFoundError} workspace 不存在
+ * @throws {ValidationError} settings.json 不存在 / 无法解析
+ */
+export async function stripConflictKeysFromSettings(manager, workspaceId) {
+    const ws = await manager.get(workspaceId);
+    if (!ws) throw new NotFoundError(`workspace 不存在: ${workspaceId}`);
+    const settingsPath = path.join(ws.dir, WORKSPACE_CONFIG_DIR, 'settings.json');
+    const raw = await readSettings(settingsPath); // async：返回 string 或 null（ENOENT）
+    if (raw === null) throw new ValidationError('settings.json 不存在，无需剥离');
+    let parsed;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (e) {
+        throw new ValidationError(`settings.json 无法解析：${e.message}`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new ValidationError('settings.json 不是有效 JSON 对象');
+    }
+    // 剥离范围：CONFLICT_KEYS + ANTHROPIC_AUTH_TOKEN（token 残留一并清）
+    const STRIP_KEYS = [...CONFLICT_KEYS, 'ANTHROPIC_AUTH_TOKEN'];
+    const removed = [];
+    if (parsed.env && typeof parsed.env === 'object' && !Array.isArray(parsed.env)) {
+        for (const k of STRIP_KEYS) {
+            if (parsed.env[k] !== undefined && parsed.env[k] !== '') {
+                delete parsed.env[k];
+                removed.push(k);
+            }
+        }
+        // env 删空了 → 删掉 env 字段本身，避免留空 env:{}
+        if (Object.keys(parsed.env).length === 0) delete parsed.env;
+    }
+    if (removed.length > 0) {
+        await writeSettings(settingsPath, JSON.stringify(parsed, null, 2));
+    }
+    return { removed, settingsPath };
+}
+
+/** 业务校验错误（→ 400）。可选 code 携带结构化信号（如 'CONFLICT_KEYS'），前端据此判定是否可一键修复重试。 */
 export class ValidationError extends Error {
-    constructor(msg) { super(msg); this.name = 'ValidationError'; }
+    constructor(msg, code) { super(msg); this.name = 'ValidationError'; this.code = code; }
 }
 /** 资源不存在（→ 404）。 */
 export class NotFoundError extends Error {

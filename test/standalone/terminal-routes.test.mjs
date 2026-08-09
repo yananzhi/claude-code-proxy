@@ -29,6 +29,15 @@ function newTmpDir(label) {
     return mkdtempSync(join(tmpdir(), `tr-${label}-`));
 }
 
+// Windows 上服务端刚读完/写完 settings.json 后文件句柄释放有延迟，rmSync 偶发 ENOTEMPTY。
+// 重试几次消化句柄释放竞态，避免 flaky 失败（仅清理用，不影响断言）。
+function forceRm(p) {
+    for (let i = 0; i < 5; i++) {
+        try { rmSync(p, { recursive: true, force: true }); return; }
+        catch (e) { if (i === 4) throw e; }
+    }
+}
+
 function makeMockPty() {
     const handles = [];
     return {
@@ -1062,5 +1071,147 @@ test('R7d: settings.json env 含三档别名 key（ANTHROPIC_DEFAULT_SONNET_MODE
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
         rmSync(proj, { recursive: true, force: true });
+    }
+});
+
+// ════════════════════════════════════════════════════════════
+// R8 冲突 key「确认框 + 一键删除」：code 信号 + strip-conflict-keys endpoint + 端到端剥离重试
+// ════════════════════════════════════════════════════════════
+
+test('R8a: settings.json 含 ANTHROPIC_BASE_URL → 起终端 400 且 d.code==="CONFLICT_KEYS"', async () => {
+    const { handle, port, home } = await startMgmt('r8a');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r8a');
+    mkdirSync(join(proj, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(proj, '.claude_proxy', 'settings.json'), JSON.stringify({
+        env: { ANTHROPIC_BASE_URL: 'http://old-proxy:11434', ANTHROPIC_AUTH_TOKEN: 'old-tok' },
+    }), 'utf8');
+    try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' });
+        assert.equal(r.status, 400, '含 BASE_URL 冲突 key 应拒绝');
+        const d = await r.json();
+        assert.match(d.error, /ANTHROPIC_BASE_URL|覆盖.*modelname|不支持共存/, '应提示冲突 key');
+        assert.equal(d.code, 'CONFLICT_KEYS', '冲突错误应携带结构化 code 供前端判定');
+    } finally {
+        await handle.stop();
+        forceRm(home);
+        forceRm(proj);
+    }
+});
+
+test('R8b: strip-conflict-keys 删 BASE_URL/TOKEN 保留其余 + 之后起终端 201（端到端）', async () => {
+    const { handle, port, home } = await startMgmt('r8b');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r8b');
+    mkdirSync(join(proj, '.claude_proxy'), { recursive: true });
+    const settingsPath = join(proj, '.claude_proxy', 'settings.json');
+    writeFileSync(settingsPath, JSON.stringify({
+        env: {
+            ANTHROPIC_BASE_URL: 'http://old-proxy:11434',
+            ANTHROPIC_AUTH_TOKEN: 'old-tok',
+            CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000',
+        },
+        skipDangerousModePermissionPrompt: true,
+    }), 'utf8');
+    try {
+        // 1) 起终端先被冲突拒绝（带 code）
+        const r0 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' });
+        assert.equal(r0.status, 400);
+        assert.equal((await r0.json()).code, 'CONFLICT_KEYS');
+
+        // 2) 调 strip endpoint 一键剥离
+        const rs = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/settings/strip-conflict-keys`, { method: 'POST' });
+        assert.equal(rs.status, 200, 'strip 应 200');
+        const ds = await rs.json();
+        assert.ok(Array.isArray(ds.removed), 'removed 应为数组');
+        assert.ok(ds.removed.includes('ANTHROPIC_BASE_URL'), '应删 BASE_URL');
+        assert.ok(ds.removed.includes('ANTHROPIC_AUTH_TOKEN'), '应一并删 AUTH_TOKEN 残留');
+        assert.ok(!ds.removed.includes('CLAUDE_CODE_AUTO_COMPACT_WINDOW'), '不应删非冲突 key');
+
+        // 3) 文件：冲突 key 已删，保留 AUTO_COMPACT + skipDangerous
+        const after = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        assert.equal(after.env.ANTHROPIC_BASE_URL, undefined, 'BASE_URL 已删');
+        assert.equal(after.env.ANTHROPIC_AUTH_TOKEN, undefined, 'AUTH_TOKEN 已删');
+        assert.equal(after.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000', '保留非冲突 env key');
+        assert.equal(after.skipDangerousModePermissionPrompt, true, '保留文件其余字段');
+
+        // 4) 起终端重试 → 201 成功（端到端验证剥离生效）
+        const r1 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/terminals`, { method: 'POST' });
+        assert.equal(r1.status, 201, '剥离冲突 key 后起终端应成功');
+        const d1 = await r1.json();
+        assert.ok(d1.terminalId);
+        await fetch(`http://127.0.0.1:${port}/api/terminals/${d1.terminalId}`, { method: 'DELETE' });
+    } finally {
+        await handle.stop();
+        forceRm(home);
+        forceRm(proj);
+    }
+});
+
+test('R8c: settings.json 无冲突 key（仅 theme/skipDangerous）→ strip 返回 removed:[] 文件不变', async () => {
+    const { handle, port, home } = await startMgmt('r8c');
+    const { proj, wsId } = await createWsAndDirectConfig(port, 'r8c');
+    mkdirSync(join(proj, '.claude_proxy'), { recursive: true });
+    const settingsPath = join(proj, '.claude_proxy', 'settings.json');
+    const before = JSON.stringify({
+        theme: 'dark',
+        skipDangerousModePermissionPrompt: true,
+    }, null, 2);
+    writeFileSync(settingsPath, before, 'utf8');
+    try {
+        const rs = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/settings/strip-conflict-keys`, { method: 'POST' });
+        assert.equal(rs.status, 200, '无冲突 key 应 200（幂等不报错）');
+        const ds = await rs.json();
+        assert.deepEqual(ds.removed, [], '无命中应返回空 removed');
+        // 文件内容不变
+        assert.equal(readFileSync(settingsPath, 'utf8'), before, '无剥离则文件不应被重写');
+    } finally {
+        await handle.stop();
+        forceRm(home);
+        forceRm(proj);
+    }
+});
+
+test('R8d: workspace 无 settings.json → strip 返回 400（不存在）', async () => {
+    const { handle, port, home } = await startMgmt('r8d');
+    const { proj, wsId } = await createWsAndDirectConfig(port, 'r8d');
+    // 不写 settings.json
+    try {
+        const rs = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/settings/strip-conflict-keys`, { method: 'POST' });
+        assert.equal(rs.status, 400, 'settings.json 不存在应 400');
+        const ds = await rs.json();
+        assert.match(ds.error, /不存在/, '应提示不存在');
+    } finally {
+        await handle.stop();
+        forceRm(home);
+        forceRm(proj);
+    }
+});
+
+test('R8e: settings.json 损坏（非法 JSON）→ strip 返回 400（无法解析）', async () => {
+    const { handle, port, home } = await startMgmt('r8e');
+    const { proj, wsId } = await createWsAndDirectConfig(port, 'r8e');
+    mkdirSync(join(proj, '.claude_proxy'), { recursive: true });
+    writeFileSync(join(proj, '.claude_proxy', 'settings.json'), '{ not valid json !!!', 'utf8');
+    try {
+        const rs = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/settings/strip-conflict-keys`, { method: 'POST' });
+        assert.equal(rs.status, 400, '非法 JSON 应 400');
+        const ds = await rs.json();
+        assert.match(ds.error, /无法解析/, '应提示无法解析');
+    } finally {
+        await handle.stop();
+        forceRm(home);
+        forceRm(proj);
+    }
+});
+
+test('R8f: workspace 不存在 → strip 返回 404', async () => {
+    const { handle, port, home } = await startMgmt('r8f');
+    try {
+        const rs = await fetch(`http://127.0.0.1:${port}/api/workspaces/nope-ws/settings/strip-conflict-keys`, { method: 'POST' });
+        assert.equal(rs.status, 404, 'workspace 不存在应 404');
+        const ds = await rs.json();
+        assert.match(ds.error, /workspace 不存在/, '应提示 workspace 不存在');
+    } finally {
+        await handle.stop();
+        rmSync(home, { recursive: true, force: true });
     }
 });

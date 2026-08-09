@@ -40,6 +40,15 @@ const { proxyForward, ValidationError, ProxyUnavailableError } = configApi;
 const WORKSPACE_CONFIG_DIR = '.claude_proxy';
 
 /**
+ * settings.json 的 env 里会覆盖终端注入的冲突路由 key（terminal 走 env，settings 同名 key 会盖回）。
+ * 与 configApi.stripConflictKeysFromSettings 共用——剥离 + 检测必须用同一份清单。
+ */
+export const CONFLICT_KEYS = [
+    'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+];
+
+/**
  * 构建终端 spawn env + configDir。
  *
  * - normal（direct/proxy）：env 注入 ANTHROPIC_BASE_URL/TOKEN/MODEL（+ 可选 SMALL_FAST_MODEL/TIMEOUT），
@@ -83,10 +92,6 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
     // 无 env 字段，不冲突，是引导完成标记，应放行（否则第二次起终端会被误拒）。
     // 仅当 settings.json 的 env 含会覆盖 modelname/路由的 key 时才拒绝（多为旧 activateConfig 残留或用户手动改过；
     // 插件 workspace-local 终端已改纯 env，不再写路由 key）。
-    const CONFLICT_KEYS = [
-        'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
-        'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
-    ];
     const settingsPath = path.join(configDir, 'settings.json');
     if (fs.existsSync(settingsPath)) {
         let conflictKey = null;
@@ -99,9 +104,11 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
             }
         } catch { /* settings.json 损坏无法解析 → 不视为冲突，让 CLI 自己处理 */ }
         if (conflictKey) {
+            // code='CONFLICT_KEYS' 让前端判定为可一键修复错误（调 strip endpoint 删冲突 key 后重试）。
             throw new ValidationError(
                 `检测到 ${settingsPath} 的 env.${conflictKey} 会覆盖终端注入的 modelname。` +
                 `当前终端通过 env 注入，settings.json 的 env.${conflictKey} 不支持共存，请删除该 key 后重试。`,
+                'CONFLICT_KEYS',
             );
         }
     }
