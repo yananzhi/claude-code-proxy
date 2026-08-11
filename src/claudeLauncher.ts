@@ -5,7 +5,7 @@ import type { LLMConfig } from './types';
 import type { LocalConfigStore, LocalActiveStateStore } from './localConfigStore';
 import { ProxyHost, UpstreamEnv } from './proxyHost';
 import { extractUpstream } from './upstream';
-import { resolveDerivedUpstream, computeAliasSyncActions, buildAliasEnv } from './derivedLogic';
+import { resolveDerivedUpstream, computeAliasSyncActions, buildAliasEnv, extractCustomEnv } from './derivedLogic';
 import { resolveClaudeBinary } from './claudeBinary';
 
 /** 官方 Claude Code 扩展 ID（publisher.name，不含版本号，升级后仍有效）。 */
@@ -128,6 +128,10 @@ export class ClaudeLauncher {
         if (timeoutSec != null) {
             env.API_TIMEOUT_MS = String(timeoutSec * 1000);
         }
+        // 自定义 env key（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等）从 content.env 透传——不再依赖
+        // settings.json 残留（CLI 重写 settings.json 会丢 env）。extractCustomEnv 已排除路由 key +
+        // 派生别名 key（上面显式构造的），不会覆盖。展开在显式构造之后，顺序安全。
+        Object.assign(env, extractCustomEnv(parsed.env));
         return env;
     }
 
@@ -412,6 +416,13 @@ export class ClaudeLauncher {
             // 否则默认不带（200K，约束 3）。该标志决定 CLI 按 1M 还是 200K 算 contextWindow
             //（[1m] 是 CLI 识别档位的唯一信号）。每档独立：main/haiku/sonnet/opus 各自决定后缀。
             const aliasEnv = buildAliasEnv(idx, { sessionContext1m: derivedCfg.sessionContext1m });
+            // 自定义 env key（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等）从父 content.env 透传——派生节点自身
+            // content 是占位/快照，自定义 env 存在父 content 里。extractCustomEnv 已排除路由 key +
+            // 派生别名 key（buildAliasEnv 构造的），不覆盖别名。parentCfg 为 null（孤儿靠快照）时
+            // 自定义 env 为空——降级场景可接受（快照本就无自定义 env）。展开在 aliasEnv/路由 key 之后，顺序安全。
+            const customEnv = parentCfg && parentCfg.content
+                ? extractCustomEnv(extractUpstream(parentCfg.content)?.env ?? {})
+                : {};
             const terminalOptions: vscode.TerminalOptions = {
                 name: `Claude Code #${idx} (${derivedCfg.name})`,
                 cwd: workspaceRoot,
@@ -425,6 +436,7 @@ export class ClaudeLauncher {
                     ...(upstream.timeoutSec != null
                         ? { API_TIMEOUT_MS: String(Math.round(upstream.timeoutSec * 1000)) }
                         : {}),
+                    ...customEnv,
                 },
             };
             if (isWin) {

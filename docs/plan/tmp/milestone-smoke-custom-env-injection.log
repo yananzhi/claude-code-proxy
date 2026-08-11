@@ -1,0 +1,61 @@
+# Milestone Smoke — 派生/普通 CLI 透传自定义 env（含 TDD code review 修复）
+
+**日期**: 2026-08-11
+**任务**: 4 个启动入口（插件 normal/derived + standalone normal/derived）注入自定义 env key（如 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`）via shell env，不再依赖 settings.json 残留。
+**Skill**: dev-with-tdd-review（Step 5 隔离子代理 TDD code review）
+
+## 执行时间
+
+约 68s（全量 node --test，--test-concurrency=1）
+
+## 套件 pass/fail
+
+```
+# tests 675
+# pass 673
+# fail 0
+# skipped 2   (POSIX 专属在 Windows 跳过)
+# duration_ms 67880
+```
+
+按文件（env-injection 相关 + 全量）:
+- test/derived-logic/test.mjs: 161 pass / 0 fail（含 review 新增 TDD-S1/S3/S4/S6）
+- test/standalone/terminal-env.test.mjs: 42 pass / 0 fail（含 review 新增 TDD-S2/S5/S7/S8）
+- test/standalone/terminal-routes.test.mjs: 46 pass / 0 fail
+- test/mock-cli/test/: 15 pass / 0 fail
+- test/standalone/*（其余 8 文件）: 全 pass
+- proxy/test/ + test/proxyHost/ + mock/: 全 pass
+
+**排除文件**: `test/standalone/chat-mode-probe.test.mjs`（untracked 手动探针，需真 claude 二进制 + 真代理，文件头注明「不进全量套件」，会 hang/超时——与本次改动无关，单独工作流的调研脚本）。
+
+## 子代理 code review 结论
+
+隔离子代理（无实现偏见）对 `src/derivedLogic.ts` / `standalone/terminalApi.js` / `src/claudeLauncher.ts` 改动审查，覆盖 6 个高风险类别，共 8 个怀疑点：
+
+### 证实为真 bug 并修复（3 个，均在 src/derivedLogic.ts）
+
+1. **数组入参泄漏**（boundary）：`extractCustomEnv(['a','b'])` 因 `typeof array === 'object'` 通过守卫，`Object.keys` 产出 `['0','1']` → 返回 `{'0':'a','1':'b'}`。
+   - 修复：守卫加 `|| Array.isArray(env)`（line 128）。
+2. **进程控制 key 泄漏**（state transition）：父 content.env 残留的 `CLAUDE_CONFIG_DIR`/`CLAUDE_BIN` 经 `extractCustomEnv` 透传，在 `launchDerived` 里 `...customEnv` 展开在显式构造的 `CLAUDE_CONFIG_DIR: configDir` **之后**，会覆盖调用方设的配置目录/二进制路径。
+   - 修复：`CUSTOM_ENV_EXCLUDE_KEYS` 加 `CLAUDE_CONFIG_DIR`、`CLAUDE_BIN`。
+3. **系统/运行时 key 泄漏**（security）：`PATH`/`HOME`/`NODE_OPTIONS`/`NODE_PATH`/`ELECTRON_RUN_AS_NODE`/`SHELL` 从 content.env 透传会改变终端进程行为（PATH 劫持二进制解析、NODE_OPTIONS 注入 `--require`、HOME 改 `~` 展开、ELECTRON_RUN_AS_NODE 影响 VS Code 宿主）。
+   - 修复：`CUSTOM_ENV_EXCLUDE_KEYS` 加上述 6 key。
+
+`CUSTOM_ENV_EXCLUDE_KEYS` 从 8 key 增至 16 key。`CONFLICT_KEYS`（terminalApi.js，5 路由 key，settings 冲突检测用）不变——仍是子集，语义不变。
+
+### 证实非 bug，翻转为正向回归用例（5 个）
+
+- TDD-S3（exception）：`extractCustomEnv` 对 null/undefined/{}/非法 JSON 优雅返回 {}，不崩。
+- TDD-S4（type safety）：`__proto__` key 不造成原型污染（Object 属性 setter 静默忽略 + Object.keys 不枚举）。
+- TDD-S6（concurrency）：纯函数跨 await 边界结果一致，无共享可变状态。
+- TDD-S7（state transition）：孤儿派生节点（parentCfg=null）customEnv 为空不崩（standalone 有 `if (parentCfg && parentCfg.content)` 守卫）。
+- TDD-S8（state transition）：父 content 非法 JSON + 有快照 → customEnv 空、上游走快照、不崩（extractUpstream try/catch 返 null + `if (parentParsed)` 守卫）。
+
+## Flaky 标注
+
+- `mock/test-stream-incremental.mjs`（SSE 流式增量转发）：teardown `rmSync` 在 Windows 偶撞 `ENOTEMPTY`（子进程句柄释放与临时目录清理竞态）。本次跑通过。与 env 注入改动无关（SSE 转发路径），既有的 Windows 清理 flake。
+- `test/standalone/chat-mode-probe.test.mjs`：untracked 手动探针，需真 claude 二进制 + 真代理，会 hang。文件头注明不进全量套件。与本次改动无关。
+
+## 编译
+
+`npm run compile`（tsc -p ./）clean，无错误。`out/derivedLogic.js` 已含 3 处修复。

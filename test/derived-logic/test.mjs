@@ -18,6 +18,7 @@ import {
     inheritSessionContext1m,
     normalizeSessionContext1m,
     inheritAliasesFromParent,
+    extractCustomEnv,
 } from '../../out/derivedLogic.js';
 
 // per-tier 1m 期望对象常量（inheritSessionContext1m 现返回 per-tier 对象，非布尔）
@@ -1610,4 +1611,137 @@ test('S8. computeAliasSyncActions 不剥 [1m]（raw.trim() 原样透传，剥后
     assert.equal(actions.toSet[0].model, 'glm[1m]');  // 原样，未剥
     // 这意味着 setAlias 路径若不剥，脏值会进代理表 → 上游 model not found
     // （inheritAliasesFromParent 出口已剥，故继承路径安全；setAlias 路径是独立风险点）
+});
+
+// ── extractCustomEnv：自定义 env 透传（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等） ──
+// 派生/普通 CLI 启动时，从 content.env 提取非冲突自定义 key 注入 shell env。
+// 排除 8 个冲突/特殊 key（5 路由 + 3 派生别名），保留其余字符串非空值。
+// 详见 plan/tmp/twinkling-forging-sunset.md。
+test('extractCustomEnv：排除 8 个冲突/特殊 key，保留其余字符串非空 key', () => {
+    const env = {
+        // 路由 key（应排除——各路径显式构造）
+        ANTHROPIC_BASE_URL: 'http://x',
+        ANTHROPIC_AUTH_TOKEN: 'tok',
+        ANTHROPIC_MODEL: 'glm[1m]',
+        ANTHROPIC_SMALL_FAST_MODEL: 'haiku',
+        API_TIMEOUT_MS: '300000',
+        // 派生别名 key（应排除——buildAliasEnv 显式构造）
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'ccp-haiku-1',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'ccp-sonnet-1',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'ccp-opus-1',
+        // 自定义 key（应保留）
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000',
+        FOO: 'bar',
+        ANOTHER_CUSTOM: 'value',
+    };
+    const out = extractCustomEnv(env);
+    assert.equal(out.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000');
+    assert.equal(out.FOO, 'bar');
+    assert.equal(out.ANOTHER_CUSTOM, 'value');
+    // 8 个冲突/特殊 key 全部排除
+    assert.equal(out.ANTHROPIC_BASE_URL, undefined);
+    assert.equal(out.ANTHROPIC_AUTH_TOKEN, undefined);
+    assert.equal(out.ANTHROPIC_MODEL, undefined);
+    assert.equal(out.ANTHROPIC_SMALL_FAST_MODEL, undefined);
+    assert.equal(out.API_TIMEOUT_MS, undefined);
+    assert.equal(out.ANTHROPIC_DEFAULT_HAIKU_MODEL, undefined);
+    assert.equal(out.ANTHROPIC_DEFAULT_SONNET_MODEL, undefined);
+    assert.equal(out.ANTHROPIC_DEFAULT_OPUS_MODEL, undefined);
+});
+
+test('extractCustomEnv：非字符串值（数字/对象/布尔）不透传', () => {
+    const env = {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000',  // 字符串，保留
+        NUMERIC_ENV: 12345,                         // 数字，丢弃
+        OBJECT_ENV: { a: 1 },                        // 对象，丢弃
+        BOOL_ENV: true,                              // 布尔，丢弃
+        EMPTY_STRING: '',                            // 空串，丢弃
+        VALID_STRING: 'ok',                          // 字符串，保留
+    };
+    const out = extractCustomEnv(env);
+    assert.equal(out.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000');
+    assert.equal(out.VALID_STRING, 'ok');
+    assert.equal(out.NUMERIC_ENV, undefined);
+    assert.equal(out.OBJECT_ENV, undefined);
+    assert.equal(out.BOOL_ENV, undefined);
+    assert.equal(out.EMPTY_STRING, undefined);
+});
+
+test('extractCustomEnv：null/undefined/非对象入参返回空对象', () => {
+    assert.deepEqual(extractCustomEnv(null), {});
+    assert.deepEqual(extractCustomEnv(undefined), {});
+    assert.deepEqual(extractCustomEnv('not-an-object'), {});
+    assert.deepEqual(extractCustomEnv({}), {});
+});
+
+test('extractCustomEnv：不修改入参（纯函数，返回副本）', () => {
+    const env = { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000', ANTHROPIC_MODEL: 'glm' };
+    const snapshot = { ...env };
+    const out = extractCustomEnv(env);
+    assert.equal(out.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000');
+    // 入参未被修改
+    assert.deepEqual(env, snapshot);
+});
+
+// ── TDD 审查：边界条件 ──
+// 怀疑：extractCustomEnv 的入参 guard 是 `if (!env || typeof env !== 'object')`，
+// 但 JS 里 typeof array === 'object'。若 extractUpstream 返回的 env 实际是个数组
+// （JSON "env": [...] ），数组会穿透 guard，Object.keys 返回数字索引字符串 '0','1'…，
+// 数组元素若是字符串会被当作 env 透传——产生名为 '0'/'1' 的脏 env key。
+// 断言"bug 存在"：数组入参应产出含数字 key 的对象。
+test('TDD-S1: extractCustomEnv 传入数组 → 数组元素若为字符串会被透传为数字 key（bug）', () => {
+    const arr = ['value0', 'value1'];
+    const out = extractCustomEnv(arr);
+    // 若 bug 存在：out = { '0': 'value0', '1': 'value1' }
+    // 若已修复（数组应返回 {}）：out = {}
+    assert.deepEqual(out, {}, '数组不应被当作 env 对象透传，应返回空对象');
+});
+
+// TDD-S3 (Cat 2 异常路径): extractUpstream 对 JSON null/数字/字符串 等非对象顶层不崩溃
+// 怀疑：extractUpstream(content) 里 `const obj = JSON.parse(content); const env = (obj.env ?? {})`，
+// 若 content="null" → JSON.parse 返回 null → null.env 抛 TypeError。虽有 try/catch 兜底返回 null，
+// 但下游 extractCustomEnv(extractUpstream(...)?.env ?? {}) 链路是否真的安全？
+// 验证：extractCustomEnv 对各种 extractUpstream 可能返回的 env 值（含异常兜底的空对象）不抛。
+test('TDD-S3: extractCustomEnv 对 extractUpstream 异常路径的返回值不抛（null/空对象安全）', () => {
+    // extractUpstream("null") → catch → null → ?.env ?? {} → {} → extractCustomEnv({}) = {}
+    assert.deepEqual(extractCustomEnv({}), {});
+    // extractUpstream("42") → obj=42, 42.env=undefined, undefined??{}={} → extractCustomEnv({})={}
+    // 模拟：extractUpstream 对非对象 JSON 的 env 是 {}（因 obj.env=undefined ?? {}）
+    assert.deepEqual(extractCustomEnv(null), {});
+    assert.deepEqual(extractCustomEnv(undefined), {});
+});
+
+// TDD-S4 (Cat 3 类型安全): __proto__ 原型污染
+// 怀疑：若 content.env 含 "__proto__" key（JSON.parse 把它当 own property），
+// extractCustomEnv 用 Object.keys 遍历会拿到 '__proto__'，然后 out['__proto__'] = v 赋值。
+// 虽然 out['__proto__'] = 'string' 不污染原型（直接属性赋值），但返回的对象 .__proto__ 会被覆盖。
+// 更危险的是 constructor/prototype 等。验证：__proto__ key 是否被透传到返回对象。
+test('TDD-S4: extractCustomEnv 含 __proto__ key → 不应透传原型污染 key', () => {
+    // JSON.parse('{"__proto__":"polluted","FOO":"bar"}') 含 __proto__ 作为 own property
+    const env = JSON.parse('{"__proto__":"polluted","FOO":"bar"}');
+    const out = extractCustomEnv(env);
+    // 若 bug：out.__proto__ === 'polluted'（own property），out.FOO === 'bar'
+    // 若安全：out 不含 __proto__ 作为 own property
+    assert.equal(out.FOO, 'bar', '正常自定义 key 应透传');
+    // Object.prototype 不应被污染
+    assert.equal(({}).polluted, undefined, 'Object.prototype 不应被污染');
+    // out 不应有 __proto__ 作为 own property（即使有也不应污染原型）
+    assert.equal(Object.prototype.hasOwnProperty.call(out, '__proto__'), false,
+        '__proto__ 不应作为 own property 透传（防原型污染）');
+});
+
+// TDD-S6 (Cat 5 并发/时序): extractCustomEnv 纯函数 + 跨 await 确定性
+// 怀疑：extractCustomEnv 是否依赖外部可变状态？若依赖，buildTerminalEnv 在 await fwd/upstream
+// 前后调用 extractCustomEnv 可能拿到不同结果（时序竞态）。验证：同一入参在 async 边界前后
+// 调用 extractCustomEnv 结果相同（纯函数，无外部状态依赖）。
+test('TDD-S6: extractCustomEnv 跨 await 边界结果一致（纯函数，无时序竞态）', async () => {
+    const env = { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000', FOO: 'bar', ANTHROPIC_MODEL: 'glm' };
+    const before = extractCustomEnv(env);
+    // 模拟 buildTerminalEnv 的 async gap（upstream 注入 + 别名同步）
+    await new Promise(r => setTimeout(r, 10));
+    const after = extractCustomEnv(env);
+    assert.deepEqual(before, after, '跨 await 调用结果应一致（纯函数无外部状态依赖）');
+    assert.equal(after.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000');
+    assert.equal(after.FOO, 'bar');
+    assert.equal(after.ANTHROPIC_MODEL, undefined, '路由 key 仍被排除');
 });

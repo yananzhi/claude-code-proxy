@@ -19,11 +19,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 const require = createRequire(import.meta.url);
-let buildAliasEnv, resolveDerivedUpstream, computeAliasSyncActions;
+let buildAliasEnv, resolveDerivedUpstream, computeAliasSyncActions, extractCustomEnv;
 let extractUpstream;
 try {
     const derivedLogic = require(path.join(PROJECT_ROOT, 'out', 'derivedLogic.js'));
-    ({ buildAliasEnv, resolveDerivedUpstream, computeAliasSyncActions } = derivedLogic);
+    ({ buildAliasEnv, resolveDerivedUpstream, computeAliasSyncActions, extractCustomEnv } = derivedLogic);
     const upstreamMod = require(path.join(PROJECT_ROOT, 'out', 'upstream.js'));
     ({ extractUpstream } = upstreamMod);
 } catch (e) {
@@ -155,6 +155,10 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
         // API_TIMEOUT_MS：与 derived 殊途同归——从 timeoutSec 反推毫秒字符串，保证 proxy 模式下
         // CLI env 与代理 timeoutSec*1000 严格一致（不因小数毫秒差 500ms）。
         if (timeoutSec != null) env.API_TIMEOUT_MS = String(timeoutSec * 1000);
+        // 自定义 env key（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等）从 content.env 透传——不再依赖
+        // settings.json 残留（CLI 重写 settings.json 会丢 env）。extractCustomEnv 已排除路由 key +
+        // 派生别名 key（上面显式构造的），不会覆盖。展开在显式构造之后，顺序安全。
+        Object.assign(env, extractCustomEnv(parsed.env));
         return { env, configDir };
     }
 
@@ -191,6 +195,16 @@ export async function buildTerminalEnv(cfg, parentCfg, proxyPort, opts = {}) {
     };
     if (upstream.timeoutSec != null) {
         env.API_TIMEOUT_MS = String(upstream.timeoutSec * 1000);
+    }
+    // 自定义 env key（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等）从父 content.env 透传——派生节点自身
+    // content 是占位/快照，自定义 env 存在父 content 里。extractCustomEnv 已排除路由 key +
+    // 派生别名 key（buildAliasEnv 构造的），不覆盖别名。parentCfg 为 null（孤儿靠快照）时
+    // 自定义 env 为空——降级场景可接受（快照本就无自定义 env）。展开在 aliasEnv 之后，顺序安全。
+    if (parentCfg && parentCfg.content) {
+        const parentParsed = extractUpstream(parentCfg.content);
+        if (parentParsed) {
+            Object.assign(env, extractCustomEnv(parentParsed.env));
+        }
     }
     return { env, configDir };
 }

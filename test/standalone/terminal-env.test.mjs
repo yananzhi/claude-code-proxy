@@ -516,3 +516,166 @@ test('D6e: settings.json 损坏（非 JSON）→ 不 throw（让 CLI 自己处�
     const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: makeMockForward() });
     assert.equal(env.ANTHROPIC_MODEL, 'real-model', '损坏 settings.json 不视为冲突，放行');
 });
+
+// ════════════════════════════════════════════════════════════
+// D7 自定义 env 透传（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等）
+// 证明：4 启动入口当前只透传路由 key，丢自定义 env key。
+// 修复前这些用例失败（env 无自定义 key），修复后通过。
+// 根因见 plan twinkling-forging-sunset：customEnv 未注入 shell env，
+// 仅靠 settings.json 残留泄漏，CLI 重写 settings.json 后丢失。
+// ════════════════════════════════════════════════════════════
+
+// D1-custom：direct content 含自定义 env key → env 应透传
+test('D1-custom: direct content 含 CLAUDE_CODE_AUTO_COMPACT_WINDOW + FOO → env 透传', async () => {
+    const cfg = {
+        id: 'c1', name: 'n',
+        content: directContent({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000', FOO: 'bar' }),
+        mode: 'direct',
+    };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('d1c-custom'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000', '自定义 env key 应透传到 spawn env');
+    assert.equal(env.FOO, 'bar', '其余自定义 env key 也应透传');
+    // 路由 key 仍在（不被 customEnv 影响）
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://up.test');
+    assert.equal(env.ANTHROPIC_MODEL, 'real-model');
+});
+
+// D3-custom：derived 父 proxyContent 含自定义 env key → 派生 env 应透传
+test('D3-custom: derived 父 content 含 CLAUDE_CODE_AUTO_COMPACT_WINDOW → 派生 env 透传', async () => {
+    const cfg = derivedCfg();
+    const parent = { id: 'c-parent', content: proxyContent({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000' }), mode: 'proxy' };
+    const fwd = makeMockForward({
+        'POST /api/upstream': { status: 200, body: {} },
+        'GET /api/config': { status: 200, body: { modelAliases: {} } },
+        'POST /api/model-alias': { status: 200, body: {} },
+    });
+    const { env } = await buildTerminalEnv(cfg, parent, 11444, { workspaceDir: newTmpDir('d3c-custom'), terminalId: 't1', proxyForwardFn: fwd });
+    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000', '派生应从父 content 继承自定义 env key 透传');
+    // 派生路由 key 仍在
+    assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:11444');
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-3');
+});
+
+// D1-conflict-excluded：customEnv 排除路由 key，不覆盖显式构造值
+test('D1-conflict-excluded: direct content ANTHROPIC_MODEL=x + 自定义 key → MODEL 仍是显式值 + 含自定义 key', async () => {
+    // directContent 的 ANTHROPIC_MODEL=real-model 被 over 覆盖成 'x'，customEnv 应排除 ANTHROPIC_MODEL
+    // （由 normal 分支显式注入 parsed.env.ANTHROPIC_MODEL='x'），同时透传 CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    const cfg = {
+        id: 'c1', name: 'n',
+        content: directContent({ ANTHROPIC_MODEL: 'x', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000' }),
+        mode: 'direct',
+    };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('d1c-conflict'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    // ANTHROPIC_MODEL 来自显式构造（parsed.env.ANTHROPIC_MODEL='x'），不被 customEnv 干扰
+    assert.equal(env.ANTHROPIC_MODEL, 'x', 'ANTHROPIC_MODEL 应由显式构造，不被 customEnv 覆盖');
+    // 自定义 key 仍透传
+    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000');
+});
+
+// D3-alias-excluded：customEnv 排除派生别名 key，不覆盖 buildAliasEnv 构造的别名
+test('D3-alias-excluded: derived 父 content 含 ANTHROPIC_DEFAULT_SONNET_MODEL → 别名不被覆盖', async () => {
+    // 父 proxyContent 注入 ANTHROPIC_DEFAULT_SONNET_MODEL='parent-sonnet'（over 覆盖），
+    // customEnv 应排除该 key，buildAliasEnv 构造的 ccp-sonnet-3[1m] 不受影响
+    const cfg = derivedCfg();
+    const parent = { id: 'c-parent', content: proxyContent({ ANTHROPIC_DEFAULT_SONNET_MODEL: 'parent-sonnet' }), mode: 'proxy' };
+    const fwd = makeMockForward({
+        'POST /api/upstream': { status: 200, body: {} },
+        'GET /api/config': { status: 200, body: { modelAliases: {} } },
+        'POST /api/model-alias': { status: 200, body: {} },
+    });
+    const { env } = await buildTerminalEnv(cfg, parent, 11444, { workspaceDir: newTmpDir('d3c-alias'), terminalId: 't1', proxyForwardFn: fwd });
+    // ANTHROPIC_DEFAULT_SONNET_MODEL 来自 buildAliasEnv（ccp-sonnet-3[1m]，sessionContext1m.sonnet=true），不被父 env 同名 key 覆盖
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'ccp-sonnet-3[1m]', '派生别名应由 buildAliasEnv 构造，不被父 env 同名 key 覆盖');
+    assert.notEqual(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'parent-sonnet', '父 content 的同名 key 不应泄漏覆盖别名');
+});
+
+// ════════════════════════════════════════════════════════════
+// TDD 审查：6 类高风险怀疑点
+// ════════════════════════════════════════════════════════════
+
+// TDD-S2 (Cat 6 不一致): customEnv 透传 CLAUDE_CONFIG_DIR/CLAUDE_BIN 等进程控制 key
+// 怀疑：extractCustomEnv 只排除 8 个路由/别名 key，不排除 CLAUDE_CONFIG_DIR/CLAUDE_BIN 等
+// 进程控制 key。若父 content.env 含这些 key，customEnv 会透传它们。
+// 在 claudeLauncher.ts launchDerived 里 env 字面量顺序是 CLAUDE_CONFIG_DIR/CLAUDE_BIN 在前、
+// ...customEnv 在后，customEnv 会覆盖 CLAUDE_CONFIG_DIR/CLAUDE_BIN——导致终端用错配置目录或二进制。
+// standalone buildTerminalEnv 不设 CLAUDE_CONFIG_DIR（configDir 是返回值），但若调用方把 customEnv
+// 与 CLAUDE_CONFIG_DIR 合并也可能被覆盖。验证 standalone 侧 customEnv 是否透传这些 key。
+test('TDD-S2: derived 父 content 含 CLAUDE_CONFIG_DIR → customEnv 透传该 key（潜在覆盖风险）', async () => {
+    const cfg = derivedCfg();
+    const parent = {
+        id: 'c-parent',
+        content: proxyContent({ CLAUDE_CONFIG_DIR: '/malicious/path', CLAUDE_BIN: '/bad/binary' }),
+        mode: 'proxy',
+    };
+    const fwd = makeMockForward({
+        'POST /api/upstream': { status: 200, body: {} },
+        'GET /api/config': { status: 200, body: { modelAliases: {} } },
+        'POST /api/model-alias': { status: 200, body: {} },
+    });
+    const { env } = await buildTerminalEnv(cfg, parent, 11444, { workspaceDir: newTmpDir('s2'), terminalId: 't1', proxyForwardFn: fwd });
+    // 怀疑 bug：customEnv 透传了 CLAUDE_CONFIG_DIR/CLAUDE_BIN
+    // 断言"bug 存在"：env 应含 CLAUDE_CONFIG_DIR（从父 content 透传）
+    // 若已修复（这些 key 应被排除）：env 不含 CLAUDE_CONFIG_DIR
+    assert.equal(env.CLAUDE_CONFIG_DIR, undefined, 'CLAUDE_CONFIG_DIR 不应从父 content 透传（会覆盖调用方设的配置目录）');
+    assert.equal(env.CLAUDE_BIN, undefined, 'CLAUDE_BIN 不应从父 content 透传（会覆盖调用方设的二进制路径）');
+});
+
+// TDD-S5 (Cat 4 状态迁移): customEnv 覆盖调用方显式设的 key（normal 分支）
+// 怀疑：normal 分支里 env 先构造路由 key，再 Object.assign(env, extractCustomEnv(parsed.env))。
+// extractCustomEnv 排除 8 个路由 key + CLAUDE_CONFIG_DIR/CLAUDE_BIN，但不排除其他可能被调用方
+// 设的 key。standalone buildTerminalEnv 不设 CCP_DERIVED_ID，但 claudeLauncher launchDerived 设。
+// 更直接的风险：若 content.env 含 PATH/HOME/NODE_OPTIONS 等系统 env key，customEnv 会透传它们
+// 覆盖调用方/系统的 env。验证：customEnv 是否透传 PATH（潜在安全/功能风险）。
+test('TDD-S5: normal content 含 PATH → customEnv 透传 PATH（潜在系统 env 覆盖风险）', async () => {
+    const cfg = {
+        id: 'c1', name: 'n',
+        content: directContent({ PATH: '/usr/malicious/bin', HOME: '/bad/home', NODE_OPTIONS: '--inspect' }),
+        mode: 'direct',
+    };
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s5'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    // 怀疑 bug：customEnv 透传了 PATH/HOME/NODE_OPTIONS
+    // 断言"bug 存在"：env 应含 PATH（从 content 透传）
+    // 若已修复（系统 env key 应被排除）：env 不含 PATH
+    assert.equal(env.PATH, undefined, 'PATH 不应从 content.env 透传（会覆盖系统 PATH）');
+    assert.equal(env.HOME, undefined, 'HOME 不应从 content.env 透传（会覆盖系统 HOME）');
+    assert.equal(env.NODE_OPTIONS, undefined, 'NODE_OPTIONS 不应从 content.env 透传（会覆盖系统 NODE_OPTIONS）');
+});
+
+// TDD-S7 (Cat 6 不一致): derived 分支 parentCfg=null（孤儿靠快照）→ customEnv 为空，不崩
+// 怀疑：terminalApi.js derived 分支 `if (parentCfg && parentCfg.content)` 守卫 parentCfg=null，
+// 但 claudeLauncher.ts launchDerived 用 `parentCfg && parentCfg.content ? ... : {}`。
+// 两者对 parentCfg=null 都应产出 customEnv={}。验证 standalone 侧孤儿节点 customEnv 为空。
+test('TDD-S7: derived parentCfg=null（孤儿靠快照）→ customEnv 为空，不崩', async () => {
+    const cfg = derivedCfg();  // derivedSnapshot 自洽（baseUrl/token/mode）
+    const fwd = makeMockForward({
+        'POST /api/upstream': { status: 200, body: {} },
+        'GET /api/config': { status: 200, body: { modelAliases: {} } },
+        'POST /api/model-alias': { status: 200, body: {} },
+    });
+    const { env } = await buildTerminalEnv(cfg, null, 11444, { workspaceDir: newTmpDir('s7'), terminalId: 't1', proxyForwardFn: fwd });
+    // 孤儿靠快照解上游，customEnv 应为空（无父 content 可提取）
+    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined, '孤儿节点无父 content，customEnv 应为空');
+    assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:11444', '路由 key 仍正常注入');
+    assert.equal(env.ANTHROPIC_MODEL, 'ccp-main-3', '别名仍正常构造');
+});
+
+// TDD-S8 (Cat 6 不一致): derived 分支 parentCfg.content 非法 JSON → customEnv 为空，不崩
+// 怀疑：terminalApi.js derived 分支 extractUpstream(parentCfg.content) 对非法 JSON 返回 null，
+// `if (parentParsed)` 跳过 customEnv。但 resolveDerivedUpstream 先于 customEnv 调用，
+// 若父 content 非法且无快照，resolveDerivedUpstream 返回 null → 早已 throw ValidationError。
+// 有快照时 resolveDerivedUpstream 用快照解上游（不读父 content），customEnv 仍尝试解父 content。
+// 验证：父 content 非法 JSON + 有快照 → 上游用快照、customEnv 为空、不崩。
+test('TDD-S8: derived 父 content 非法 JSON + 有快照 → 上游用快照、customEnv 为空、不崩', async () => {
+    const cfg = derivedCfg();  // derivedSnapshot 自洽
+    const parent = { id: 'c-parent', content: '{ not valid json', mode: 'proxy' };
+    const fwd = makeMockForward({
+        'POST /api/upstream': { status: 200, body: {} },
+        'GET /api/config': { status: 200, body: { modelAliases: {} } },
+        'POST /api/model-alias': { status: 200, body: {} },
+    });
+    const { env } = await buildTerminalEnv(cfg, parent, 11444, { workspaceDir: newTmpDir('s8'), terminalId: 't1', proxyForwardFn: fwd });
+    // 上游用快照（https://up.snap），customEnv 为空（父 content 非法 JSON 解不出 env）
+    assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:11444', 'BASE_URL 指向代理');
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-snap', 'token 来自快照');
+    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined, '父 content 非法 → customEnv 为空');
+});
