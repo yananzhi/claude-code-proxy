@@ -73,11 +73,11 @@ test('T1h7: 终端组 forEach 遍历 normalTerms 全量', () => {
     assert.ok(/normalTerms\.forEach/.test(html), '终端组应直接遍历 normalTerms');
 });
 
-test('T1i: 配置行显示「设为默认」按钮（所有配置统一，无 isDerived 分支）', () => {
+test('T1i: 配置行显示「激活」按钮（所有配置统一，无 isDerived 分支）', () => {
     const html = buildWorkspacesHtml({ apiBase: '', proxyPort: 11444 });
-    assert.ok(html.includes('设为默认'), '应有「设为默认」按钮文案');
+    assert.ok(html.includes('激活'), '应有「激活」按钮文案');
+    assert.ok(!html.includes('设为默认'), '不应残留旧「设为默认」文案（回退后文案为激活）');
     assert.ok(!/isDerived/.test(html), '不应残留 isDerived 逻辑（已移除派生）');
-    assert.ok(!html.includes("'激活'") && !html.includes('"激活"'), '不应残留旧「激活」文案');
 });
 
 test('T1j: 配置行有「重命名」+「删除」按钮 + renameConfig/deleteConfig 函数', () => {

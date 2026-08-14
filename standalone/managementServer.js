@@ -20,9 +20,8 @@ import { ClaudeSessionManager } from './claudeSession.js';
 import { resolveClaudeBinaryStandalone } from './claudeBinaryStandalone.js';
 import {
     createLocalConfig, updateLocalConfig, deleteLocalConfig,
-    proxyForward, markDefaultConfig, getActiveConfig,
+    proxyForward, activateConfig, getActiveConfig,
     ensureProjectPermissions, ensureGitignore,
-    stripConflictKeysFromSettings,
     ValidationError, NotFoundError, ProxyUnavailableError,
 } from './configApi.js';
 import { buildTerminalEnv } from './terminalApi.js';
@@ -272,25 +271,21 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // POST /api/workspaces/:id/configs/:cfgId/activate → 标记默认配置（弱化版激活）
-            // 重设计目标2：终端统一走 env，激活降级为"只写默认配置标记"，不再写 settings.json/注入 upstream。
-            // 仅影响「+ 新建终端」下拉默认高亮项。旧 activateConfig（写 settings.json env）已删除——死代码。
+            // POST /api/workspaces/:id/configs/:cfgId/activate → 激活 config（写 settings.json + 注入 upstream）
+            // settings.json 是 CLI 会话路由的唯一事实源（回退 2026-08-14）：激活即写文件，
+            // 终端走 CLAUDE_CONFIG_DIR 读 settings.json，不再 env 注入路由 key。
             const mActivate = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/activate$/);
             if (method === 'POST' && mActivate) {
                 const id = decodeURIComponent(mActivate[1]);
                 const cfgId = decodeURIComponent(mActivate[2]);
-                const result = await markDefaultConfig(manager, id, cfgId);
-                sendJson(res, 200, result);
-                return;
-            }
-
-            // POST /api/workspaces/:id/settings/strip-conflict-keys → 剥离 settings.json 里与终端 env 注入冲突的 key
-            // 前端起终端遇 code:'CONFLICT_KEYS' 时弹确认框，用户确认后调本接口一键删除冲突 key 再重试起终端。
-            // 剥离范围：CONFLICT_KEYS（5 个路由 key）+ ANTHROPIC_AUTH_TOKEN（token 残留一并清）。幂等。
-            const mStrip = pathname.match(/^\/api\/workspaces\/([^/]+)\/settings\/strip-conflict-keys$/);
-            if (method === 'POST' && mStrip) {
-                const id = decodeURIComponent(mStrip[1]);
-                const result = await stripConflictKeysFromSettings(manager, id);
+                const result = await activateConfig(manager, opts.proxyPort, id, cfgId, { log: opts.log });
+                // 警告：若 workspace 下已有存活 normal 终端，提示用户已开的 session 可能受影响
+                // （settings.json 已被覆盖），建议退出后通过 resume 再进入。
+                const liveTerminals = sessions.listByWorkspace(id);
+                if (liveTerminals.length > 0) {
+                    result.warning = `workspace 下已有 ${liveTerminals.length} 个存活终端（基于之前的 active 配置启动）。` +
+                        `本次激活已覆盖 settings.json，已开的 session 可能受影响，建议退出后通过 resume 再进入。`;
+                }
                 sendJson(res, 200, result);
                 return;
             }
@@ -387,7 +382,7 @@ export async function startManagementServer(opts = {}) {
                 sendJson(res, 502, { error: msg });
             } else if (err instanceof ValidationError
                 || /不能为空|目录不存在|已注册|不是有效 JSON|请求体过大|不是目录/.test(msg)) {
-                // ValidationError 可能携带 code（如 'CONFLICT_KEYS'）——前端据此判定可一键修复重试
+                // ValidationError 可选携带 code（结构化信号，如 proxy 缺 BASE_URL）
                 sendJson(res, 400, err instanceof ValidationError && err.code
                     ? { error: msg, code: err.code } : { error: msg });
             } else {
@@ -479,8 +474,9 @@ function sendJson(res, status, obj) {
 }
 
 /**
- * 起终端的共享逻辑（目标3：workspace 级与 config 级入口共用）。
- * 取 config → buildTerminalEnv → ensureProjectPermissions/Gitignore → sessions.start。
+ * 起终端的共享逻辑（workspace 级与 config 级入口共用）。
+ * settings.json 是 CLI 路由唯一事实源：起终端前先激活目标 config（写 settings.json +
+ * 注入 upstream），确保 CLI 读到的是该配置；再 buildTerminalEnv（只算 configDir）→ sessions.start。
  * kind 恒为 'normal'（派生配置已移除）。
  *
  * @param {object} deps { manager, sessions, opts, proxyPort }
@@ -502,6 +498,9 @@ async function startTerminalForConfig({ manager, sessions, opts, proxyPort }, ws
         err.statusCode = 400;
         throw err;
     }
+    // settings.json 是唯一事实源：起终端前先激活该 config（写 settings.json + 注入 upstream），
+    // CLI 读到的才是目标配置。workspace 级入口（无 cfgId）也用 active 调进来，幂等。
+    await activateConfig(manager, proxyPort, wsId, cfgId, { log: opts.log });
     const terminalId = sessions.newTerminalId();
     const kind = 'normal';
     const { env, configDir } = await buildTerminalEnv(cfg, proxyPort, {
@@ -522,16 +521,16 @@ async function startWorkspaceTerminal(deps, wsId, body) {
     const ws = await manager.get(wsId);
     if (!ws) throw new NotFoundError(`workspace 不存在: ${wsId}`);
     let cfgId = body?.cfgId;
-    if (!cfgId) {
-        // 无 cfgId → 用 active 默认配置
-        const active = await getActiveConfig(manager, wsId);
-        if (!active) {
-            const err = new Error('当前 workspace 无默认配置，请先标记一个 config 为默认，或在 body 指定 cfgId');
-            err.statusCode = 400;
-            throw err;
+if (!cfgId) {
+            // 无 cfgId → 用 active 默认配置
+            const active = await getActiveConfig(manager, wsId);
+            if (!active) {
+                const err = new Error('当前 workspace 无激活的 config，请先激活一个 config 为其写 settings.json，或在 body 指定 cfgId');
+                err.statusCode = 400;
+                throw err;
+            }
+            cfgId = active.id;
         }
-        cfgId = active.id;
-    }
     return startTerminalForConfig(deps, wsId, cfgId);
 }
 
@@ -539,7 +538,6 @@ async function startWorkspaceTerminal(deps, wsId, body) {
 function sendTermError(res, e) {
     if (e instanceof NotFoundError) sendJson(res, 404, { error: e.message });
     else if (e instanceof ProxyUnavailableError) sendJson(res, 502, { error: e.message });
-    // ValidationError 可能携带 code（如 'CONFLICT_KEYS'）——前端据此判定可一键修复重试
     else if (e instanceof ValidationError) sendJson(res, 400, e.code ? { error: e.message, code: e.code } : { error: e.message });
     else if (e.statusCode) sendJson(res, e.statusCode, { error: e.message });
     else sendJson(res, 500, { error: e.message });

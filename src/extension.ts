@@ -215,10 +215,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     /**
-     * workspace-local 配置切换：纯标记。
-     * 只记 local-active.json（id+mode），不写任何 settings.json、不 reload。
-     * launcher 启动时读此标记 → 取对应 local 配置 → 路由 key 经 shell env 注入终端（不写 settings.json）。
-     * proxy 模式也只标记，注入上游推迟到 launcher 启动时。
+     * workspace-local 配置切换：写标记 + 立即同步 settings.json。
+     * 记 local-active.json（id+mode），并立即调用 launcher.syncActiveSettings() 把该配置写入
+     * `.claude_proxy/settings.json`（唯一事实源）——切换即生效，不用等下次启动终端。
+     * proxy 模式此时就走「确保代理运行 + 注入上游 + 合成 localhost settings」，
+     * 与全局 doSwitch 的代理链路一致（不再推迟到 launcher 启动时）。
      */
     async function doLocalSwitch(cfg: LLMConfig): Promise<void> {
         if (!cfg || typeof cfg.content !== 'string') {
@@ -231,11 +232,15 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         const mode = cfg.mode === 'proxy' ? 'proxy' : 'direct';
         await localActiveState.write(cfg.id, mode);
+        // 切换即写 settings.json；失败（配置/代理问题）只提示不阻塞标记已写入
+        const ok = await launcher.syncActiveSettings();
         await refresh();
         const modeLabel = mode === 'proxy' ? '经代理' : '直连';
-        void vscode.window.showInformationMessage(
-            `Local active → '${cfg.name}' (${modeLabel})。下次启动 workspace Claude 会话时生效。`,
-        );
+        if (ok) {
+            void vscode.window.showInformationMessage(
+                `Local active → '${cfg.name}' (${modeLabel})，settings.json 已同步。`,
+            );
+        }
     }
 
     /** Resolve the LLMConfig from a command argument.

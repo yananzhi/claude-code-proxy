@@ -38,19 +38,19 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 
 **规则**：扩展宿主侧调本地代理接口**一律用裸 `net` socket**（`proxyHost.rawHttp`），不用 `http.get`/`http.request`/`fetch`。新增 wrapper 照 `rawHttp` 模式写。服务端 `res.end` 出口仍配 `Content-Length`（为非扩展宿主客户端）。
 
-### workspace-local 终端走纯 env 注入（global 链路才走 settings.json）
+### workspace-local 链路：settings.json 是唯一事实源（切换即写 + 启动兜底）
 
 **约束**：Claude Code 有两条独立的路由链路，注入方式不同——
 
-1. **global 链路**（`extension.ts` 的 `doSwitch` + 官方 Claude Code 插件聊天框）：切换 global config 时 `doSwitch` 仍写**全局** `~/.claude/settings.json` 的 `env` 字段。**原因**：官方聊天框不在本扩展进程树里、拿不到本扩展注入的 shell env，只能读 `CLAUDE_CONFIG_DIR`（默认 `~/.claude/`）下的 settings.json。这条链路**保持写 settings.json，不动**。
+1. **global 链路**（`extension.ts` 的 `doSwitch` + 官方 Claude Code 插件聊天框）：切换 global config 时 `doSwitch` 写**全局** `~/.claude/settings.json` 的 `env` 字段。**原因**：官方聊天框不在本扩展进程树里、拿不到本扩展注入的 shell env，只能读 `CLAUDE_CONFIG_DIR`（默认 `~/.claude/`）下的 settings.json。这条链路**不动**。
 
-2. **workspace-local 链路**（`claudeLauncher.ts` 的 `launch()`/`launchDerived()` + standalone 的 `terminalApi.js`）：**纯 shell env 注入**，**不写** `.claude_proxy/settings.json` 的路由 key（`ANTHROPIC_BASE_URL`/token/model 等）。**原因**：这些终端都由本扩展（或 standalone 后端）spawn，能拿 shell env，无需文件做路由；且不写路由 key 后，**插件终端与 standalone 终端可无缝共用同一 workspace 文件夹**——standalone 的冲突检测不再被插件遗留的路由 key 触发。`launch()` 用 `buildWorkspaceEnv(cfg)` 镜像 standalone `buildTerminalEnv` 的 normal 分支；`launchDerived()` 镜像 standalone derived 分支（四档别名 + BASE_URL/token 全走 env）。
+2. **workspace-local 链路**（`extension.ts` 的 `doLocalSwitch` + `claudeLauncher.ts` 的 `launch()`）：**.claude_proxy/settings.json 是 CLI 路由的唯一事实源**（回退 2026-08-14，c917d06 的 env 注入方案已废弃）。**切换即写**——`doLocalSwitch` 写好 `local-active.json` 标记后立即调 `launcher.syncActiveSettings()` 写 settings.json（direct=原样 content；proxy=确保代理运行 + 注入上游 + 合成 BASE_URL 指 `127.0.0.1:<port>`），**不用等下次启动终端才生效**。`launch()` 启动前再同步一次（D7b 兜底）：切换后配置若被编辑，settings 也拿到最新内容。终端 env 只注入 `CLAUDE_CONFIG_DIR`/`CLAUDE_BIN`，**不注入路由 key**。
 
-派生节点的"冻结前提"（settings.env 不能含别名 key）自动满足——根本不写 settings.env。
+派生节点的"冻结前提"（settings.env 不能含别名 key）自动满足——派生已移除（b180c50），settings 由扩展写。
 
-**与 standalone 混用同一 workspace 的坑**：standalone 启动终端前检测 `.claude_proxy/settings.json` 的 `env` 是否含路由 key（`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_*_MODEL`），**有则拒绝启动**（`standalone/terminalApi.js:85-106`，因 standalone 走 env 注入、认为 settings 同名 key 会覆盖 env 致路由错乱）。改后插件不再写路由 key，正常不触发；残留来源只剩"旧 activateConfig 残留 / 用户手动改过"，错误信息已提示哪个 key，让用户手动删。
+**与 standalone 混用同一 workspace 的坑（已回退解决）**：standalone 原在启动终端前检测 `.claude_proxy/settings.json` 的 `env` 是否含路由 key（`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`/`ANTHROPIC_DEFAULT_*_MODEL`）并拒绝启动。本回退（插件侧 + standalone 侧 D1-D6 同步实施，见 `docs/plan/tmp/2026-08-14-revert-activate-settings.md`）删除该冲突检测：standalone 的 `activateConfig` 恢复（激活即写 settings.json + 注入 upstream）、`buildTerminalEnv` env 恒为空、起终端前先 `activateConfig` 幂等覆盖 settings.json——两链路统一以 settings.json 为唯一事实源，不再互相冲突。
 
-**规则**：workspace-local 终端（插件 + standalone）路由 key **一律走 shell env**，不要写 `.claude_proxy/settings.json`。global 链路（`doSwitch` + 官方聊天框）保持写 `~/.claude/settings.json` 不动。standalone 的冲突检测也别放宽（放宽=容忍 settings 路由 key，会让 env 注入被 settings 覆盖、路由错乱）。
+**规则**：workspace-local 插件终端路由 key **一律走 `.claude_proxy/settings.json`**（切换即写 + 启动兜底，`syncActiveSettings`），不写 shell env。global 链路（`doSwitch` + 官方聊天框）保持写 `~/.claude/settings.json` 不动。
 
 ### 反引号模板字符串拼 JS：`\r`/`\n`/`\x..` 必须双反斜杠（终端页卡"正在连接"的元凶，已复发一次）
 
@@ -81,7 +81,7 @@ VS Code 扩展：管理 Claude Code 配置切换 + 本地 LLM 代理（可配置
 - `src/`：VS Code 扩展 TS（编译到 `out/`，CommonJS）。
   - `proxyHost.ts`：代理宿主/控制器（spawn 独立子进程跑 proxy/server.js，用 `process.execPath` + 净化 env + `ELECTRON_RUN_AS_NODE`，详见下方「Server 独立进程化」）+ 调代理接口的 wrapper（裸 socket）+ 心跳/多窗口协调（端口 bind 单例 + 2s healthz 探测 + child.on('exit') 主动 re-spawn）。
   - `cleanEnv.ts`：净化 `process.env` 给 spawn 子进程用（删 `NODE_OPTIONS`/`VSCODE_*`/`ELECTRON_*`/`CHROME_*`/`PIPE` 注入变量，设 `ELECTRON_RUN_AS_NODE=1` + `CCP_*` 路径）。纯函数，抽出来好单测。
-  - `claudeLauncher.ts`：启动 workspace 隔离 CLI（`CLAUDE_CONFIG_DIR` + 路由 key/别名全走 shell env；不写 `.claude_proxy/settings.json` 路由）。
+  - `claudeLauncher.ts`：启动 workspace 隔离 CLI（`CLAUDE_CONFIG_DIR` 指向 `.claude_proxy/`，路由走 settings.json——切换即写 + 启动兜底 `syncActiveSettings`；终端 env 只注入 CLAUDE_CONFIG_DIR/CLAUDE_BIN，不注入路由 key）。
   - `derivedLogic.ts`：派生节点纯逻辑（继承快照、别名 env 构造、映射表同步、per-档 1m 上下文 `sessionContext1m`/`normalizeSessionContext1m`/`inheritSessionContext1m`），抽出来好单测。
   - `treeProvider.ts` / `webviewEditor.ts` / `localConfigStore.ts`：配置树 / 编辑器 / 存储。
 - `proxy/`：本地 LLM 代理（ESM JS，不进 tsc）。

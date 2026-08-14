@@ -61,17 +61,17 @@ test('文案统一：无"派生/derived/Local LLM Configs"残留（用户可见�
     await expect(body).not.toContainText('派生节点');
 });
 
-test('默认标记：静态配置有「设为默认」按钮', async ({ page, standalone }) => {
+test('默认标记：静态配置有「激活」按钮', async ({ page, standalone }) => {
     await createWorkspaceAndConfig(standalone.url, 'default-cfg');
     await page.goto(standalone.url);
-    await expect(page.locator('.cfg-act', { hasText: '设为默认' })).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.cfg-act', { hasText: '激活' })).toBeVisible({ timeout: 10000 });
 });
 
-test('默认标记：点「设为默认」后变为「✓ 默认」徽标', async ({ page, standalone }) => {
+test('默认标记：点「激活」后变为「✓ 已激活」徽标', async ({ page, standalone }) => {
     await createWorkspaceAndConfig(standalone.url, 'mark-cfg');
     await page.goto(standalone.url);
-    const btn = page.locator('.cfg-act', { hasText: '设为默认' }).first();
+    const btn = page.locator('.cfg-act', { hasText: '激活' }).first();
     await expect(btn).toBeVisible({ timeout: 10000 });
     await btn.click();
-    await expect(page.locator('.active-badge', { hasText: '✓ 默认' })).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('.active-badge', { hasText: '✓ 已激活' })).toBeVisible({ timeout: 5000 });
 });

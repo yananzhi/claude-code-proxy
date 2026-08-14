@@ -2,13 +2,15 @@
 //
 // 运行：node --test test/standalone/terminal-env.test.mjs
 //
-// 维度：
-//   D1 normal-direct env 构建
-//   D2 normal-proxy env 构建（注入 upstream 到代理）
+// 回退 2026-08-14（settings.json 唯一事实源）后的语义：
+//   D1 normal-direct：env 恒为空（不注入路由 key），configDir 共享，不碰代理；
+//                     仍校验 BASE_URL/TOKEN（缺失 → ValidationError）。
+//   D2 normal-proxy：env 空 + 插入 upstream（幂等，防代理重启丢失）；
+//                    代理拒绝/不可达 → ProxyUnavailableError。
 //   S1-S6 代码审查 TDD 怀疑点（类型安全/边界/一致性/错误路径）
 //   D5 configDir 共享约束（避免重复引导）
-//   D6 settings.json 冲突检测
-//   D7 自定义 env 透传（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等）
+//   D6 settings.json 共存检测已删除（坏 JSON / env 含路由 key 均不再拒绝）
+//   D7 自定义 env key 透传已删除（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等走 settings.json）
 //
 // 代理用 mock proxyForward（spy），不连真实代理。
 // 派生配置（derived/别名）功能已移除（2026-08），无对应分支测试。
@@ -70,18 +72,19 @@ function makeMockForward(responses = {}) {
 
 // ════════════════════════════════════════════════════════════
 // D1 normal-direct
-// （env 注入 ANTHROPIC_* 真实配置 + 共享 configDir，不再读 settings.json）
+// （settings.json 唯一事实源：env 为空，不注入路由 key；共享 configDir；不碰代理）
 // ════════════════════════════════════════════════════════════
-test('D1a: direct config → env 含上游 BASE_URL/TOKEN/MODEL + 共享 configDir + 不碰代理', async () => {
+test('D1a: direct config → env 为空（不注入路由 key）+ 共享 configDir + 不碰代理', async () => {
     const wsDir = newTmpDir('d1a');
     const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
     const fwd = makeMockForward();
     const { env, configDir } = await buildTerminalEnv(cfg, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd });
-    // direct env 注入上游真实地址 + token + model（不再靠 settings.json）
-    assert.equal(env.ANTHROPIC_BASE_URL, 'https://up.test');
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-direct');
-    assert.equal(env.ANTHROPIC_MODEL, 'real-model');
-    // configDir 共享 {ws}/.claude_proxy（防 settings.json 覆盖 env）
+    // 回退后：路由配置全走 settings.json，env 不注入任何 LLM 配置
+    assert.equal(env.ANTHROPIC_BASE_URL, undefined, 'BASE_URL 不注入 env');
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined, 'TOKEN 不注入 env');
+    assert.equal(env.ANTHROPIC_MODEL, undefined, 'MODEL 不注入 env');
+    assert.deepEqual(env, {}, 'env 应为空对象');
+    // configDir 共享 {ws}/.claude_proxy（CLI 读激活时写的 settings.json）
     assert.equal(configDir, join(wsDir, '.claude_proxy'));
     // direct 不碰代理
     assert.equal(fwd.calls.length, 0);
@@ -111,45 +114,29 @@ test('D1d: direct config content 非法 JSON → throw', async () => {
     );
 });
 
-test('D1e: direct content 无 MODEL → env 不含 ANTHROPIC_MODEL（不报错）', async () => {
+test('D1e: direct content 无 MODEL → 不报错（env 空，不注入）', async () => {
     const cfg = { id: 'c1', name: 'n', content: directContent({ ANTHROPIC_MODEL: undefined }), mode: 'direct' };
     const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('d1e'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.ANTHROPIC_MODEL, undefined, '无 MODEL 不应注入');
-    // BASE_URL/TOKEN 仍在
-    assert.equal(env.ANTHROPIC_BASE_URL, 'https://up.test');
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-direct');
+    assert.deepEqual(env, {}, '无 MODEL 不注入，env 仍为空');
 });
 
-test('D1f: direct content 无 SMALL_FAST_MODEL/TIMEOUT → env 不含', async () => {
+test('D1f: direct content 无 SMALL_FAST_MODEL/TIMEOUT → env 空（不报错）', async () => {
     const cfg = { id: 'c1', name: 'n', content: directContent({ ANTHROPIC_SMALL_FAST_MODEL: undefined, API_TIMEOUT_MS: undefined }), mode: 'direct' };
     const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('d1f'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, undefined);
-    assert.equal(env.API_TIMEOUT_MS, undefined);
-});
-
-test('D1g: direct → env 含 SMALL_FAST_MODEL + TIMEOUT（毫秒字符串）', async () => {
-    // directContent 已含 SMALL_FAST_MODEL=fast-model + API_TIMEOUT_MS=30000
-    const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
-    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('d1g'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, 'fast-model');
-    // 30000ms → 保持毫秒字符串（与 timeoutSec*1000 一致）
-    assert.equal(env.API_TIMEOUT_MS, '30000');
+    assert.deepEqual(env, {});
 });
 
 // ════════════════════════════════════════════════════════════
 // D2 normal-proxy
-// （env BASE_URL 指向代理 + 共享 configDir + 注入 upstream）
+// （env 空 + 共享 configDir + 幂等注入 upstream）
 // ════════════════════════════════════════════════════════════
-test('D2a: proxy config → env BASE_URL=代理 + TOKEN + MODEL + 共享 configDir + 注入 upstream', async () => {
+test('D2a: proxy config → env 为空 + 共享 configDir + 注入 upstream（幂等）', async () => {
     const wsDir = newTmpDir('d2a');
     const cfg = { id: 'c1', name: 'n', content: proxyContent(), mode: 'proxy' };
     const fwd = makeMockForward();
     const { env, configDir } = await buildTerminalEnv(cfg, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd });
-    // proxy env BASE_URL 指向代理（不是上游真实地址）
-    assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:11444');
-    // token 仍是上游 token（代理透传时用）
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'tok-proxy');
-    assert.equal(env.ANTHROPIC_MODEL, 'proxy-model');
+    // 回退后：env 不再指向代理地址（CLI 读 settings.json，BASE_URL 由合成结果指代理）
+    assert.deepEqual(env, {}, 'env 应为空');
     // configDir 共享目录
     assert.equal(configDir, join(wsDir, '.claude_proxy'));
     // 注入了 upstream（真实上游地址）
@@ -202,43 +189,48 @@ test('S1b: direct content BASE_URL 是对象 {} → 应拒绝（{} truthy 穿透
     );
 });
 
-// S2（类型安全）：ANTHROPIC_MODEL 为非字符串（数字）时，env 应不含或拒绝，不应原样注入数字
-test('S2: direct content MODEL 是数字 → env 不应含数字型 MODEL', async () => {
+// S2（类型安全）：ANTHROPIC_MODEL 为非字符串（数字）时，不应原样注入（env 空，天然满足）
+test('S2: direct content MODEL 是数字 → env 仍为空，不注入数字', async () => {
     const cfg = { id: 'c1', name: 'n', content: directContent({ ANTHROPIC_MODEL: 42 }), mode: 'direct' };
     const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s2'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    // 期望：要么不含，要么是字符串；不应是数字 42
-    assert.equal(typeof env.ANTHROPIC_MODEL === 'undefined' || typeof env.ANTHROPIC_MODEL === 'string', true,
-        `MODEL 应为 undefined 或 string，实际: ${typeof env.ANTHROPIC_MODEL} = ${JSON.stringify(env.ANTHROPIC_MODEL)}`);
+    assert.deepEqual(env, {}, 'env 为空，不泄漏数字型 MODEL');
 });
 
-// S3（边界）：API_TIMEOUT_MS 非法值（0/负/NaN/空串）→ env 不含
-test('S3a: direct content API_TIMEOUT_MS=0 → env 不含', async () => {
+// S3（边界）：API_TIMEOUT_MS 非法值（0/负/NaN/空串）→ 不影响（env 空；
+//  proxy 模式 upstream body 不含 timeoutSec）
+test('S3a: direct content API_TIMEOUT_MS=0 → env 空（不注入无效值）', async () => {
     const cfg = { id: 'c1', name: 'n', content: directContent({ API_TIMEOUT_MS: '0' }), mode: 'direct' };
     const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s3a'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.API_TIMEOUT_MS, undefined, '0ms 应视为无效不注入');
+    assert.deepEqual(env, {});
 });
 
-test('S3b: direct content API_TIMEOUT_MS=-5 → env 不含', async () => {
-    const cfg = { id: 'c1', name: 'n', content: directContent({ API_TIMEOUT_MS: '-5' }), mode: 'direct' };
-    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s3b'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.API_TIMEOUT_MS, undefined, '负数应视为无效不注入');
+test('S3b: proxy content API_TIMEOUT_MS=-5 → upstream body 无 timeoutSec', async () => {
+    const cfg = { id: 'c1', name: 'n', content: proxyContent({ API_TIMEOUT_MS: '-5' }), mode: 'proxy' };
+    const fwd = makeMockForward();
+    await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s3b'), terminalId: 't1', proxyForwardFn: fwd });
+    const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
+    assert.ok(upCall, 'proxy 模式仍应注入 upstream');
+    assert.equal(upCall.body.upstream.timeoutSec, undefined, '负数 timeout 不注入');
 });
 
-test('S3c: direct content API_TIMEOUT_MS="abc" → env 不含', async () => {
-    const cfg = { id: 'c1', name: 'n', content: directContent({ API_TIMEOUT_MS: 'abc' }), mode: 'direct' };
-    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s3c'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.API_TIMEOUT_MS, undefined, '非数字字符串应视为无效不注入');
+test('S3c: proxy content API_TIMEOUT_MS="abc" → upstream body 无 timeoutSec', async () => {
+    const cfg = { id: 'c1', name: 'n', content: proxyContent({ API_TIMEOUT_MS: 'abc' }), mode: 'proxy' };
+    const fwd = makeMockForward();
+    await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s3c'), terminalId: 't1', proxyForwardFn: fwd });
+    const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
+    assert.ok(upCall);
+    assert.equal(upCall.body.upstream.timeoutSec, undefined, '非数字字符串 timeout 不注入');
 });
 
-// S4（一致性）：proxy 模式 + API_TIMEOUT_MS 非法 → upstream body 不含 timeoutSec，但仍注入 upstream + env 不含
-test('S4: proxy + API_TIMEOUT_MS 非法 → upstream body 无 timeoutSec + env 无 API_TIMEOUT_MS', async () => {
+// S4（一致性）：proxy 模式 + API_TIMEOUT_MS 非法 → upstream body 不含 timeoutSec，但注入仍进行
+test('S4: proxy + API_TIMEOUT_MS 非法 → upstream body 无 timeoutSec，upstream 仍注入', async () => {
     const cfg = { id: 'c1', name: 'n', content: proxyContent({ API_TIMEOUT_MS: 'abc' }), mode: 'proxy' };
     const fwd = makeMockForward();
     const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s4'), terminalId: 't1', proxyForwardFn: fwd });
     const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
-    assert.ok(upCall);
+    assert.ok(upCall, '非法 timeout 不应阻断 upstream 注入');
     assert.equal(upCall.body.upstream.timeoutSec, undefined, '非法 timeout → upstream body 不应含 timeoutSec');
-    assert.equal(env.API_TIMEOUT_MS, undefined, '非法 timeout → env 不应含 API_TIMEOUT_MS');
+    assert.deepEqual(env, {});
 });
 
 // S5（错误路径）：proxy 模式 fwd 抛异常（网络错误等）→ buildTerminalEnv 应抛出（不吞）
@@ -251,20 +243,18 @@ test('S5: proxy 模式 fwd reject → buildTerminalEnv 应 reject（不吞异常
     );
 });
 
-// S6（一致性/状态）：proxy 模式小数毫秒 timeout → CLI env 与 proxy timeoutSec 应一致（不差 500ms）
-test('S6: proxy + API_TIMEOUT_MS=30500 → env API_TIMEOUT_MS 与 proxy timeoutSec*1000 一致', async () => {
+// S6（一致性/状态）：proxy 模式小数毫秒 timeout → proxy timeoutSec 为四舍五入秒（env 空不注入）
+test('S6: proxy + API_TIMEOUT_MS=30500 → timeoutSec=31（四舍五入），env 不注入 API_TIMEOUT_MS', async () => {
     const cfg = { id: 'c1', name: 'n', content: proxyContent({ API_TIMEOUT_MS: '30500' }), mode: 'proxy' };
     const fwd = makeMockForward();
     const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s6'), terminalId: 't1', proxyForwardFn: fwd });
     const upCall = fwd.calls.find(c => c.path === '/api/upstream' && c.method === 'POST');
-    const proxyTimeoutMs = upCall.body.upstream.timeoutSec * 1000;
-    const cliTimeoutMs = Number(env.API_TIMEOUT_MS);
-    assert.equal(cliTimeoutMs, proxyTimeoutMs,
-        `CLI env API_TIMEOUT_MS(${cliTimeoutMs}) 应与 proxy timeoutSec*1000(${proxyTimeoutMs}) 一致，不应差 500ms`);
+    assert.equal(upCall.body.upstream.timeoutSec, 31, '30500ms → 30.5s → 四舍五入 31s');
+    assert.equal(env.API_TIMEOUT_MS, undefined, 'CLI env 不注入 timeout（走 settings.json）');
 });
 
 // ════════════════════════════════════════════════════════════
-// D5 configDir 共享假设约束（修复问题2：避免重复引导）
+// D5 configDir 共享假设约束（问题2：避免重复引导）
 // ════════════════════════════════════════════════════════════
 test('D5a: 同 workspace 两次起终端 → configDir 路径相同（共享，onboarding 复用）', async () => {
     // 约束假设：共享 configDir 是避免重复引导的前提。若两次 configDir 不同，共享失效。
@@ -289,40 +279,38 @@ test('D5b: 不同 workspace → configDir 不同（隔离，不串引导）', as
 });
 
 // ════════════════════════════════════════════════════════════
-// D6 settings.json 检测（env 注入与 settings.json 不共存）
+// D6 settings.json 共存检测已删除
+// （回退 2026-08-14：settings.json 就是唯一事实源，不再"env 注入与 settings.json 不共存"，
+//  无论 settings.json 是否有 env 路由 key / 是否损坏，buildTerminalEnv 都不再拒绝）
 // ════════════════════════════════════════════════════════════
-test('D6a: 普通代理模式 + settings.json 存在 → throw（不因代理模式跳过检测）', async () => {
+test('D6a: proxy 模式 + settings.json 含 env 路由 key → 不 throw（settings.json 是事实源）', async () => {
     const wsDir = newTmpDir('d6a');
     mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
     writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{"ANTHROPIC_MODEL":"stale-m"}}', 'utf8');
     const cfg = { id: 'c1', name: 'n', content: proxyContent(), mode: 'proxy' };
     const fwd = makeMockForward({ 'POST /api/upstream': { status: 200, body: {} } });
-    await assert.rejects(
-        () => buildTerminalEnv(cfg, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd }),
-        /settings\.json.*存在|不支持共存|ValidationError/i,
-    );
+    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: fwd });
+    assert.deepEqual(env, {}, '不再因 settings.json 共存而拒绝');
 });
 
-test('D6c: settings.json 仅 theme/skipDangerous（无 env 冲突 key）→ 放行（不 throw）', async () => {
-    // CLI 自己写的引导标记，无 env，不冲突，放行（第二次起终端能成功的保证）
+test('D6c: settings.json 仅 theme/skipDangerous（无 env 冲突 key）→ 放行', async () => {
+    // CLI 自己的引导标记，无 env，不冲突，放行（第二次起终端能成功的保证）
     const wsDir = newTmpDir('d6c');
     mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
     writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"theme":"dark","skipDangerousModePermissionPrompt":true}', 'utf8');
     const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
     const { env, configDir } = await buildTerminalEnv(cfg, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.ANTHROPIC_MODEL, 'real-model', '无冲突 key 应放行，env 正常注入');
+    assert.deepEqual(env, {}, '无冲突 key 放行');
     assert.ok(configDir);
 });
 
-test('D6d: settings.json env 含 ANTHROPIC_BASE_URL → throw（冲突 key 覆盖路由）', async () => {
+test('D6d: settings.json env 含 ANTHROPIC_BASE_URL → 不 throw（路由由 settings.json 承载）', async () => {
     const wsDir = newTmpDir('d6d');
     mkdirSync(join(wsDir, '.claude_proxy'), { recursive: true });
-    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{"ANTHROPIC_BASE_URL":"http://stale"}}', 'utf8');
+    writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:11434"}}', 'utf8');
     const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
-    await assert.rejects(
-        () => buildTerminalEnv(cfg, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: makeMockForward() }),
-        /ANTHROPIC_BASE_URL|覆盖.*modelname|不支持共存/i,
-    );
+    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.deepEqual(env, {}, '不再拒绝（env 空，无覆盖冲突）');
 });
 
 test('D6e: settings.json 损坏（非 JSON）→ 不 throw（让 CLI 自己处理）', async () => {
@@ -331,68 +319,31 @@ test('D6e: settings.json 损坏（非 JSON）→ 不 throw（让 CLI 自己处�
     writeFileSync(join(wsDir, '.claude_proxy', 'settings.json'), '{ not valid json', 'utf8');
     const cfg = { id: 'c1', name: 'n', content: directContent(), mode: 'direct' };
     const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: wsDir, terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.ANTHROPIC_MODEL, 'real-model', '损坏 settings.json 不视为冲突，放行');
+    assert.deepEqual(env, {}, '损坏 settings.json 不视为冲突，放行');
 });
 
 // ════════════════════════════════════════════════════════════
-// D7 自定义 env 透传（CLAUDE_CODE_AUTO_COMPACT_WINDOW 等）
-// 证明：启动入口当前只透传路由 key，丢自定义 env key。
-// 修复前这些用例失败（env 无自定义 key），修复后通过。
-// 根因见 plan twinkling-forging-sunset：customEnv 未注入 shell env，
-// 仅靠 settings.json 残留泄漏，CLI 重写 settings.json 后丢失。
+// D7 自定义 env 透传已删除
+// （回退 2026-08-14：所有配置走 settings.json，custom env key 不再注入 spawn env；
+//  验证 env 恒为空、不透传任何自定义或系统 key）
 // ════════════════════════════════════════════════════════════
 
-// D1-custom：direct content 含自定义 env key → env 应透传
-test('D1-custom: direct content 含 CLAUDE_CODE_AUTO_COMPACT_WINDOW + FOO → env 透传', async () => {
+test('D7a: direct content 含 CLAUDE_CODE_AUTO_COMPACT_WINDOW + FOO → env 不透传（走 settings.json）', async () => {
     const cfg = {
         id: 'c1', name: 'n',
         content: directContent({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000', FOO: 'bar' }),
         mode: 'direct',
     };
-    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('d1c-custom'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000', '自定义 env key 应透传到 spawn env');
-    assert.equal(env.FOO, 'bar', '其余自定义 env key 也应透传');
-    // 路由 key 仍在（不被 customEnv 影响）
-    assert.equal(env.ANTHROPIC_BASE_URL, 'https://up.test');
-    assert.equal(env.ANTHROPIC_MODEL, 'real-model');
+    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('d7a'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.deepEqual(env, {}, '自定义 env key 不注入 spawn env（由 settings.json 承载）');
 });
 
-// D1-conflict-excluded：customEnv 排除路由 key，不覆盖显式构造值
-test('D1-conflict-excluded: direct content ANTHROPIC_MODEL=x + 自定义 key → MODEL 仍是显式值 + 含自定义 key', async () => {
-    // directContent 的 ANTHROPIC_MODEL=real-model 被 over 覆盖成 'x'，customEnv 应排除 ANTHROPIC_MODEL
-    // （由 normal 分支显式注入 parsed.env.ANTHROPIC_MODEL='x'），同时透传 CLAUDE_CODE_AUTO_COMPACT_WINDOW
-    const cfg = {
-        id: 'c1', name: 'n',
-        content: directContent({ ANTHROPIC_MODEL: 'x', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '90000' }),
-        mode: 'direct',
-    };
-    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('d1c-conflict'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    // ANTHROPIC_MODEL 来自显式构造（parsed.env.ANTHROPIC_MODEL='x'），不被 customEnv 干扰
-    assert.equal(env.ANTHROPIC_MODEL, 'x', 'ANTHROPIC_MODEL 应由显式构造，不被 customEnv 覆盖');
-    // 自定义 key 仍透传
-    assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '90000');
-});
-
-// ════════════════════════════════════════════════════════════
-// TDD 审查：高风险怀疑点（保留 non-derived 部分）
-// ════════════════════════════════════════════════════════════
-
-// TDD-S5 (Cat 4 状态迁移): customEnv 覆盖调用方显式设的 key（normal 分支）
-// 怀疑：normal 分支里 env 先构造路由 key，再 Object.assign(env, extractCustomEnv(parsed.env))。
-// extractCustomEnv 排除路由 key，但不排除其他可能被调用方设的 key。
-// 更直接的风险：若 content.env 含 PATH/HOME/NODE_OPTIONS 等系统 env key，customEnv 会透传它们
-// 覆盖调用方/系统的 env。验证：customEnv 是否透传 PATH（潜在安全/功能风险）。
-test('TDD-S5: normal content 含 PATH → customEnv 透传 PATH（潜在系统 env 覆盖风险）', async () => {
+test('D7b: content 含 PATH/HOME/NODE_OPTIONS → env 不透传系统 key', async () => {
     const cfg = {
         id: 'c1', name: 'n',
         content: directContent({ PATH: '/usr/malicious/bin', HOME: '/bad/home', NODE_OPTIONS: '--inspect' }),
         mode: 'direct',
     };
-    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('s5'), terminalId: 't1', proxyForwardFn: makeMockForward() });
-    // 怀疑 bug：customEnv 透传了 PATH/HOME/NODE_OPTIONS
-    // 断言"bug 存在"：env 应含 PATH（从 content 透传）
-    // 若已修复（系统 env key 应被排除）：env 不含 PATH
-    assert.equal(env.PATH, undefined, 'PATH 不应从 content.env 透传（会覆盖系统 PATH）');
-    assert.equal(env.HOME, undefined, 'HOME 不应从 content.env 透传（会覆盖系统 HOME）');
-    assert.equal(env.NODE_OPTIONS, undefined, 'NODE_OPTIONS 不应从 content.env 透传（会覆盖系统 NODE_OPTIONS）');
+    const { env } = await buildTerminalEnv(cfg, 11444, { workspaceDir: newTmpDir('d7b'), terminalId: 't1', proxyForwardFn: makeMockForward() });
+    assert.deepEqual(env, {}, '系统 env key 不注入（不会覆盖调用方/系统的 PATH/HOME/NODE_OPTIONS）');
 });

@@ -153,28 +153,12 @@ function confirmDirPicker() {
 }
 
 // 起终端共享逻辑（newTerminal/newConfigTerminal 共用）。
-// 起终端遇 code:'CONFLICT_KEYS'（settings.json 残留旧版路由 key 会覆盖 env 注入）时弹确认框，
-// 用户确认后调 strip-conflict-keys 一键删除冲突 key 再重试一次（isRetry 防无限循环）。
-function doCreateTerminal(url, isRetry) {
+// settings.json 是唯一事实源：起终端调 /activate 写 settings.json（config 级入口内部先激活）。
+function doCreateTerminal(url) {
   fetch(API + url, { method: 'POST' })
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.error) {
-        // 冲突类错误 + 未重试过 → 弹确认框，一键删除冲突 key 后重试
-        if (d.code === 'CONFLICT_KEYS' && !isRetry) {
-          if (confirm('检测到 workspace 的 settings.json 残留旧版路由配置（会覆盖终端注入的 modelname）。\\n是否一键删除冲突 key 并重试创建终端？')) {
-            var wsId = url.split('/')[3]; // /api/workspaces/:id/...
-            fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/settings/strip-conflict-keys', { method: 'POST' })
-              .then(function(r2) { return r2.json(); })
-              .then(function(d2) {
-                if (d2.error) { showMsg('删除冲突 key 失败: ' + d2.error, 'err'); return; }
-                showMsg('已删除 ' + (d2.removed || []).length + ' 个冲突 key，重试创建终端...', 'ok');
-                doCreateTerminal(url, true);
-              })
-              .catch(function(e) { showMsg('删除冲突 key 异常: ' + e.message, 'err'); });
-          }
-          return;
-        }
         showMsg('新建终端失败: ' + d.error, 'err');
         return;
       }
@@ -185,11 +169,11 @@ function doCreateTerminal(url, isRetry) {
 }
 // 新建 normal 终端（基于 active config）
 function newTerminal(wsId) {
-  doCreateTerminal('/api/workspaces/' + encodeURIComponent(wsId) + '/terminals', false);
+  doCreateTerminal('/api/workspaces/' + encodeURIComponent(wsId) + '/terminals');
 }
-// 新建终端（基于指定 config；走 config 级路由）
+// 新建终端（基于指定 config；走 config 级路由，先激活该 config 再起）
 function newConfigTerminal(wsId, cfgId) {
-  doCreateTerminal('/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/terminals', false);
+  doCreateTerminal('/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/terminals');
 }
 // 激活 config
 function activateCfg(wsId, cfgId, btn) {
@@ -384,16 +368,16 @@ function buildConfigRow(ws, cfg, activeId) {
   var modeLabel = (cfg.mode === 'proxy') ? '[代理]' : '[直连]';
   editLink.textContent = '📄 ' + (cfg.name || cfg.id) + ' ' + modeLabel;
   row.appendChild(editLink);
-  // 默认配置标记（目标2：激活弱化为只写标记，不写 settings.json）
+  // 激活标记（settings.json 为唯一事实源：激活 = 写 settings.json）
   if (isActive) {
     var badge = document.createElement('span');
     badge.className = 'active-badge';
-    badge.textContent = '✓ 默认';
+    badge.textContent = '✓ 已激活';
     row.appendChild(badge);
   } else {
     var actBtn = document.createElement('button');
     actBtn.className = 'cfg-act';
-    actBtn.textContent = '设为默认';
+    actBtn.textContent = '激活';
     actBtn.onclick = function() { activateCfg(ws.id, cfg.id, actBtn); };
     row.appendChild(actBtn);
   }
@@ -401,7 +385,7 @@ function buildConfigRow(ws, cfg, activeId) {
   var stBtn = document.createElement('button');
   stBtn.className = 'cfg-new-term';
   stBtn.textContent = '新建终端';
-  stBtn.title = '基于此配置启动终端（env 现场注入）';
+  stBtn.title = '基于此配置启动终端（先激活该配置写 settings.json）';
   stBtn.onclick = function() { newConfigTerminal(ws.id, cfg.id); };
   row.appendChild(stBtn);
   // 重命名 + 删除（次要操作，hover 图标按钮）
@@ -736,7 +720,7 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, apiB
 <div class="row">
   <label for="content">settings.json content</label>
   <textarea id="content" spellcheck="false">${escapeHtml(content)}</textarea>
-  <div class="hint">保存配置后，起终端时 env 现场注入（直连=上游真实地址，代理=经代理转发）。</div>
+  <div class="hint">保存后激活该配置会写进 workspace 的 .claude_proxy/settings.json（settings.json 是 CLI 路由唯一事实源：直连=上游真实地址，代理=经代理转发）。</div>
 </div>
 <div id="error" aria-live="polite"></div>
 <div class="actions">
