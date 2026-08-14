@@ -438,48 +438,8 @@ async function handleApi(req, res, urlPath) {
     }
     return;
   }
-  // model alias 热更新：加/改一条别名→真实模型映射，下个请求即生效。
-  if (req.method === 'POST' && urlPath === '/api/model-alias') {
-    try {
-      const body = await readJsonBody(req);
-      const { alias, model } = body;
-      if (typeof alias !== 'string' || !alias || typeof model !== 'string' || !model) {
-        throw new Error('需要 {alias, model} 两个非空字符串');
-      }
-      const result = configStore.updateModelAlias(alias, model);
-      concise(`MODEL-ALIAS updated → ${alias}=${model}`);
-      sendJson(res, 200, { ok: true, ...result });
-    } catch (e) {
-      sendJson(res, 400, { error: e.message });
-    }
-    return;
-  }
-  // model alias 删除：删一条映射，下个请求即生效。
-  if (req.method === 'POST' && urlPath === '/api/model-alias/delete') {
-    try {
-      const body = await readJsonBody(req);
-      const { alias } = body;
-      if (typeof alias !== 'string' || !alias) {
-        throw new Error('需要 {alias} 非空字符串');
-      }
-      const result = configStore.removeModelAlias(alias);
-      concise(`MODEL-ALIAS removed → ${alias}`);
-      sendJson(res, 200, { ok: true, ...result });
-    } catch (e) {
-      sendJson(res, 400, { error: e.message });
-    }
-    return;
-  }
-  // 申请下一个会话编号（全局递增、持久化、跨重启不重号）。
-  if (req.method === 'GET' && urlPath === '/api/model-alias/next-id') {
-    try {
-      const id = configStore.nextAliasId();
-      sendJson(res, 200, { id });
-    } catch (e) {
-      sendJson(res, 500, { error: e.message });
-    }
-    return;
-  }
+  // model alias 相关 API 已随派生配置功能移除（2026-08），此处不再注册 /api/model-alias* 路由。
+
   if (req.method === 'GET' && urlPath === '/api/traces') {
     const u = new URL('http://x' + req.url);
     const since = u.searchParams.get('since') || undefined;
@@ -669,19 +629,12 @@ async function handleRequest(req, res) {
     ? rewriteEffort(body, effortLevel, id, req.headers['content-type'])
     : body;
   const effortRewritten = outBody !== body;
-  // model 别名替换：不受 isMessagesMain 守卫，所有带 model 字段的 JSON 请求都查表
-  // （含 /v1/messages/count_tokens 子路径）。返回 resolvedModel 供 trace 记真实模型。
-  const modelResult = configStore.rewriteModel(outBody, id, req.headers['content-type']);
-  outBody = modelResult.body;
-  const resolvedModel = modelResult.resolvedModel;
-  const rewritten = outBody !== body;
-  const modelTag = (resolvedModel && resolvedModel !== reqModel) ? ` [model→${resolvedModel}]` : '';
 
   const params = runtimeParams();
   const { maxAttempts, backoffSec, backoffMaxSec, passthrough, retryRules, upstreamTimeoutMs, upstream, upstreamBase, token } = params;
   const modeTag = passthrough ? '透传' : '重试';
 
-  concise(`REQ  #${id} ${req.method} ${req.url} (body ${body.length} bytes) from ${ip} [${modeTag}]${effortRewritten ? ` [effort→${effortLevel}]` : ''}${modelTag}`);
+  concise(`REQ  #${id} ${req.method} ${req.url} (body ${body.length} bytes) from ${ip} [${modeTag}]${effortRewritten ? ` [effort→${effortLevel}]` : ''}`);
   detail(id, 'CLIENT → PROXY REQUEST', [
     `${req.method} ${req.url}`,
     `mode: ${modeTag}`,
@@ -832,7 +785,6 @@ async function handleRequest(req, res) {
   traceStore.append({
     id, sourceIp: ip, method: req.method, path: req.url, startedAt, endedAt, totalMs,
     finalStatus: finalDelivered?.status ?? 0, outcome, model: reqModel,
-    resolvedModel: resolvedModel ?? '',
     firstChunkAt: finalFirstChunkAt,
     firstChunkMs: finalFirstChunkMs,
     lastAttemptMs: finalLastAttemptMs,

@@ -19,3 +19,7 @@ plan/**
 CHANGELOG.md
 proxy/.test-tmp/**
 .test-tmp/**
+FrameworkTest/**
+standalone/run/**
+test-results/**
+playwright.config.ts

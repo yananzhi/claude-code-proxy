@@ -102,29 +102,33 @@ test('S1c: workspaceName 含 </script> → 标题插值应安全', async () => {
 // ════════════════════════════════════════════════════════════
 // S2 sessionContext1m: PUT 不保存前端传的 sessionContext1m
 // ════════════════════════════════════════════════════════════
-test('S2: PUT derived 传 sessionContext1m → 应持久化（非丢弃）', async () => {
+// ════════════════════════════════════════════════════════════
+// S2 legacy 派生字段 PUT 时被忽略（派生已移除，2026-08）
+// ════════════════════════════════════════════════════════════
+test('S2: PUT 传 legacy 派生字段 → 忽略不持久化', async () => {
     const { handle, port, home } = await startMgmt('s2');
     const { wsId, proj } = await createWorkspace(port, 's2');
     try {
-        const PARENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_MODEL: 'm' } });
-        const parent = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+        const cfg = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'p', content: PARENT }),
+            body: JSON.stringify({ name: 'c', content: '{"env":{}}' }),
         })).json();
-        const child = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c', derivedFrom: parent.config.id, derivedIndex: 1 }),
-        })).json();
-        // 前端改 1m checkbox → PUT { name, sessionContext1m }
-        const new1m = { main: true, haiku: false, sonnet: false, opus: false };
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${child.config.id}`, {
+        // 前端/旧数据 PUT 时带了 legacy 派生字段 → 后端应忽略，不持久化
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.config.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c', sessionContext1m: new1m }),
+            body: JSON.stringify({
+                name: 'renamed',
+                sessionContext1m: { main: true, haiku: false, sonnet: false, opus: false },
+                derivedFrom: 'some-parent', derivedIndex: 3, modelAliases: { main: 'x' },
+            }),
         });
         assert.equal(r.status, 200);
-        // 重新 GET 确认 sessionContext1m 被持久化
-        const got = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${child.config.id}`)).json();
-        assert.deepEqual(got.config.sessionContext1m, new1m, 'sessionContext1m 应被 PUT 保存');
+        const got = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.config.id}`)).json();
+        assert.equal(got.config.name, 'renamed');
+        assert.equal(got.config.sessionContext1m, undefined, 'sessionContext1m 不应被持久化');
+        assert.equal(got.config.derivedFrom, undefined, 'derivedFrom 不应被持久化');
+        assert.equal(got.config.derivedIndex, undefined, 'derivedIndex 不应被持久化');
+        assert.equal(got.config.modelAliases, undefined, 'modelAliases 不应被持久化');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -133,28 +137,27 @@ test('S2: PUT derived 传 sessionContext1m → 应持久化（非丢弃）', asy
 });
 
 // ════════════════════════════════════════════════════════════
-// S3 getModelCatalog: workspace 不存在返回 [] vs createLocalConfig 抛 404 — 不一致
+// S3 model-catalog 路由已移除（派生/别名删除，2026-08）→ 404
 // ════════════════════════════════════════════════════════════
-test('S3: model-catalog 对不存在的 workspace → 行为确认', async () => {
+test('S3: model-catalog 路由已移除 → 404', async () => {
     const { handle, port, home } = await startMgmt('s3');
+    const { wsId, proj } = await createWorkspace(port, 's3');
     try {
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/ws_nope/model-catalog`);
-        // 当前实现返回 200 + { catalog: [] }（workspace 不存在不报错）
-        // 这与 createLocalConfig 对不存在 workspace 抛 404 不一致，但 catalog 返空也是合理行为。
-        // 此测试记录当前行为，确认是 200（非 404）。
-        assert.equal(r.status, 200);
-        const data = await r.json();
-        assert.deepEqual(data.catalog, []);
+        const r1 = await fetch(`http://127.0.0.1:${port}/api/workspaces/ws_nope/model-catalog`);
+        assert.equal(r1.status, 404, '不存在的 workspace model-catalog 应 404');
+        const r2 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/model-catalog`);
+        assert.equal(r2.status, 404, '存在的 workspace model-catalog 也应 404（路由已移除）');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
+        rmSync(proj, { recursive: true, force: true });
     }
 });
 
 // ════════════════════════════════════════════════════════════
-// S4 别名转发: 非 derived config 也能调 alias 转发（语义漏洞）
+// S4 别名转发路由已移除（派生删除）→ POST /alias 404
 // ════════════════════════════════════════════════════════════
-test('S4: 普通 config 调 alias 转发 → 应拒绝（仅 derived 可设别名）', async () => {
+test('S4: alias 路由已移除 → POST /configs/:id/alias 404', async () => {
     const { handle, port, home } = await startMgmt('s4', { proxyPort: 19999 });
     const { wsId, proj } = await createWorkspace(port, 's4');
     try {
@@ -162,14 +165,11 @@ test('S4: 普通 config 调 alias 转发 → 应拒绝（仅 derived 可设别�
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: 'plain', content: '{}' }),
         })).json();
-        // 普通 config 调 alias 转发 → 当前实现不校验 derived，直接转发到 proxy。
-        // proxy 不可达 → 502。但语义上普通 config 不该有别名，应返回 400。
         const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.config.id}/alias`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ alias: 'ccp-main-1', model: 'x' }),
         });
-        // 期望：400（普通 config 不支持别名），而非 502（盲目转发）
-        assert.equal(r.status, 400, '普通 config 调 alias 应拒绝（400），不应盲目转发');
+        assert.equal(r.status, 404, 'alias 路由应已移除（404）');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -178,103 +178,30 @@ test('S4: 普通 config 调 alias 转发 → 应拒绝（仅 derived 可设别�
 });
 
 // ════════════════════════════════════════════════════════════
-// S5 derivedFrom = null → 进入 derived 分支但报"父配置不存在"
+// S5 创建请求带 legacy 派生字段 → 按普通 config 处理（字段忽略）
 // ════════════════════════════════════════════════════════════
-test('S5: derivedFrom=null → 应报错（null 不应被当 derived 创建）', async () => {
+test('S5: 创建带 legacy derivedFrom/derivedIndex → 忽略，按普通 config 创建', async () => {
     const { handle, port, home } = await startMgmt('s5');
     const { wsId, proj } = await createWorkspace(port, 's5');
     try {
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c', derivedFrom: null, derivedIndex: 1 }),
-        });
-        // null !== undefined → 进入 derived 分支，但应被 derivedFrom 类型校验拦截。
-        // 期望：400 + derivedFrom 格式错误消息。
-        assert.equal(r.status, 400);
-        const data = await r.json();
-        assert.match(data.error, /derivedFrom/i, '错误消息应说明 derivedFrom 非法');
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
-    }
-});
-
-// ════════════════════════════════════════════════════════════
-// S6 别名 model 空字符串 → 前端应走 delete 路径
-// ════════════════════════════════════════════════════════════
-test('S6: 前端别名清空时 HTML 应含 delete 端点逻辑', async () => {
-    // 前端 JS 无法在 node test 里跑，但可检查 HTML 是否包含 delete 路由逻辑。
-    const html = buildConfigEditorHtml({
-        workspaceId: 'ws1', workspaceName: 'test',
-        config: { id: 'cfg1', name: 'd', content: '{}', mode: 'proxy', derivedFrom: 'p', derivedIndex: 1, modelAliases: {}, sessionContext1m: { main: false, haiku: false, sonnet: false, opus: false } },
-        catalog: [], apiBase: '',
-    });
-    // 修复后：前端空 model 时走 /alias/delete，非空走 /alias
-    assert.ok(html.includes('/alias/delete'), '前端应含 delete 端点逻辑（空 model 时清别名）');
-    assert.ok(html.includes("if (model)"), '前端应按 model 是否为空分流');
-});
-
-test('S6b: alias model 空字符串 → 后端转发到 proxy（当前行为记录）', async () => {
-    // 后端 alias 转发收到 model:"" → 转发到 proxy → proxy 返回 400（需要非空字符串）。
-    // 前端修复后清空走 /alias/delete，不再触发此路径。此测试记录后端不校验 model 非空。
-    // 这个测试记录当前行为（502 proxy 不可达时不验证 body）。
-    const { handle, port, home } = await startMgmt('s6', { proxyPort: 19999 });
-    const { wsId, proj } = await createWorkspace(port, 's6');
-    try {
-        const PARENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_MODEL: 'm' } });
-        const parent = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'p', content: PARENT }),
-        })).json();
-        const child = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c', derivedFrom: parent.config.id, derivedIndex: 1 }),
-        })).json();
-        // model 空字符串 → proxy 不可达 → 502
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${child.config.id}/alias`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ alias: 'ccp-main-1', model: '' }),
-        });
-        // 当前：502（proxy 不可达）。如果 proxy 可达会 400（model 非空校验）。
-        // 期望改进：空 model 应转 delete 语义。此测试记录现状。
-        assert.ok(r.status === 502 || r.status === 400, '空 model 当前被转发（502 或 400），无 delete 语义');
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
-    }
-});
-
-// ════════════════════════════════════════════════════════════
-// S7 derivedIndex 由客户端提供 → 不调 next-alias-id，可重号
-// ════════════════════════════════════════════════════════════
-test('S7: 两个 derived 用相同 derivedIndex → 都创建成功（可重号）', async () => {
-    const { handle, port, home } = await startMgmt('s7');
-    const { wsId, proj } = await createWorkspace(port, 's7');
-    try {
-        const PARENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_MODEL: 'm' } });
-        const parent = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'p', content: PARENT }),
-        })).json();
+        // derivedFrom=null 与 derivedIndex 重复都应被忽略，创建为普通 config
         const r1 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c1', derivedFrom: parent.config.id, derivedIndex: 5 }),
+            body: JSON.stringify({ name: 'c1', content: '{"env":{}}', derivedFrom: null, derivedIndex: 1 }),
         });
-        const c1 = await r1.json();
+        assert.equal(r1.status, 201);
+        const c1 = (await r1.json()).config;
+        assert.equal(c1.derivedFrom, undefined, 'derivedFrom 不应被持久化');
+        assert.equal(c1.derivedIndex, undefined, 'derivedIndex 不应被持久化');
+        assert.equal(c1.mode, 'direct', '应按普通 config 的 mode 归一');
+        // 同号重复创建也按普通 config
         const r2 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c2', derivedFrom: parent.config.id, derivedIndex: 5 }),
+            body: JSON.stringify({ name: 'c2', content: '{"env":{}}', derivedFrom: 'ghost', derivedIndex: 1 }),
         });
-        const c2 = await r2.json();
-        // 两个都用 derivedIndex=5 → 别名 ccp-main-5 冲突
-        // 当前实现不校验重号，都创建成功。proxy 端别名表会被后者覆盖。
-        assert.equal(r1.status, 201);
         assert.equal(r2.status, 201);
-        assert.equal(c1.config.derivedIndex, 5);
-        assert.equal(c2.config.derivedIndex, 5, '当前允许重号（无 next-alias-id 校验）');
-        // 这是潜在 bug：应从 next-alias-id 取全局唯一编号，防别名冲突。
+        const c2 = (await r2.json()).config;
+        assert.equal(c2.derivedIndex, undefined, '重复 derivedIndex 不产生别名冲突（字段被忽略）');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -283,59 +210,36 @@ test('S7: 两个 derived 用相同 derivedIndex → 都创建成功（可重号�
 });
 
 // ════════════════════════════════════════════════════════════
-// S8 别名转发不校验 alias 格式 → 任意 alias 可写入 proxy
+// S6 编辑页 HTML 无派生/别名残留（派生已移除）
 // ════════════════════════════════════════════════════════════
-test('S8: alias 转发任意 alias 字符串 → 无格式校验', async () => {
-    const { handle, port, home } = await startMgmt('s8', { proxyPort: 19999 });
-    const { wsId, proj } = await createWorkspace(port, 's8');
-    try {
-        const PARENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_MODEL: 'm' } });
-        const parent = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'p', content: PARENT }),
-        })).json();
-        const child = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c', derivedFrom: parent.config.id, derivedIndex: 1 }),
-        })).json();
-        // 传任意 alias（非 ccp-{tier}-N 格式）→ 当前实现直接转发，不校验。
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${child.config.id}/alias`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ alias: 'arbitrary-evil-alias', model: 'x' }),
-        });
-        // proxy 不可达 → 502。如果可达，任意 alias 会被写入 proxy 映射表。
-        // 期望改进：后端应校验 alias 格式（ccp-{tier}-N）。
-        assert.equal(r.status, 502, '当前不校验 alias 格式，直接转发');
-    } finally {
-        await handle.stop();
-        rmSync(home, { recursive: true, force: true });
-        rmSync(proj, { recursive: true, force: true });
-    }
+test('S6: 编辑页 HTML 无 derivedBlock/readonly/alias 端点引用', () => {
+    const html = buildConfigEditorHtml({
+        workspaceId: 'ws1', workspaceName: 'test',
+        config: { id: 'cfg1', name: 'd', content: '{}', mode: 'proxy' },
+        apiBase: '',
+    });
+    assert.ok(!html.includes('derivedBlock'), '编辑页不应有 derived 渲染块');
+    assert.ok(!html.includes('/alias'), '编辑页不应引用 alias 端点');
+    assert.ok(!html.includes('readonly'), 'content 不应只读');
+    assert.ok(html.includes('textarea'), '编辑页应有 content textarea');
 });
 
 // ════════════════════════════════════════════════════════════
-// S9 PUT derived 不传 name → 400（name 必填校验）
+// S9 PUT 不传 name → 400（name 必填校验，普通 config 同约束）
 // ════════════════════════════════════════════════════════════
-test('S9: PUT derived 不传 name → 400', async () => {
+test('S9: PUT 不传 name → 400', async () => {
     const { handle, port, home } = await startMgmt('s9');
     const { wsId, proj } = await createWorkspace(port, 's9');
     try {
-        const PARENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_MODEL: 'm' } });
-        const parent = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+        const cfg = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'p', content: PARENT }),
+            body: JSON.stringify({ name: 'c', content: '{"env":{}}' }),
         })).json();
-        const child = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c', derivedFrom: parent.config.id, derivedIndex: 1 }),
-        })).json();
-        // 只传 sessionContext1m，不传 name
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${child.config.id}`, {
+        // 只传 content，不传 name → name 必填 → 400
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.config.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionContext1m: { main: true, haiku: false, sonnet: false, opus: false } }),
+            body: JSON.stringify({ content: '{"env":{}}' }),
         });
-        // name 是必填 → 400。但前端 1m checkbox 总带 name:nameEl.value，所以实际不会触发。
-        // 这记录了 name 必填约束。
         assert.equal(r.status, 400);
     } finally {
         await handle.stop();
@@ -373,30 +277,24 @@ test('S10: PUT 普通配置不传 content → content 保留（非清空）', as
 });
 
 // ════════════════════════════════════════════════════════════
-// S11 sessionContext1m 畸形输入 → normalize 兜底（不崩溃）
+// S11 PUT 传畸形 sessionContext1m → 字段被忽略不持久化（不崩）
 // ════════════════════════════════════════════════════════════
-test('S11: PUT derived sessionContext1m 畸形（字符串）→ normalize 兜底不崩', async () => {
+test('S11: PUT 畸形 sessionContext1m（字符串）→ 忽略不持久化，不崩', async () => {
     const { handle, port, home } = await startMgmt('s11');
     const { wsId, proj } = await createWorkspace(port, 's11');
     try {
-        const PARENT = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_MODEL: 'm' } });
-        const parent = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
+        const cfg = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'p', content: PARENT }),
+            body: JSON.stringify({ name: 'c', content: '{"env":{}}' }),
         })).json();
-        const child = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'c', derivedFrom: parent.config.id, derivedIndex: 1 }),
-        })).json();
-        // 传字符串而非对象 → normalizeSessionContext1m 应回退为全 false
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${child.config.id}`, {
+        // 传字符串而非对象 → 后端应忽略（派生字段已移除），不崩溃
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfg.config.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: 'c', sessionContext1m: 'garbage' }),
         });
         assert.equal(r.status, 200);
         const data = await r.json();
-        assert.deepEqual(data.config.sessionContext1m, { main: false, haiku: false, sonnet: false, opus: false },
-            '畸形 sessionContext1m 应被 normalize 兜底为全 false');
+        assert.equal(data.config.sessionContext1m, undefined, 'sessionContext1m 不应被持久化（字段已移除）');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -405,9 +303,9 @@ test('S11: PUT derived sessionContext1m 畸形（字符串）→ normalize 兜�
 });
 
 // ════════════════════════════════════════════════════════════
-// S12 alias 转发对不存在 config → 404（非 502）
+// S12 alias 路由已移除 → cfgId 不存在也 404（非盲目转发 502）
 // ════════════════════════════════════════════════════════════
-test('S12: alias 转发 cfgId 不存在 → 404（非盲目转发 502）', async () => {
+test('S12: alias 路由已移除 → cfgId 不存在 404（非盲目转发）', async () => {
     const { handle, port, home } = await startMgmt('s12', { proxyPort: 19999 });
     const { wsId, proj } = await createWorkspace(port, 's12');
     try {
@@ -415,7 +313,7 @@ test('S12: alias 转发 cfgId 不存在 → 404（非盲目转发 502）', async
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ alias: 'ccp-main-1', model: 'x' }),
         });
-        assert.equal(r.status, 404, 'config 不存在应 404，不应盲目转发到 proxy');
+        assert.equal(r.status, 404, 'alias 路由已移除，不应盲目转发到 proxy');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -424,9 +322,9 @@ test('S12: alias 转发 cfgId 不存在 → 404（非盲目转发 502）', async
 });
 
 // ════════════════════════════════════════════════════════════
-// S13 alias/delete 转发对普通 config → 400（仅 derived 可删别名）
+// S13 alias/delete 路由已移除 → 404（普通/任意 config 均如此）
 // ════════════════════════════════════════════════════════════
-test('S13: alias/delete 对普通 config → 400', async () => {
+test('S13: alias/delete 路由已移除 → 404', async () => {
     const { handle, port, home } = await startMgmt('s13', { proxyPort: 19999 });
     const { wsId, proj } = await createWorkspace(port, 's13');
     try {
@@ -438,7 +336,7 @@ test('S13: alias/delete 对普通 config → 400', async () => {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ alias: 'ccp-main-1' }),
         });
-        assert.equal(r.status, 400, '普通 config 删别名应拒绝');
+        assert.equal(r.status, 404, 'alias/delete 路由应已移除（404）');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });

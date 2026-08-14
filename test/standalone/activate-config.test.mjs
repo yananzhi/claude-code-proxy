@@ -106,11 +106,11 @@ test('A3: workspace 不存在 → 404', async () => {
     }
 });
 
-test('A4: 派生配置可标记为默认（标记只是指针，与旧"派生不能 active"约束无关）', async () => {
+test('A4: legacy derived 配置被 load 剥离 → 不可标记（404），父 config 正常可标记', async () => {
     const { handle, port, home } = await startMgmt('a4');
     const { wsId, proj } = await createWorkspace(port, 'a4');
     const parent = await createConfig(port, wsId, { name: 'parent', mode: 'proxy', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm' } }) });
-    // 手写派生 config（绕过依赖代理 next-alias-id 的创建流程）
+    // 手写 legacy derived 配置到文件（派生已移除：load 时剥离 derivedFrom 非空节点）
     const derivedId = 'derived-test-a4';
     injectDerivedConfig(proj, {
         id: derivedId, name: 'deriv', content: parent.content, mode: 'proxy',
@@ -120,11 +120,15 @@ test('A4: 派生配置可标记为默认（标记只是指针，与旧"派生不
         derivedSnapshot: { baseUrl: 'http://up', token: 'tok', mode: 'proxy' },
     });
     try {
+        // legacy derived 配置在存储层不可见 → 标记 404
         const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}/activate`, { method: 'POST' });
-        assert.equal(r.status, 200);
-        const data = await r.json();
+        assert.equal(r.status, 404, 'legacy derived 配置应被剥离，不可标记');
+        // 父 config 不受影响，正常可标记
+        const r2 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${parent.id}/activate`, { method: 'POST' });
+        assert.equal(r2.status, 200);
+        const data = await r2.json();
         assert.equal(data.marked, true);
-        assert.equal(data.cfgId, derivedId);
+        assert.equal(data.cfgId, parent.id);
         assert.equal(data.mode, 'proxy');
     } finally {
         await handle.stop();
@@ -309,10 +313,10 @@ test('E2: 缺 BASE_URL 的 config 仍可标记（标记 ≠ 启动，启动时�
 // F 审查 TDD：边界/状态转换/一致性
 // ════════════════════════════════════════════════════════════
 
-// F1（目标3 已修复）：派生配置可标记为默认，起终端路由不再拒绝派生 active。
-// 旧设计（目标2 审查时）workspace 级拒绝派生 active（400），与"派生可标记默认"不一致。
-// 目标3 取消该限制：派生 active 走 workspace 级不再 400（代理不可达 → 502 亦可，非类型拒绝）。
-test('F1: 派生配置标记为默认后，workspace 级起终端不因类型被拒（目标3 取消旧限制）', async () => {
+// F1（派生已移除，2026-08）：legacy derived 节点被 load 剥离后，不干扰普通 config 的标记与 workspace 级起终端。
+// 旧测试（目标2/3 时代）验证"派生配置可标记默认 + 起终端不因派生类型被拒"——该类型已不存在。
+// 新验证：文件里残留 legacy derived 条目不影响「标记普通 config → GET /active」链路。
+test('F1: legacy derived 残留条目不干扰普通 config 标记与读取', async () => {
     const { handle, port, home } = await startMgmt('f1');
     const { wsId, proj } = await createWorkspace(port, 'f1');
     const parent = await createConfig(port, wsId, { name: 'parent', mode: 'proxy', content: JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://up', ANTHROPIC_AUTH_TOKEN: 'tok', ANTHROPIC_MODEL: 'pm' } }) });
@@ -325,12 +329,12 @@ test('F1: 派生配置标记为默认后，workspace 级起终端不因类型被
         derivedSnapshot: { baseUrl: 'http://up', token: 'tok', mode: 'proxy' },
     });
     try {
-        // 标记派生为默认（A4 已验证可标记）
-        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}/activate`, { method: 'POST' });
-        assert.equal(r.status, 200, '派生应可标记为默认');
-        // 起终端：目标3 取消旧"拒绝派生 active"限制 → 不再 400（代理不可达 → 502，非类型拒绝）
-        const r2 = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/terminals`, { method: 'POST' });
-        assert.notEqual(r2.status, 400, '派生 active 不应被类型拒绝（目标3 取消旧限制）');
+        // 标记普通 config 为默认：正常成功（不受文件里 derived 残留影响）
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${parent.id}/activate`, { method: 'POST' });
+        assert.equal(r.status, 200, '普通 config 应可标记为默认');
+        // GET /active 返回被标记的普通 config（derived 残留不参与 active 判定）
+        const data = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/active`)).json();
+        assert.equal(data.active.id, parent.id, 'active 应为普通 config');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });

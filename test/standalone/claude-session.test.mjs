@@ -87,9 +87,13 @@ test('D2b: PATH 不含 claude → null', () => {
     assert.equal(searchPathForClaude({ platform: process.platform, path: dir }), null);
 });
 
-test('D2c: PATH 空/undefined → null 不崩', () => {
+test('D2c: PATH 空 → null；path 缺省回退 process.env.PATH（不崩）', () => {
     assert.equal(searchPathForClaude({ platform: 'linux', path: '' }), null);
-    assert.equal(searchPathForClaude({ platform: 'linux', path: undefined }), null);
+    // path 缺省（undefined）时回退 process.env.PATH，等价于不传 path——只验证不崩、结果与显式缺省一致
+    // （本机 PATH 可能恰好含 claude，不能断言 null，与环境无关地比较两次调用结果）。
+    const viaEnv = searchPathForClaude({ platform: 'linux' });
+    const viaUndefined = searchPathForClaude({ platform: 'linux', path: undefined });
+    assert.equal(viaUndefined, viaEnv);
 });
 
 test('D2d: Windows 试 .exe/.cmd/.bat', () => {

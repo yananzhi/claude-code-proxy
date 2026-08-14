@@ -239,36 +239,6 @@ export class ProxyHost {
         this.log(`已注入上游: ${env.baseUrl} model=${env.model ?? '(unset)'}`);
     }
 
-    /** 设置/更新一条别名映射（POST /api/model-alias）。照 setUpstream 模板。 */
-    async setModelAlias(alias: string, model: string): Promise<void> {
-        await this.postJson('/api/model-alias', { alias, model });
-        this.log(`已设置别名映射: ${alias} → ${model}`);
-    }
-
-    /** 删除一条别名映射（POST /api/model-alias/delete）。 */
-    async removeModelAlias(alias: string): Promise<void> {
-        await this.postJson('/api/model-alias/delete', { alias });
-        this.log(`已删除别名映射: ${alias}`);
-    }
-
-    /** 向代理申请下一个全局唯一编号 N（GET /api/model-alias/next-id）。 */
-    async nextAliasId(): Promise<number> {
-        const { status, body } = await this.rawHttp('GET', '/api/model-alias/next-id');
-        if (status !== 200) {
-            throw new Error(`代理返回 ${status}`);
-        }
-        try {
-            const obj = JSON.parse(body) as { id: number };
-            if (typeof obj.id !== 'number' || !Number.isFinite(obj.id)) {
-                throw new Error(`代理返回的 id 非数字: ${body}`);
-            }
-            return obj.id;
-        } catch (e) {
-            this.log(`nextAliasId: 解析失败 body=${JSON.stringify(body.slice(0, 200))} err=${(e as Error).message}`);
-            throw new Error(`解析 next-id 响应失败: ${(e as Error).message}`);
-        }
-    }
-
     /**
      * 诊断探针（临时，验证 proxy-agent 劫持假设用）：用 http.get 调本地代理指定路径，
      * 返回完整证据（status/headers/rawLen/raw 前若干字节/err），**不**做任何兜底解析。
@@ -403,20 +373,6 @@ export class ProxyHost {
             req.on('timeout', () => { req.destroy(); tryFinish('timeout', { rawLen: raw.length }); });
             req.end(body);
         });
-    }
-
-    /** 取代理当前别名映射全表（GET /api/config 的 modelAliases 字段）。供上游一致性比对等用。 */
-    async getModelAliases(): Promise<Record<string, string>> {
-        const { status, body } = await this.rawHttp('GET', '/api/config');
-        if (status !== 200) {
-            throw new Error(`代理返回 ${status}`);
-        }
-        try {
-            const obj = JSON.parse(body) as { modelAliases?: Record<string, string> };
-            return obj.modelAliases ?? {};
-        } catch (e) {
-            throw new Error(`解析 /api/config 响应失败: ${(e as Error).message}`);
-        }
     }
 
     /** POST JSON 到代理的通用封装。 */

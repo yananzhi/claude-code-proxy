@@ -5,7 +5,7 @@
 //
 // 通信：fetch 调同端口 management API（/api/workspaces）。
 
-/** 生成 workspace 管理网页 HTML（树状：workspace → configs → derived → terminals）。
+/** 生成 workspace 管理网页 HTML（树状：workspace → configs → terminals）。
  * proxyPort 用于显示"打开控制台"链接。通信：fetch 调同端口 management API。 */
 export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
     const proxyLink = proxyPort ? `http://127.0.0.1:${proxyPort}/` : '';
@@ -32,7 +32,6 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
   .group { margin: 6px 0 6px 24px; }
   .group-title { font-size: 0.85rem; color: #555; font-weight: 600; margin: 6px 0 2px 0; cursor: pointer; user-select: none; }
   .config-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; margin-left: 8px; }
-  .derived-row { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 28px; }
   .term-row { display: flex; align-items: center; gap: 8px; padding: 2px 0 2px 44px; font-size: 0.85rem; }
   .cfg-link { color: #06c; text-decoration: none; }
   .cfg-link:hover { text-decoration: underline; }
@@ -42,10 +41,9 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
   .cfg-new-term { padding: 2px 8px; font-size: 0.8rem; cursor: pointer; background: #eef; border: 1px solid #ccd; border-radius: 3px; }
   .active-badge { color: #060; background: #efe; padding: 2px 6px; border-radius: 3px; font-size: 0.78rem; font-weight: 600; }
   .icon-btn { padding: 1px 5px; font-size: 0.85rem; cursor: pointer; background: transparent; border: none; color: #888; opacity: 0; transition: opacity 0.1s; }
-  .config-row:hover .icon-btn, .derived-row:hover .icon-btn, .term-row:hover .icon-btn { opacity: 1; }
+  .config-row:hover .icon-btn, .term-row:hover .icon-btn { opacity: 1; }
   .icon-btn:hover { color: #c00; }
-  .config-row:hover, .derived-row:hover, .term-row:hover { background: #f5f5f5; border-radius: 3px; }
-  .derived-tag { color: #649; font-size: 0.78rem; }
+  .config-row:hover, .term-row:hover { background: #f5f5f5; border-radius: 3px; }
   .danger { color: #c00; }
   .msg { padding: 8px; margin: 8px 0; border-radius: 4px; }
   .msg.err { background: #fee; color: #c00; }
@@ -70,7 +68,7 @@ export function buildWorkspacesHtml({ apiBase = '', proxyPort } = {}) {
     .row input[type=text] { min-width: 0; flex: 1 1 100%; }
     .ws-head { flex-wrap: wrap; }
     .group { margin-left: 12px; }
-    .config-row, .derived-row, .term-row { flex-wrap: wrap; }
+    .config-row, .term-row { flex-wrap: wrap; }
     .dir-picker { width: calc(100vw - 20px); max-width: 560px; left: 10px; right: 10px; transform: none; }
   }
 </style>
@@ -154,28 +152,6 @@ function confirmDirPicker() {
   closeDirPicker();
 }
 
-// 从静态父配置新建别名配置：取 next-alias-id → POST 别名配置 → 跳编辑页
-function newDerivedConfig(wsId, parentId, parentName) {
-  fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/next-alias-id')
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.error || d.id == null) { showMsg('取别名编号失败: ' + (d.error || '未知'), 'err'); return; }
-      var idx = d.id;
-      var body = { name: (parentName || 'cfg') + ' #' + idx, derivedFrom: parentId, derivedIndex: idx };
-      return fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }).then(function(r) { return r.json(); }).then(function(dd) {
-        if (dd.error) { showMsg('建别名配置失败: ' + dd.error, 'err'); return; }
-        showMsg('已建别名配置 #' + idx + '，请在编辑页配别名', 'ok');
-        setTimeout(function() {
-          window.location.href = API + '/workspace/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(dd.config.id) + '/edit';
-        }, 300);
-      });
-    })
-    .catch(function(e) { showMsg('建别名配置异常: ' + e.message, 'err'); });
-}
-
 // 起终端共享逻辑（newTerminal/newConfigTerminal 共用）。
 // 起终端遇 code:'CONFLICT_KEYS'（settings.json 残留旧版路由 key 会覆盖 env 注入）时弹确认框，
 // 用户确认后调 strip-conflict-keys 一键删除冲突 key 再重试一次（isRetry 防无限循环）。
@@ -211,7 +187,7 @@ function doCreateTerminal(url, isRetry) {
 function newTerminal(wsId) {
   doCreateTerminal('/api/workspaces/' + encodeURIComponent(wsId) + '/terminals', false);
 }
-// 新建终端（基于指定 config，静态/别名都行；走 config 级路由）
+// 新建终端（基于指定 config；走 config 级路由）
 function newConfigTerminal(wsId, cfgId) {
   doCreateTerminal('/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfgId) + '/terminals', false);
 }
@@ -236,7 +212,7 @@ function stopTerminal(tid, btn) {
     .then(function(d) { loadList(); })
     .catch(function(e) { showMsg(e.message, 'err'); });
 }
-// 重命名配置（只改 name，#N 编号不动——后端 updateLocalConfig 保留 derivedIndex）
+// 重命名配置（只改 name）
 function renameConfig(wsId, cfg, oldName) {
   var newName = prompt('重命名配置：', oldName || cfg.id);
   if (newName === null) return;
@@ -248,15 +224,14 @@ function renameConfig(wsId, cfg, oldName) {
     body: JSON.stringify({ name: newName }),
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.error) { showMsg('重命名失败: ' + d.error, 'err'); return; }
-    showMsg('已重命名' + (cfg.derivedIndex ? '（编号 #' + cfg.derivedIndex + ' 不变）' : ''), 'ok');
+    showMsg('已重命名', 'ok');
     loadList();
   }).catch(function(e) { showMsg('重命名异常: ' + e.message, 'err'); });
 }
 // 删除配置
 function deleteConfig(wsId, cfg) {
   var label = cfg.name || cfg.id;
-  if (cfg.derivedIndex) label += ' #' + cfg.derivedIndex;
-  if (!confirm('删除配置 "' + label + '"？（别名配置删除后，代理侧的别名映射建议一并清理）')) return;
+  if (!confirm('删除配置 "' + label + '"？')) return;
   fetch(API + '/api/workspaces/' + encodeURIComponent(wsId) + '/configs/' + encodeURIComponent(cfg.id), { method: 'DELETE' })
     .then(function(r) { return r.json(); }).then(function(d) {
       if (d.error) { showMsg('删除失败: ' + d.error, 'err'); return; }
@@ -340,10 +315,6 @@ function buildWsNode(ws) {
 
 function renderWsBody(body, ws, configs, activeId, normalTerms) {
   body.textContent = '';
-  // 分离 parent configs 和 derived
-  var parents = configs.filter(function(c){ return c.derivedFrom === undefined; });
-  var derivedOf = {};
-  configs.forEach(function(c){ if (c.derivedFrom !== undefined) { (derivedOf[c.derivedFrom] = derivedOf[c.derivedFrom] || []).push(c); } });
 
   // 可折叠 group 构造器：标题（▶/▼ + 文字）点击切 body 显示
   function buildGroup(titleText, icon) {
@@ -369,7 +340,7 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   }
 
   // 配置 分组
-  var cfgG = buildGroup('配置（' + parents.length + '）', '📄');
+  var cfgG = buildGroup('配置（' + configs.length + '）', '📄');
   var cfgBody = cfgG.body;
   // 新建配置链接
   var newCfgLink = document.createElement('a');
@@ -378,14 +349,10 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   newCfgLink.className = 'cfg-link';
   cfgBody.appendChild(newCfgLink);
 
-  parents.forEach(function(cfg) {
-    cfgBody.appendChild(buildConfigRow(ws, cfg, activeId, false));
-    var deriveds = derivedOf[cfg.id] || [];
-    deriveds.forEach(function(dc) {
-      cfgBody.appendChild(buildDerivedConfigRow(ws, dc));
-    });
+  configs.forEach(function(cfg) {
+    cfgBody.appendChild(buildConfigRow(ws, cfg, activeId));
   });
-  if (parents.length === 0) {
+  if (configs.length === 0) {
     var hint = document.createElement('div');
     hint.style.cssText = 'color:#999;font-size:0.82rem;margin-left:8px';
     hint.textContent = '（无配置，点上面「新建配置」创建）';
@@ -393,7 +360,7 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   }
   body.appendChild(cfgG.group);
 
-  // 终端 分组（列全部终端：静态 + 别名 统一挂这里）
+  // 终端 分组（列全部终端）
   var termG = buildGroup('终端（' + normalTerms.length + '）', '🖥');
   normalTerms.forEach(function(t) {
     termG.body.appendChild(buildTerminalRow(t));
@@ -407,65 +374,37 @@ function renderWsBody(body, ws, configs, activeId, normalTerms) {
   body.appendChild(termG.group);
 }
 
-// 派生配置行：只渲染配置本身（终端统一挂终端组，不再挂配置节点下）
-function buildDerivedConfigRow(ws, cfg) {
-  var wrapper = document.createElement('div');
-  var row = buildConfigRow(ws, cfg, null, true);
-  wrapper.appendChild(row);
-  return wrapper;
-}
-
-function buildConfigRow(ws, cfg, activeId, isDerived) {
+function buildConfigRow(ws, cfg, activeId) {
   var row = document.createElement('div');
-  row.className = isDerived ? 'derived-row' : 'config-row';
+  row.className = 'config-row';
   var isActive = cfg.id === activeId;
   var editLink = document.createElement('a');
   editLink.href = API + '/workspace/' + encodeURIComponent(ws.id) + '/configs/' + encodeURIComponent(cfg.id) + '/edit';
   editLink.className = 'cfg-link';
   var modeLabel = (cfg.mode === 'proxy') ? '[代理]' : '[直连]';
-  var icon = isDerived ? '🔀' : '📄';
-  var label = (isDerived ? ' ↳ 别名配置 #' + (cfg.derivedIndex || '') + '  ' + (cfg.name || cfg.id) : icon + ' ' + (cfg.name || cfg.id) + ' ' + modeLabel);
-  editLink.textContent = label;
+  editLink.textContent = '📄 ' + (cfg.name || cfg.id) + ' ' + modeLabel;
   row.appendChild(editLink);
   // 默认配置标记（目标2：激活弱化为只写标记，不写 settings.json）
-  if (!isDerived) {
-    if (isActive) {
-      var badge = document.createElement('span');
-      badge.className = 'active-badge';
-      badge.textContent = '✓ 默认';
-      row.appendChild(badge);
-    } else {
-      var actBtn = document.createElement('button');
-      actBtn.className = 'cfg-act';
-      actBtn.textContent = '设为默认';
-      actBtn.onclick = function() { activateCfg(ws.id, cfg.id, actBtn); };
-      row.appendChild(actBtn);
-    }
+  if (isActive) {
+    var badge = document.createElement('span');
+    badge.className = 'active-badge';
+    badge.textContent = '✓ 默认';
+    row.appendChild(badge);
+  } else {
+    var actBtn = document.createElement('button');
+    actBtn.className = 'cfg-act';
+    actBtn.textContent = '设为默认';
+    actBtn.onclick = function() { activateCfg(ws.id, cfg.id, actBtn); };
+    row.appendChild(actBtn);
   }
-  // 静态配置：可新建终端 + 新建别名配置（主操作显文字）
-  if (!isDerived) {
-    var stBtn = document.createElement('button');
-    stBtn.className = 'cfg-new-term';
-    stBtn.textContent = '新建终端';
-    stBtn.title = '基于此配置启动终端（env 现场注入）';
-    stBtn.onclick = function() { newConfigTerminal(ws.id, cfg.id); };
-    row.appendChild(stBtn);
-    var derBtn = document.createElement('button');
-    derBtn.className = 'cfg-new-term';
-    derBtn.textContent = '+ 别名配置';
-    derBtn.title = '基于此配置创建别名配置（env 注入别名，运行时可改模型）';
-    derBtn.onclick = function() { newDerivedConfig(ws.id, cfg.id, cfg.name); };
-    row.appendChild(derBtn);
-  }
-  // 别名配置：自己的「新建终端」入口
-  if (isDerived) {
-    var dtBtn = document.createElement('button');
-    dtBtn.className = 'cfg-new-term';
-    dtBtn.textContent = '新建终端';
-    dtBtn.onclick = function() { newConfigTerminal(ws.id, cfg.id); };
-    row.appendChild(dtBtn);
-  }
-  // 重命名 + 删除（次要操作，hover 图标按钮；别名重命名只改 name，#N 编号后端保留）
+  // 新建终端（主操作显文字）
+  var stBtn = document.createElement('button');
+  stBtn.className = 'cfg-new-term';
+  stBtn.textContent = '新建终端';
+  stBtn.title = '基于此配置启动终端（env 现场注入）';
+  stBtn.onclick = function() { newConfigTerminal(ws.id, cfg.id); };
+  row.appendChild(stBtn);
+  // 重命名 + 删除（次要操作，hover 图标按钮）
   var rnBtn = document.createElement('button');
   rnBtn.className = 'icon-btn';
   rnBtn.textContent = '✎';
@@ -488,8 +427,7 @@ function buildTerminalRow(t) {
   link.href = API + '/terminal/' + encodeURIComponent(t.terminalId);
   link.className = 'term-link';
   link.target = '_blank';
-  var kindLabel = t.kind === 'derived' ? '[别名]' : '[静态]';
-  link.textContent = '🖥 ' + kindLabel + ' ' + t.terminalId + (t.startedConfigName ? ' (' + t.startedConfigName + ')' : '');
+  link.textContent = '🖥 [静态] ' + t.terminalId + (t.startedConfigName ? ' (' + t.startedConfigName + ')' : '');
   row.appendChild(link);
   var meta = document.createElement('span');
   meta.style.cssText = 'color:#888';
@@ -571,26 +509,13 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
   var msgEl = document.getElementById('msg');
   var barInfo = document.getElementById('barInfo');
 
-  // 顶栏：查终端详情 + 别名映射（别名终端显示 ccp-<tier>-N → 真实模型）
-  // polling：别名映射在配置编辑页可被实时修改，终端页打开期间需轮询保持顶栏最新。
-  // 变化检测：只在新旧文本不同时更新 DOM，避免无谓重绘。页面隐藏时暂停省资源。
+  // 顶栏：查终端详情（显示所起配置名）
+  // polling：配置名固定，但保留轮询结构以防后续改动；页面隐藏时暂停省资源。
+  // 变化检测：只在新旧文本不同时更新 DOM，避免无谓重绘。
   var lastBarText = '';
   function renderBarInfo(d) {
-    var text = '';
-    if (d.kind === 'derived' && d.derivedIndex) {
-      var idx = d.derivedIndex;
-      var aliases = d.modelAliases || {};
-      var tiers = [['main','ccp-main-'],['haiku','ccp-haiku-'],['sonnet','ccp-sonnet-'],['opus','ccp-opus-']];
-      var parts = ['[别名] #' + idx];
-      tiers.forEach(function(t) {
-        var real = aliases[t[0]];
-        if (real) parts.push(t[1] + idx + ' → ' + real);
-      });
-      text = parts.join(', ');
-    } else if (d.kind === 'normal') {
-      text = '[静态] ' + (d.startedConfigName || '');
-    }
-    if (text && text !== lastBarText) {
+    var text = '[静态] ' + (d.startedConfigName || '');
+    if (text !== lastBarText) {
       barInfo.textContent = text;
       lastBarText = text;
     }
@@ -602,7 +527,7 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
       .catch(function() { /* 查询失败不影响终端使用，保留默认文案 */ });
   }
   refreshBarInfo();
-  // polling：页面可见时每 4s 轮询别名映射（别名变更是低频用户操作，4s 足够）
+  // polling：页面可见时每 4s 轮询顶栏信息
   var pollTimer = setInterval(function() {
     if (!document.hidden) refreshBarInfo();
   }, 4000);
@@ -761,13 +686,11 @@ export function buildTerminalHtml({ terminalId, apiBase = '' } = {}) {
 /**
  * 生成 local config 编辑页 HTML（阶段 4：迁移 webviewEditor）。
  * - 普通配置：name + mode(direct/proxy) + content textarea(JSON)
- * - derived：name + modelAliases 四档(即时生效) + sessionContext1m per-tier + content 只读
- * 通信：fetch 调 management API（/api/workspaces/:id/configs/... + alias 转发）
+ * 通信：fetch 调 management API（/api/workspaces/:id/configs/...）
  */
-export function buildConfigEditorHtml({ workspaceId, workspaceName, config, catalog = [], apiBase = '' } = {}) {
+export function buildConfigEditorHtml({ workspaceId, workspaceName, config, apiBase = '' } = {}) {
     // 防注入：所有插值都走转义
     const cfg = config || null;
-    const isDerived = cfg && cfg.derivedFrom !== undefined;
     const name = cfg?.name || '';
     const content = cfg?.content || TEMPLATE;
     // 新建配置默认 proxy（cfg 无 mode 时）；已有配置按自身 mode
@@ -779,9 +702,6 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
     const safeWid = safeJsonForScript(String(workspaceId));
     const safeCfgId = safeJsonForScript(String(cfgId));
     const safeApiBase = safeJsonForScript(String(apiBase));
-    const safeCatalog = safeJsonForScript(catalog);
-    // 把 config 整体传给前端（供 derived 别名/1m 渲染）
-    const safeCfg = safeJsonForScript(cfg);
 
     return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -795,8 +715,6 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
   input[type=text], select { width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 13px; }
   textarea { width: 100%; box-sizing: border-box; min-height: 380px; resize: vertical; padding: 8px; font-family: monospace; font-size: 13px; white-space: pre; overflow: auto; }
   .hint { color: #666; font-size: 12px; margin-top: 4px; }
-  .alias-row { display: grid; grid-template-columns: 70px 160px 16px 1fr auto; align-items: center; gap: 8px; margin: 6px 0; }
-  .alias-name { font-family: monospace; font-size: 12px; background: #f0f0f0; padding: 4px 6px; border-radius: 2px; }
   #error { margin: 8px 0; min-height: 18px; color: #c00; font-size: 12px; white-space: pre-wrap; }
   .actions { margin-top: 12px; display: flex; gap: 8px; }
   button { padding: 6px 14px; cursor: pointer; font-size: 13px; }
@@ -812,15 +730,13 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
 </div>
 <div class="row">
   <label>连接模式</label>
-  ${isDerived ? `<div class="hint">别名配置强制代理模式（别名经代理重写为真实模型）</div><input type="hidden" id="mode" value="proxy" />`
-    : `<label style="font-weight:normal"><input type="radio" name="mode" value="direct" ${mode === 'direct' ? 'checked' : ''} /> 直连</label>
-       <label style="font-weight:normal"><input type="radio" name="mode" value="proxy" ${mode === 'proxy' ? 'checked' : ''} /> 通过代理</label>`}
+  <label style="font-weight:normal"><input type="radio" name="mode" value="direct" ${mode === 'direct' ? 'checked' : ''} /> 直连</label>
+  <label style="font-weight:normal"><input type="radio" name="mode" value="proxy" ${mode === 'proxy' ? 'checked' : ''} /> 通过代理</label>
 </div>
-<div id="derivedBlock"></div>
 <div class="row">
-  <label for="content">settings.json content${isDerived ? '（只读·继承父）' : ''}</label>
-  <textarea id="content" spellcheck="false" ${isDerived ? 'readonly' : ''}>${escapeHtml(content)}</textarea>
-  <div class="hint">${isDerived ? '别名配置继承父配置 content，不可编辑。' : '保存配置后，起终端时 env 现场注入（直连=上游真实地址，代理=经代理转发）。'}</div>
+  <label for="content">settings.json content</label>
+  <textarea id="content" spellcheck="false">${escapeHtml(content)}</textarea>
+  <div class="hint">保存配置后，起终端时 env 现场注入（直连=上游真实地址，代理=经代理转发）。</div>
 </div>
 <div id="error" aria-live="polite"></div>
 <div class="actions">
@@ -832,97 +748,16 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
   var apiBase = ${safeApiBase};
   var wid = ${safeWid};
   var cfgId = ${safeCfgId};
-  var cfg = ${safeCfg};
-  var catalog = ${safeCatalog};
-  var isDerived = cfg && cfg.derivedFrom !== undefined;
   var nameEl = document.getElementById('name');
   var contentEl = document.getElementById('content');
   var errorEl = document.getElementById('error');
-  var derivedBlock = document.getElementById('derivedBlock');
-
-  // derived 渲染别名四档 + 1m checkbox
-  if (isDerived && cfg.derivedIndex >= 1) {
-    var idx = cfg.derivedIndex;
-    var aliases = cfg.modelAliases || {};
-    var perTier = cfg.sessionContext1m || { main: false, haiku: false, sonnet: false, opus: false };
-    var catalogOpts = [''].concat(catalog).map(function(m) {
-      return '<option value="' + esc(m) + '">' + (m ? esc(m) : '— 不设置（透传） —') + '</option>';
-    }).join('');
-    var tiers = [
-      { key: 'main', label: 'Main' },
-      { key: 'haiku', label: 'Haiku' },
-      { key: 'sonnet', label: 'Sonnet' },
-      { key: 'opus', label: 'Opus' },
-    ];
-    var html = '<div class="row"><label>模型别名映射（即时生效）</label>' +
-      '<div class="hint">编号 #' + idx + '</div>' +
-      '<datalist id="model-catalog">' + catalogOpts + '</datalist>';
-    tiers.forEach(function(t) {
-      var alias = 'ccp-' + t.key + '-' + idx + (perTier[t.key] ? '[1m]' : '');
-      var cur = aliases[t.key] || '';
-      html += '<div class="alias-row">' +
-        '<span class="alias-label">' + t.label + '</span>' +
-        '<code class="alias-name" data-tier="' + t.key + '">' + esc(alias) + '</code>' +
-        '<span>→</span>' +
-        '<input type="text" list="model-catalog" class="alias-model" data-tier="' + t.key + '" value="' + esc(cur) + '" placeholder="真实模型名" />' +
-        '<label class="hint"><input type="checkbox" data-ctx1m="' + t.key + '" ' + (perTier[t.key] ? 'checked' : '') + ' />1M</label>' +
-        '</div>';
-    });
-    html += '<div class="hint">改映射即时生效；改 1m 需重启 CLI（别名后缀变更）。</div></div>';
-    derivedBlock.innerHTML = html;
-
-    // 别名 input change → 空值走 delete、非空走 set（即时生效）
-    derivedBlock.querySelectorAll('.alias-model').forEach(function(el) {
-      el.addEventListener('change', function() {
-        var tier = el.getAttribute('data-tier');
-        var model = el.value.trim();
-        var alias = 'ccp-' + tier + '-' + idx;
-        var url, body;
-        if (model) {
-          url = apiBase + '/api/workspaces/' + encodeURIComponent(wid) + '/configs/' + encodeURIComponent(cfgId) + '/alias';
-          body = JSON.stringify({ alias: alias, model: model });
-        } else {
-          url = apiBase + '/api/workspaces/' + encodeURIComponent(wid) + '/configs/' + encodeURIComponent(cfgId) + '/alias/delete';
-          body = JSON.stringify({ alias: alias });
-        }
-        fetch(url, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: body,
-        }).then(function(r) { return r.json(); }).then(function(d) {
-          errorEl.textContent = d.error ? ('别名操作失败: ' + d.error) : (tier + ' 档已同步（下个请求生效）');
-        }).catch(function(e) { errorEl.textContent = '别名操作异常: ' + e.message; });
-      });
-    });
-    // 1m checkbox change → PUT 更新 config（sessionContext1m）+ 提示重启
-    derivedBlock.querySelectorAll('input[data-ctx1m]').forEach(function(el) {
-      el.addEventListener('change', function() {
-        var tier = el.getAttribute('data-ctx1m');
-        var updated = Object.assign({}, cfg.sessionContext1m || {});
-        updated[tier] = el.checked;
-        fetch(apiBase + '/api/workspaces/' + encodeURIComponent(wid) + '/configs/' + encodeURIComponent(cfgId), {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: nameEl.value, sessionContext1m: updated }),
-        }).then(function(r) { return r.json(); }).then(function(d) {
-          if (d.error) { errorEl.textContent = '档位更新失败: ' + d.error; return; }
-          cfg = d.config;
-          // 刷新别名文本后缀
-          var code = derivedBlock.querySelector('code.alias-name[data-tier="' + tier + '"]');
-          if (code) { code.textContent = 'ccp-' + tier + '-' + idx + (el.checked ? '[1m]' : ''); }
-          errorEl.textContent = tier + ' 档改为 ' + (el.checked ? '1M' : '200K') + '，需重启 CLI 生效';
-        }).catch(function(e) { errorEl.textContent = '档位更新异常: ' + e.message; });
-      });
-    });
-  }
-
-  function esc(s) { return String(s).replace(/[&<>"']/g, function(c) { return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]; }); }
 
   function selectedMode() {
     var checked = document.querySelector('input[name="mode"]:checked');
-    return checked ? checked.value : (isDerived ? 'proxy' : 'direct');
+    return checked ? checked.value : 'direct';
   }
   function validate() {
     var nameOk = nameEl.value.trim().length > 0;
-    if (isDerived) { document.getElementById('save').disabled = !nameOk; return; }
     var text = contentEl.value.trim();
     var ok = nameOk && text.length > 0;
     if (ok) { try { JSON.parse(text); errorEl.textContent = ''; } catch (e) { ok = false; errorEl.textContent = 'Invalid JSON: ' + e.message; } }
@@ -930,14 +765,12 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
     document.getElementById('save').disabled = !ok;
   }
   nameEl.addEventListener('input', validate);
-  if (!isDerived) { contentEl.addEventListener('input', validate); }
+  contentEl.addEventListener('input', validate);
 
   document.getElementById('save').addEventListener('click', function() {
     var body = { name: nameEl.value, content: contentEl.value, mode: selectedMode() };
     var url, method;
     if (cfgId) {
-      // 更新（derived 不传 content/mode，后端 updateLocalConfig 保留）
-      if (isDerived) { body = { name: nameEl.value }; }
       url = apiBase + '/api/workspaces/' + encodeURIComponent(wid) + '/configs/' + encodeURIComponent(cfgId);
       method = 'PUT';
     } else {
@@ -948,8 +781,6 @@ export function buildConfigEditorHtml({ workspaceId, workspaceName, config, cata
       .then(function(r) { return r.json(); }).then(function(d) {
         if (d.error) { errorEl.textContent = d.error; return; }
         errorEl.textContent = '已保存，返回列表...';
-        // 新建后更新 cfgId（后续保存变更新）
-        if (d.config && d.config.id && !cfgId) { cfgId = d.config.id; cfg = d.config; isDerived = d.config.derivedFrom !== undefined; }
         // 保存成功后跳回 workspace 列表页（列表页加载时重新拉取，避免不刷新）
         setTimeout(function() { window.location.href = apiBase + '/'; }, 500);
       }).catch(function(e) { errorEl.textContent = '保存异常: ' + e.message; });

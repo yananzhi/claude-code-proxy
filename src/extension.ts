@@ -95,8 +95,6 @@ export function activate(context: vscode.ExtensionContext): void {
         switchLocalConfig: (cfg) => doLocalSwitch(cfg),
         getLocalStore: () => localStore,
         loadGlobalConfigs: () => store.load(),
-        launchDerived: (cfg) => launcher.launchDerived(cfg),
-        getProxyHost: () => proxyHost,
         refresh: () => { void refresh(); },
     });
 
@@ -219,7 +217,7 @@ export function activate(context: vscode.ExtensionContext): void {
     /**
      * workspace-local 配置切换：纯标记。
      * 只记 local-active.json（id+mode），不写任何 settings.json、不 reload。
-     * launcher 启动时读此标记 → 取对应 local 配置 → 写 .claude_proxy/settings.json 再起 claude。
+     * launcher 启动时读此标记 → 取对应 local 配置 → 路由 key 经 shell env 注入终端（不写 settings.json）。
      * proxy 模式也只标记，注入上游推迟到 launcher 启动时。
      */
     async function doLocalSwitch(cfg: LLMConfig): Promise<void> {
@@ -288,54 +286,18 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     /**
-     * 删派生节点 + 清代理映射表四条（main + 三档）+ 关联处理活终端（§6.8 P6 + 优化 2）。
-     * - 清映射：调 removeModelAlias 删 ccp-{main,haiku,sonnet,opus}-N（缺则忽略）。
-     * - 活终端：按终端 name 含 `#N` 或 env CCP_DERIVED_ID=N 匹配，弹确认一并关闭。
-     *   匹配靠终端 name（createTerminal 的 name 含 #N），env 无法事后读，故以 name 为准。
+     * 删 workspace-local 配置。
+     * 若删的正是 active，清掉标记。
      */
-    async function deleteDerivedAndAliases(derivedCfg: LLMConfig): Promise<void> {
+    async function deleteLocalConfig(cfg: LLMConfig): Promise<void> {
         if (!localStore) {
             return;
         }
-        const idx = derivedCfg.derivedIndex;
-        // 关联活终端：按终端 name 含 `#N` 匹配。
-        // 用 `#N` 后非数字断言（?!\\d）避免 #2 误匹配 #20/#21 等（终端 name 形如 `Claude Code #2 (xxx)`）。
-        if (idx != null) {
-            const idxRe = new RegExp(`#${idx}(?![0-9])`);
-            const liveTerminals = vscode.window.terminals.filter(t => idxRe.test(t.name));
-            if (liveTerminals.length > 0) {
-                const choice = await vscode.window.showWarningMessage(
-                    `派生节点 #${idx} 仍有 ${liveTerminals.length} 个终端在运行，是否一并关闭？（不关闭的终端映射被清后会请求失败）`,
-                    { modal: true },
-                    '一并关闭终端',
-                    '保留终端',
-                );
-                if (choice === '一并关闭终端') {
-                    for (const t of liveTerminals) {
-                        t.dispose();
-                    }
-                }
-            }
+        await localStore.remove(cfg.id);
+        const state = await localActiveState?.load();
+        if (state && state.id === cfg.id) {
+            await localActiveState?.clear();
         }
-        // 清代理映射表四条（main + 三档，优化 2 main 档）
-        if (idx != null && proxyHost) {
-            for (const tier of ['main', 'haiku', 'sonnet', 'opus'] as const) {
-                const alias = `ccp-${tier}-${idx}`;
-                try {
-                    await proxyHost.removeModelAlias(alias);
-                } catch (err) {
-                    // 代理未运行/别名不存在均忽略——删本地节点不应被代理状态阻断
-                    const msg = err instanceof Error ? err.message : String(err);
-                    output.appendLine(`[deleteDerived] 清除映射 ${alias} 失败（已忽略）: ${msg}`);
-                }
-            }
-        }
-        await localStore.remove(derivedCfg.id);
-    }
-
-    /** 取派生节点的父配置（用于 newDerivedConfig 选父）。 */
-    async function pickLocalParentConfig(action: string): Promise<LLMConfig | undefined> {
-        return pickLocalConfig(action);
     }
 
     // --- Commands: global configs ---
@@ -399,81 +361,7 @@ export function activate(context: vscode.ExtensionContext): void {
             if (!cfg || !localStore) {
                 return;
             }
-            // 父删级联（§6.5 P1）：扫派生节点，弹确认一并删 + 清代理映射表三条
-            const derived = await localStore.getDerivedByParent(cfg.id);
-            if (derived.length > 0) {
-                const choice = await vscode.window.showWarningMessage(
-                    `'${cfg.name}' 下有 ${derived.length} 个派生节点。删除父配置会使它们成为孤儿。是否一并删除这些派生节点？`,
-                    { modal: true },
-                    '一并删除',
-                    '仅删父配置（派生留为孤儿）',
-                );
-                if (choice === '一并删除') {
-                    for (const d of derived) {
-                        await deleteDerivedAndAliases(d);
-                    }
-                }
-            }
-            await localStore.remove(cfg.id);
-            // 删的若正是 active，清掉标记
-            const state = await localActiveState?.load();
-            if (state && state.id === cfg.id) {
-                await localActiveState?.clear();
-            }
-            await refresh();
-        }),
-
-        // --- Commands: derived (派生虚拟配置节点) ---
-        // 新建派生节点：选父 local 配置 → 向代理 nextAliasId 申请编号 N → 打开配置页
-        vscode.commands.registerCommand('claude-code-proxy.newDerivedConfig', async (arg?: LLMConfig | vscode.TreeItem) => {
-            if (!localStore) {
-                void vscode.window.showErrorMessage('请先打开一个 workspace 文件夹');
-                return;
-            }
-            const parent = resolveConfig(arg) ?? await pickLocalParentConfig('作为派生节点的父配置');
-            if (!parent) {
-                return;
-            }
-            if (!proxyHost) {
-                void vscode.window.showErrorMessage('代理尚未初始化，无法申请编号');
-                return;
-            }
-            let idx: number;
-            try {
-                idx = await proxyHost.nextAliasId();
-            } catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                void vscode.window.showErrorMessage(`向代理申请编号失败: ${msg}`);
-                return;
-            }
-            const name = `${parent.name} #${idx}`;
-            void editor.openNewDerived(parent, idx, name);
-        }),
-
-        vscode.commands.registerCommand('claude-code-proxy.editDerivedConfig', (arg?: LLMConfig | vscode.TreeItem) => {
-            const cfg = resolveConfig(arg);
-            if (!cfg) {
-                void vscode.window.showWarningMessage('请从树视图的派生节点上打开编辑');
-                return;
-            }
-            void editor.openEditDerived(cfg);
-        }),
-
-        vscode.commands.registerCommand('claude-code-proxy.launchDerivedClaude', (arg?: LLMConfig | vscode.TreeItem) => {
-            const cfg = resolveConfig(arg);
-            if (!cfg) {
-                void vscode.window.showWarningMessage('请从树视图的派生节点上启动');
-                return;
-            }
-            void launcher.launchDerived(cfg);
-        }),
-
-        vscode.commands.registerCommand('claude-code-proxy.deleteDerivedConfig', async (arg?: LLMConfig | vscode.TreeItem) => {
-            const cfg = resolveConfig(arg);
-            if (!cfg || !localStore) {
-                return;
-            }
-            await deleteDerivedAndAliases(cfg);
+            await deleteLocalConfig(cfg);
             await refresh();
         }),
 
@@ -722,44 +610,18 @@ export function activate(context: vscode.ExtensionContext): void {
             };
             lines.push(`env: ${JSON.stringify(envSnapshot)}`);
 
-            // [1] getModelAliases wrapper（rawHttp，生产路径）—— 应拿到非空映射表
-            lines.push('[1] getModelAliases() wrapper（rawHttp，生产路径）');
-            try {
-                const map = await proxyHost.getModelAliases();
-                lines.push(`ok: ${Object.keys(map).length} 条映射, keys=${JSON.stringify(Object.keys(map).slice(0, 5))}`);
-            } catch (e) {
-                lines.push(`error: ${(e as Error).message}`);
-            }
-            // [2] nextAliasId wrapper（rawHttp）—— 应拿到数字
-            lines.push('[2] nextAliasId() wrapper（rawHttp）');
-            try {
-                const id = await proxyHost.nextAliasId();
-                lines.push(`ok: id=${id}`);
-            } catch (e) {
-                lines.push(`error: ${(e as Error).message}`);
-            }
-            // [3] http.get 对照（被测：扩展宿主 http 栈）—— 应 rawLen=0（吞 body），证明为何用裸 socket
-            lines.push('[3] http.get 对照（扩展宿主 http 栈，应 rawLen=0）');
+            // [1] http.get 对照（被测：扩展宿主 http 栈）—— 应 rawLen=0（吞 body），证明为何用裸 socket
+            lines.push('[1] http.get 对照（扩展宿主 http 栈，应 rawLen=0）');
             lines.push(await proxyHost.diagHttpGet('/api/config', { withNoProxy: true }));
-            // [4] setModelAlias + 读回（rawHttp 全链路）—— 应写入并读回
-            const diagAlias = `ccp-diag-test-${port}`;
-            lines.push(`[4] setModelAlias(${diagAlias}) + getModelAliases 读回`);
-            try {
-                await proxyHost.setModelAlias(diagAlias, 'diag-model');
-                const map = await proxyHost.getModelAliases();
-                const hit = map[diagAlias];
-                lines.push(`ok: 写入=${hit === 'diag-model' ? '是' : '否'}（map[${diagAlias}]=${JSON.stringify(hit)}）`);
-            } catch (e) {
-                lines.push(`error: ${(e as Error).message}`);
-            }
-            // 清理测试映射
-            try { await proxyHost.removeModelAlias(diagAlias); } catch { /* 诊断清理，忽略 */ }
+            // [2] 裸 socket GET 对照——应 decodedLen>0（服务端 body 完整，是 http 栈吞了）
+            lines.push('[2] 裸 net socket GET 对照（服务端 body 应完整）');
+            lines.push(await proxyHost.diagRawSocketGet('/api/config'));
 
             const report = lines.join('\n');
             output.appendLine(report);
             void vscode.window.showInformationMessage(
                 '代理接口诊断完成，详见 Claude Code Proxy output 面板。' +
-                ' 判读：[1][2][4]ok + [3]http.get rawLen=0 = 裸 socket 全链路正常、http 栈仍吞（预期）。',
+                ' 判读：[1] http.get rawLen=0 + [2] 裸 socket decodedLen>0 = 扩展宿主 http 栈吞 body（预期），裸 socket 全链路正常。',
             );
         }),
 

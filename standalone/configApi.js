@@ -1,9 +1,8 @@
-// standalone/configApi.js — local config CRUD + derived 创建 + proxy 转发（ESM JS）
+// standalone/configApi.js — local config CRUD + proxy 转发（ESM JS）
 //
 // 阶段 4：配置编辑页迁移的后端逻辑。
 // - local config CRUD 复用 LocalConfigStore（从 out/ 加载）
-// - derived 创建复用 derivedLogic 纯函数（snapshot/inherit/catalog）
-// - 别名即时生效转发到 proxy /api/model-alias（management → proxy HTTP）
+// - 派生配置（derived）功能已移除（2026-08），无别名创建/转发
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -16,17 +15,10 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 const require = createRequire(import.meta.url);
 let LocalConfigStore, LocalActiveStateStore, newId;
-let aggregateModelCatalog, inheritAliasesFromParent, inheritSessionContext1m, normalizeSessionContext1m;
-let extractUpstream, synthesizeProxySettings;
 let readSettings, writeSettings;
 try {
     ({ LocalConfigStore, LocalActiveStateStore, newId } = require(path.join(PROJECT_ROOT, 'out', 'localConfigStore.js')));
     // newId 实际从 configStore 导出，localConfigStore re-export 了
-    // derivedLogic 纯函数
-    const derivedLogic = require(path.join(PROJECT_ROOT, 'out', 'derivedLogic.js'));
-    ({ aggregateModelCatalog, inheritAliasesFromParent, inheritSessionContext1m, normalizeSessionContext1m } = derivedLogic);
-    const upstreamMod = require(path.join(PROJECT_ROOT, 'out', 'upstream.js'));
-    ({ extractUpstream, synthesizeProxySettings } = upstreamMod);
     const claudeConfig = require(path.join(PROJECT_ROOT, 'out', 'claudeConfig.js'));
     ({ readSettings, writeSettings } = claudeConfig);
 } catch (e) {
@@ -55,23 +47,11 @@ async function getStoreForWorkspace(manager, workspaceId) {
     return { store: new LocalConfigStore(ws.dir), workspace: ws };
 }
 
-/** 从父配置提取上游快照（防父删/改断链）。父 content 无效或缺 baseUrl/token → undefined。 */
-function snapshotFromParent(parentContent, parentMode) {
-    const parsed = extractUpstream(parentContent);
-    if (!parsed) return undefined;
-    const baseUrl = parsed.env.ANTHROPIC_BASE_URL;
-    const token = parsed.env.ANTHROPIC_AUTH_TOKEN;
-    if (!baseUrl || !token) return undefined;
-    const tNum = Number(parsed.env.API_TIMEOUT_MS);
-    const timeoutSec = Number.isFinite(tNum) && tNum > 0 ? Math.round(tNum / 1000) : undefined;
-    return { baseUrl, token, timeoutSec, mode: parentMode === 'proxy' ? 'proxy' : 'direct' };
-}
-
 /**
- * 新建 local config（普通或 derived）。
+ * 新建 local config。
  * @param manager WorkspaceManager
  * @param workspaceId
- * @param body {name, mode, content} 普通配置 / 或 derived 创建体 {name, derivedFrom, derivedIndex}
+ * @param body {name, mode, content}
  * @returns {Promise<{config, created: boolean}>}
  */
 export async function createLocalConfig(manager, workspaceId, body) {
@@ -81,36 +61,6 @@ export async function createLocalConfig(manager, workspaceId, body) {
 
     const name = body?.name;
     if (!name || !String(name).trim()) throw new ValidationError('name 不能为空');
-
-    // derived 创建
-    if (body.derivedFrom !== undefined) {
-        if (typeof body.derivedFrom !== 'string' || !body.derivedFrom.trim()) {
-            throw new ValidationError('derivedFrom 必须是非空字符串（父配置 id）');
-        }
-        const parent = await store.get(body.derivedFrom);
-        if (!parent) throw new ValidationError(`父配置不存在: ${body.derivedFrom}`);
-        const derivedIndex = body.derivedIndex;
-        if (typeof derivedIndex !== 'number' || !Number.isInteger(derivedIndex) || derivedIndex < 1) {
-            throw new ValidationError('derivedIndex 必须是 >=1 的整数');
-        }
-        const snapshot = snapshotFromParent(parent.content, parent.mode);
-        const inheritedAliases = inheritAliasesFromParent(parent.content);
-        const inherited1m = inheritSessionContext1m(parent.content);
-        const cfg = {
-            id: newId(),
-            name: String(name).trim(),
-            content: parent.content, // derived content 只读继承父
-            mode: 'proxy', // derived 强制 proxy（V7）
-            updatedAt: new Date().toISOString(),
-            derivedFrom: parent.id,
-            derivedIndex,
-            modelAliases: inheritedAliases,
-            sessionContext1m: inherited1m,
-            derivedSnapshot: snapshot,
-        };
-        await store.upsert(cfg);
-        return { config: cfg, created: true };
-    }
 
     // 普通 config
     const content = body?.content;
@@ -131,7 +81,7 @@ export async function createLocalConfig(manager, workspaceId, body) {
     return { config: cfg, created: true };
 }
 
-/** 更新 local config（保留 derived 字段）。 */
+/** 更新 local config。 */
 export async function updateLocalConfig(manager, workspaceId, cfgId, body) {
     const ctx = await getStoreForWorkspace(manager, workspaceId);
     if (!ctx) throw new NotFoundError(`workspace 不存在: ${workspaceId}`);
@@ -142,34 +92,17 @@ export async function updateLocalConfig(manager, workspaceId, cfgId, body) {
     const name = body?.name;
     if (!name || !String(name).trim()) throw new ValidationError('name 不能为空');
 
-    const isDerived = existing.derivedFrom !== undefined;
-    // derived: content 只读不改；普通: content 可改 + 校验 JSON
-    let content = existing.content;
-    let mode = existing.mode;
-    if (!isDerived) {
-        const newContent = body?.content;
-        if (newContent !== undefined) {
-            if (!String(newContent).trim()) throw new ValidationError('content 不能为空');
-            try { JSON.parse(newContent); } catch (e) { throw new ValidationError(`content 不是有效 JSON: ${e.message}`); }
-            content = String(newContent);
-        }
-        if (body?.mode !== undefined) mode = body.mode === 'proxy' ? 'proxy' : 'direct';
-    }
-
-    // derived: sessionContext1m 可由前端 1m checkbox 改（per-tier 1m 开关，影响别名后缀）
-    let sessionContext1m = existing.sessionContext1m;
-    if (isDerived && body?.sessionContext1m !== undefined) {
-        sessionContext1m = normalizeSessionContext1m(body.sessionContext1m)
-            ?? { main: false, haiku: false, sonnet: false, opus: false };
+    const newContent = body?.content;
+    if (newContent !== undefined) {
+        if (!String(newContent).trim()) throw new ValidationError('content 不能为空');
+        try { JSON.parse(newContent); } catch (e) { throw new ValidationError(`content 不是有效 JSON: ${e.message}`); }
     }
 
     const updated = {
         ...existing,
         name: String(name).trim(),
-        content,
-        mode,
-        // modelAliases 由独立 alias 转发路由改（经 proxy），update 不碰
-        sessionContext1m,
+        content: newContent !== undefined ? String(newContent) : existing.content,
+        mode: body?.mode !== undefined ? (body.mode === 'proxy' ? 'proxy' : 'direct') : existing.mode,
         updatedAt: new Date().toISOString(),
     };
     await store.upsert(updated);
@@ -185,53 +118,6 @@ export async function deleteLocalConfig(manager, workspaceId, cfgId) {
     if (!existing) throw new NotFoundError(`config 不存在: ${cfgId}`);
     await store.remove(cfgId);
     return { ok: true };
-}
-
-/** 聚合模型清单（local configs 的模型名 + 别名映射值）。 */
-export async function getModelCatalog(manager, workspaceId) {
-    const ctx = await getStoreForWorkspace(manager, workspaceId);
-    if (!ctx) return []; // workspace 不存在 → 空清单
-    const configs = await ctx.store.load();
-    return aggregateModelCatalog(configs);
-}
-
-/**
- * 从 alias 串（如 ccp-main-3[1m]）反解 tier。
- * @returns {string|null} main/haiku/sonnet/opus 或 null（格式不匹配）
- */
-function tierFromAlias(alias) {
-    if (typeof alias !== 'string') return null;
-    const cleaned = alias.replace(/\[1m\]$/, '');
-    const m = cleaned.match(/^ccp-(main|haiku|sonnet|opus)-\d+$/);
-    return m ? m[1] : null;
-}
-
-/**
- * 更新（set/delete）别名配置的本地 modelAliases，保持与代理侧同步。
- * alias 路由转发代理后，调用本函数回写本地 config.modelAliases，
- * 让 alias-resolve（终端顶栏）读到最新映射。
- *
- * @param {string} alias 别名串（ccp-<tier>-N[1m]）
- * @param {string|null} model 真实模型名；null/空 → 删该 tier
- */
-export async function updateConfigAlias(manager, workspaceId, cfgId, alias, model) {
-    const tier = tierFromAlias(alias);
-    if (!tier) return; // 非 ccp-<tier>-N 格式，不回写（无法定位 tier）
-    const ctx = await getStoreForWorkspace(manager, workspaceId);
-    if (!ctx) return;
-    const existing = await ctx.store.get(cfgId);
-    if (!existing || existing.derivedFrom === undefined) return; // 非别名配置，不回写
-    const aliases = { ...(existing.modelAliases || {}) };
-    if (model) {
-        aliases[tier] = model;
-    } else {
-        delete aliases[tier];
-    }
-    await ctx.store.upsert({
-        ...existing,
-        modelAliases: aliases,
-        updatedAt: new Date().toISOString(),
-    });
 }
 
 /**
@@ -292,89 +178,6 @@ export async function ensureGitignore(workspaceRoot, log = () => {}) {
     }
 }
 
-/**
- * 激活某 workspace 的某 local config：写 .claude_proxy/settings.json + （proxy 模式）注入 upstream + active 标记。
- *
- * - direct 模式：writeSettings 原样 content。
- * - proxy 模式：extractUpstream → 校验 baseUrl/token → proxyForward 注入 upstream → synthesizeProxySettings → writeSettings。
- * - 写 LocalActiveStateStore 标记 + ensureProjectPermissions + ensureGitignore。
- *
- * @returns {Promise<{activated: true, mode, settingsPath, note}>}
- * @throws {NotFoundError} workspace/config 不存在
- * @throws {ValidationError} proxy 模式缺 baseUrl/token、content 非法
- * @throws {ProxyUnavailableError} upstream 注入失败
- */
-export async function activateConfig(manager, proxyPort, workspaceId, cfgId, opts = {}) {
-    const log = opts.log || (() => {});
-    const ws = await manager.get(workspaceId);
-    if (!ws) throw new NotFoundError(`workspace 不存在: ${workspaceId}`);
-    const store = new LocalConfigStore(ws.dir);
-    const cfg = await store.get(cfgId);
-    if (!cfg) throw new NotFoundError(`config 不存在: ${cfgId}`);
-
-    const configDir = path.join(ws.dir, WORKSPACE_CONFIG_DIR);
-    const settingsPath = path.join(configDir, 'settings.json');
-    const mode = cfg.mode === 'proxy' ? 'proxy' : 'direct';
-    let note = '';
-
-    if (mode === 'direct') {
-        // direct：原样 content
-        await writeSettings(settingsPath, cfg.content);
-    } else {
-        // proxy：注入 upstream + 合成 settings
-        const parsed = extractUpstream(cfg.content);
-        if (!parsed) throw new ValidationError('config content 不是有效 JSON，无法解析 upstream');
-        const baseUrl = parsed.env.ANTHROPIC_BASE_URL;
-        const token = parsed.env.ANTHROPIC_AUTH_TOKEN;
-        if (!baseUrl || !token) {
-            throw new ValidationError('proxy 模式 config 缺少 env.ANTHROPIC_BASE_URL 或 ANTHROPIC_AUTH_TOKEN');
-        }
-        // timeoutSec：API_TIMEOUT_MS 毫秒→秒，空/非数/非正→不传
-        const timeoutRaw = parsed.env.API_TIMEOUT_MS;
-        let timeoutSec;
-        const tNum = Number(timeoutRaw);
-        if (Number.isFinite(tNum) && tNum > 0) timeoutSec = Math.round(tNum / 1000);
-
-        // upstream 全局共享单例（last-write-wins），并发激活不同上游会串味——记警告
-        log(`[activate] 注入代理上游: baseUrl=${baseUrl}（代理进程全局共享，并发不同上游会串味）`);
-
-        const upstream = { baseUrl, token };
-        if (parsed.env.ANTHROPIC_MODEL) upstream.model = parsed.env.ANTHROPIC_MODEL;
-        if (parsed.env.ANTHROPIC_SMALL_FAST_MODEL) upstream.smallFastModel = parsed.env.ANTHROPIC_SMALL_FAST_MODEL;
-        if (timeoutSec != null) upstream.timeoutSec = timeoutSec;
-
-        // 注入 upstream（proxy 不在→抛 ProxyUnavailableError → 502；
-        // proxy 返回非 2xx（如 baseUrl 格式错误→400）→ 抛 ProxyUnavailableError → 502，不假成功）
-        const r = await proxyForward(proxyPort, '/api/upstream', 'POST', { upstream });
-        if (r.status < 200 || r.status >= 300) {
-            const detail = (r.body && r.body.error) ? r.body.error : `proxy 返回 ${r.status}`;
-            throw new ProxyUnavailableError(`代理拒绝 upstream: ${detail}`);
-        }
-
-        // 合成指向 localhost:proxyPort 的 settings
-        const synthesized = synthesizeProxySettings(cfg.content, proxyPort);
-        if (!synthesized) throw new ValidationError('config content 无法合成代理 settings');
-        await writeSettings(settingsPath, synthesized);
-        note = `upstream 已注入代理，CLI BASE_URL 指向 http://127.0.0.1:${proxyPort}`;
-    }
-
-    // active 标记
-    const activeStore = new LocalActiveStateStore(ws.dir);
-    await activeStore.write(cfgId, mode);
-
-    // permissions + gitignore（与 VS Code launcher 对齐）
-    await ensureProjectPermissions(ws.dir, log);
-    await ensureGitignore(ws.dir, log);
-
-    note = note || (mode === 'direct' ? '直连模式，CLI 直连上游' : '');
-    return {
-        activated: true,
-        mode,
-        settingsPath,
-        note: note + '（新 spawn 或重启的 CLI 会话读 settings.json 生效）',
-    };
-}
-
 /** 读某 workspace 的 active 标记。无 → null。 */
 export async function getActiveConfig(manager, workspaceId) {
     const ws = await manager.get(workspaceId);
@@ -392,12 +195,15 @@ export async function getActiveConfig(manager, workspaceId) {
  * 注入 upstream + permissions/gitignore"降级为"只写默认配置标记"——仅影响
  * 「+ 新建终端」下拉的默认高亮项。无文件副作用。
  *
- * 与 activateConfig 的区别：
+ * 旧的 activateConfig（写 .claude_proxy/settings.json 的 env + 注入 upstream）已删除——
+ * 插件 claudeLauncher 与 standalone 终端统一纯 shell env 注入，不再写 settings.json 路由 key
+ * （CLAUDE.md「workspace-local 终端路由 key 一律走 shell env」），该函数是唯一残留的
+ * settings.json env 写入点，属死代码。
+ *
+ * 与旧 activateConfig 的区别：
  * - 不写 settings.json、不注入代理 upstream、不碰 permissions/gitignore
  * - 不校验 content 有效（标记只是指针，config 可后编辑；启动时 buildTerminalEnv 才校验）
  * - 派生配置也可标记（旧约束"派生不能 active"针对的是"派生不写 settings"，现已都不写）
- *
- * activateConfig 原函数保留给 VS Code 侧（claudeLauncher 仍写 settings）。
  *
  * @returns {Promise<{ marked: true, cfgId, mode }>}
  * @throws {NotFoundError} workspace/config 不存在

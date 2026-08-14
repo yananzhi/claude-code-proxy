@@ -31,10 +31,15 @@ export class LocalConfigStore {
         try {
             const raw = await fs.promises.readFile(this.filePath, 'utf8');
             const parsed = JSON.parse(raw) as LLMConfig[];
-            this.cache = (Array.isArray(parsed) ? parsed : []).map(c => ({
-                ...c,
-                mode: c.mode === 'proxy' ? 'proxy' : 'direct',
-            }));
+            // 派生配置功能已移除：load 时剥离历史遗留的派生节点（derivedFrom 非空），
+            // 普通配置补 mode 归一。文件里的残留数据不主动删，读取时忽略即可。
+            // derivedFrom 字段是历史数据，类型已移除，用 in 判定而非类型属性访问。
+            this.cache = (Array.isArray(parsed) ? parsed : [])
+                .filter(c => !('derivedFrom' in c) || !(c as { derivedFrom?: unknown }).derivedFrom)
+                .map(c => ({
+                    ...c,
+                    mode: c.mode === 'proxy' ? 'proxy' : 'direct',
+                }));
         } catch (err: unknown) {
             if (!isENOENT(err)) {
                 console.error('[claude-code-proxy] Failed to read local-configs.json:', err);
@@ -70,14 +75,6 @@ export class LocalConfigStore {
 
     async get(id: string): Promise<LLMConfig | undefined> {
         return (await this.load()).find(c => c.id === id);
-    }
-
-    /** 取某父 local 配置下所有派生节点（§6.2）。按 derivedIndex 升序，便于树展示稳定。 */
-    async getDerivedByParent(parentId: string): Promise<LLMConfig[]> {
-        const configs = await this.load();
-        return configs
-            .filter(c => c.derivedFrom === parentId)
-            .sort((a, b) => (a.derivedIndex ?? 0) - (b.derivedIndex ?? 0));
     }
 }
 

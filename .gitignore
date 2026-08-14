@@ -12,6 +12,9 @@ mock/config.*test*.json
 .claude_proxy/
 .claude/
 
+# 本地探索/临时目录（非工程产物）
+FrameworkTest/
+
 # standalone/run/ 是本地 CCP_HOME（运行时数据：logs/、workspaces.json、*.pid、*.log）。
 # proxy-config.example.json 是模板（空 upstream + 端口 11444），提交跟踪。
 # proxy-config.json 是用户本地真实配置（含 token），忽略不提交防泄露。

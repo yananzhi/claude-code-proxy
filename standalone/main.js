@@ -47,7 +47,7 @@ const SPAWN_BACKOFF_MAX_MS = 30000;
 
 /**
  * 默认 proxy-config 模板（照 proxyHost.ts DEFAULT_PROXY_CONFIG 复刻）。
- * 不写 modelAliases/nextAliasId（config-store 兜底 {} / 0）。
+ * 不写 modelAliases/nextAliasId（config-store 兜底）。
  */
 export function defaultProxyConfig(platform = process.platform) {
     return {

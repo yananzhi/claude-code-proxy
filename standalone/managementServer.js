@@ -19,7 +19,7 @@ import { WorkspaceManager } from './workspaceManager.js';
 import { ClaudeSessionManager } from './claudeSession.js';
 import { resolveClaudeBinaryStandalone } from './claudeBinaryStandalone.js';
 import {
-    createLocalConfig, updateLocalConfig, deleteLocalConfig, getModelCatalog, updateConfigAlias,
+    createLocalConfig, updateLocalConfig, deleteLocalConfig,
     proxyForward, markDefaultConfig, getActiveConfig,
     ensureProjectPermissions, ensureGitignore,
     stripConflictKeysFromSettings,
@@ -186,7 +186,7 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // GET /api/workspaces/:id/configs/:cfgId/terminals → 列 config（派生）活终端
+            // GET /api/workspaces/:id/configs/:cfgId/terminals → 列 config 活终端
             if (method === 'GET' && mCfgTerm) {
                 const cfgId = decodeURIComponent(mCfgTerm[2]);
                 const terminals = sessions.listByConfig(cfgId);
@@ -194,23 +194,13 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // GET /api/terminals/:tid/alias-resolve → 终端顶栏别名映射（目标6）
+            // GET /api/terminals/:tid/alias-resolve → 终端顶栏映射（保留返回体结构，kind 恒为 normal）
             const mAliasResolve = pathname.match(/^\/api\/terminals\/([^/]+)\/alias-resolve$/);
             if (method === 'GET' && mAliasResolve) {
                 const tid = decodeURIComponent(mAliasResolve[1]);
                 const info = sessions.get(tid);
                 if (!info) { sendJson(res, 404, { error: `终端不存在: ${tid}` }); return; }
-                const result = { kind: info.kind, startedConfigName: info.startedConfigName, configId: info.configId };
-                if (info.kind === 'derived' && info.workspaceId && info.configId) {
-                    // 别名终端：查 config.modelAliases + derivedIndex（本地权威，与代理同步）
-                    const configs = await manager.getLocalConfigs(info.workspaceId);
-                    const cfg = configs.find(c => c.id === info.configId);
-                    if (cfg) {
-                        result.derivedIndex = cfg.derivedIndex;
-                        result.modelAliases = cfg.modelAliases || {};
-                    }
-                }
-                sendJson(res, 200, result);
+                sendJson(res, 200, { kind: info.kind, startedConfigName: info.startedConfigName, configId: info.configId });
                 return;
             }
 
@@ -244,7 +234,7 @@ export async function startManagementServer(opts = {}) {
                 sendJson(res, 200, { configs });
                 return;
             }
-            // POST /api/workspaces/:id/configs → 新建（普通或 derived）
+            // POST /api/workspaces/:id/configs → 新建
             if (method === 'POST' && mCfgList) {
                 const id = decodeURIComponent(mCfgList[1]);
                 const body = await readJsonBody(req);
@@ -282,60 +272,9 @@ export async function startManagementServer(opts = {}) {
                 return;
             }
 
-            // POST /api/workspaces/:id/configs/:cfgId/alias → 转发 proxy 设置别名（即时生效）+ 回写本地
-            const mAlias = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/alias$/);
-            if (method === 'POST' && mAlias) {
-                const id = decodeURIComponent(mAlias[1]);
-                const cfgId = decodeURIComponent(mAlias[2]);
-                const err = await checkDerivedForAlias(manager, id, cfgId);
-                if (err) { sendJson(res, err.status, { error: err.error }); return; }
-                const body = await readJsonBody(req);
-                const r = await proxyForward(opts.proxyPort, '/api/model-alias', 'POST', body);
-                if (r.status >= 200 && r.status < 300) {
-                    // 代理成功后回写本地 modelAliases（保持与代理同步，供 alias-resolve 顶栏读取）
-                    await updateConfigAlias(manager, id, cfgId, body.alias, body.model);
-                }
-                res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify(r.body));
-                return;
-            }
-            // POST /api/workspaces/:id/configs/:cfgId/alias/delete → 转发 proxy 删别名 + 回写本地
-            const mAliasDel = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/alias\/delete$/);
-            if (method === 'POST' && mAliasDel) {
-                const id = decodeURIComponent(mAliasDel[1]);
-                const cfgId = decodeURIComponent(mAliasDel[2]);
-                const err = await checkDerivedForAlias(manager, id, cfgId);
-                if (err) { sendJson(res, err.status, { error: err.error }); return; }
-                const body = await readJsonBody(req);
-                const r = await proxyForward(opts.proxyPort, '/api/model-alias/delete', 'POST', body);
-                if (r.status >= 200 && r.status < 300) {
-                    await updateConfigAlias(manager, id, cfgId, body.alias, null);
-                }
-                res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify(r.body));
-                return;
-            }
-
-            // GET /api/workspaces/:id/model-catalog → 聚合模型清单
-            const mCatalog = pathname.match(/^\/api\/workspaces\/([^/]+)\/model-catalog$/);
-            if (method === 'GET' && mCatalog) {
-                const id = decodeURIComponent(mCatalog[1]);
-                const catalog = await getModelCatalog(manager, id);
-                sendJson(res, 200, { catalog });
-                return;
-            }
-            // GET /api/workspaces/:id/next-alias-id → 转发 proxy 取下一个派生编号
-            const mNextId = pathname.match(/^\/api\/workspaces\/([^/]+)\/next-alias-id$/);
-            if (method === 'GET' && mNextId) {
-                const r = await proxyForward(opts.proxyPort, '/api/model-alias/next-id', 'GET');
-                res.writeHead(r.status, { 'content-type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify(r.body));
-                return;
-            }
-
             // POST /api/workspaces/:id/configs/:cfgId/activate → 标记默认配置（弱化版激活）
             // 重设计目标2：终端统一走 env，激活降级为"只写默认配置标记"，不再写 settings.json/注入 upstream。
-            // 仅影响「+ 新建终端」下拉默认高亮项。activateConfig 原函数保留给 VS Code 侧。
+            // 仅影响「+ 新建终端」下拉默认高亮项。旧 activateConfig（写 settings.json env）已删除——死代码。
             const mActivate = pathname.match(/^\/api\/workspaces\/([^/]+)\/configs\/([^/]+)\/activate$/);
             if (method === 'POST' && mActivate) {
                 const id = decodeURIComponent(mActivate[1]);
@@ -373,9 +312,8 @@ export async function startManagementServer(opts = {}) {
                 const id = decodeURIComponent(mNewPage[1]);
                 const ws = await manager.get(id);
                 if (!ws) { sendJson(res, 404, { error: `workspace 不存在: ${id}` }); return; }
-                const catalog = await getModelCatalog(manager, id);
                 const html = buildConfigEditorHtml({
-                    workspaceId: id, workspaceName: ws.name, config: null, catalog, apiBase: '',
+                    workspaceId: id, workspaceName: ws.name, config: null, apiBase: '',
                 });
                 res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
                 res.end(html);
@@ -391,9 +329,8 @@ export async function startManagementServer(opts = {}) {
                 const configs = await manager.getLocalConfigs(id);
                 const cfg = configs.find(c => c.id === cfgId);
                 if (!cfg) { sendJson(res, 404, { error: `config 不存在: ${cfgId}` }); return; }
-                const catalog = await getModelCatalog(manager, id);
                 const html = buildConfigEditorHtml({
-                    workspaceId: id, workspaceName: ws.name, config: cfg, catalog, apiBase: '',
+                    workspaceId: id, workspaceName: ws.name, config: cfg, apiBase: '',
                 });
                 res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
                 res.end(html);
@@ -499,19 +436,6 @@ export async function startManagementServer(opts = {}) {
     });
 }
 
-/** 校验 cfgId 对应的 config 是否 derived（仅 derived 可设/删别名）。返回 null=通过，{status,error}=拒绝。 */
-async function checkDerivedForAlias(manager, workspaceId, cfgId) {
-    const ws = await manager.get(workspaceId);
-    if (!ws) return { status: 404, error: `workspace 不存在: ${workspaceId}` };
-    const configs = await manager.getLocalConfigs(workspaceId);
-    const cfg = configs.find(c => c.id === cfgId);
-    if (!cfg) return { status: 404, error: `config 不存在: ${cfgId}` };
-    if (cfg.derivedFrom === undefined) {
-        return { status: 400, error: '仅别名配置可设置别名（静态配置无别名映射）' };
-    }
-    return null;
-}
-
 /** 读 JSON body（限 1MB，防滥用）。 */
 function readJsonBody(req) {
     return new Promise((resolve, reject) => {
@@ -556,8 +480,8 @@ function sendJson(res, status, obj) {
 
 /**
  * 起终端的共享逻辑（目标3：workspace 级与 config 级入口共用）。
- * 取 config + parent → buildTerminalEnv → ensureProjectPermissions/Gitignore → sessions.start。
- * 不限制 config 类型（普通/派生都行），kind 由 cfg.derivedFrom 决定。
+ * 取 config → buildTerminalEnv → ensureProjectPermissions/Gitignore → sessions.start。
+ * kind 恒为 'normal'（派生配置已移除）。
  *
  * @param {object} deps { manager, sessions, opts, proxyPort }
  * @param {string} wsId workspace id
@@ -572,8 +496,6 @@ async function startTerminalForConfig({ manager, sessions, opts, proxyPort }, ws
     const configs = await manager.getLocalConfigs(wsId);
     const cfg = configs.find(c => c.id === cfgId);
     if (!cfg) throw new NotFoundError(`config 不存在: ${cfgId}`);
-    const isDerived = cfg.derivedFrom !== undefined;
-    const parent = isDerived ? configs.find(c => c.id === cfg.derivedFrom) : null;
     const binaryPath = resolveClaudeBinaryStandalone({ log: opts.log });
     if (!binaryPath) {
         const err = new Error('未找到 Claude Code CLI 二进制。请安装 Claude Code，或在系统 PATH 中配置 claude。');
@@ -581,8 +503,8 @@ async function startTerminalForConfig({ manager, sessions, opts, proxyPort }, ws
         throw err;
     }
     const terminalId = sessions.newTerminalId();
-    const kind = isDerived ? 'derived' : 'normal';
-    const { env, configDir } = await buildTerminalEnv(cfg, parent, proxyPort, {
+    const kind = 'normal';
+    const { env, configDir } = await buildTerminalEnv(cfg, proxyPort, {
         workspaceDir: ws.dir, terminalId, log: opts.log,
     });
     await ensureProjectPermissions(ws.dir, opts.log);

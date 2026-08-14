@@ -147,7 +147,7 @@ test('D1d: CCP_HOME 覆盖默认 home', async () => {
 // D3 out/ 路径发布
 // ════════════════════════════════════════════════════════════
 test('D3a: out/ 编译产物存在（standalone 依赖）', () => {
-    const required = ['cleanEnv.js', 'proxySpawnController.js', 'localConfigStore.js', 'claudeBinary.js', 'derivedLogic.js', 'upstream.js'];
+    const required = ['cleanEnv.js', 'proxySpawnController.js', 'localConfigStore.js', 'claudeBinary.js', 'upstream.js'];
     for (const f of required) {
         assert.ok(fs.existsSync(join(PROJECT_ROOT, 'out', f)), `out/${f} 应存在`);
     }
@@ -240,9 +240,11 @@ test('D6a: .vscodeignore 不排除 standalone/（独立后端需随 VSIX 发布�
     // 这是设计选择：standalone 是独立形态，VSIX 理论上不需要它。
     // 但当前不排除也不影响 VS Code 扩展功能，只是多了几 KB。
     // 此测试记录现状（非 bug），若未来要排除可改断言。
+    // 注意：standalone/run/** 排除的是运行时产物子目录，不算排除整个 standalone/。
     const content = fs.readFileSync(join(PROJECT_ROOT, '.vscodeignore'), 'utf8');
-    // 现状：standalone/ 不在 .vscodeignore → 进 VSIX（可接受）
-    assert.ok(!content.includes('standalone/'), 'standalone/ 当前不在 .vscodeignore（进 VSIX，可接受）');
+    const excludes = content.split(/\r?\n/).filter(Boolean);
+    const wholeDirExcluded = excludes.some(l => l.trim() === 'standalone/' || l.trim() === 'standalone/**');
+    assert.ok(!wholeDirExcluded, 'standalone/ 当前不在 .vscodeignore（进 VSIX，可接受）');
 });
 
 test('D6b: .vscodeignore 排除 proxy/logs/ proxy/test/（VSIX 不含日志和测试）', () => {

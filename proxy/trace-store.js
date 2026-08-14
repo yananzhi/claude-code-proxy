@@ -173,7 +173,6 @@ export function append(trace) {
   // 规范化 model：保证落盘为字符串（缺字段/undefined/null → ''），让 list 摘要与 getById 完整 trace 一致
   if (!trace || typeof trace !== 'object') trace = {};
   if (typeof trace.model !== 'string') trace.model = '';
-  if (typeof trace.resolvedModel !== 'string') trace.resolvedModel = '';
   let seq = currentSeq(day);
   try {
     const bodyFile = shardPath(day, seq, 'body');
@@ -217,7 +216,6 @@ function summarize(trace, { bodyOffset, bodyLen, seq }) {
     finalStatus: r.finalStatus,
     outcome: r.outcome,
     model: r.model || '',
-    resolvedModel: r.resolvedModel || '',
     firstChunkAt: r.firstChunkAt ?? null,
     firstChunkMs: r.firstChunkMs ?? null,
     lastAttemptMs: r.lastAttemptMs ?? null,

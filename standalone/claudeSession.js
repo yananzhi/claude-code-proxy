@@ -3,7 +3,7 @@
 // 职责：
 //   - 每个终端一个独立 PTY 会话（按 terminalId 索引，不再 per-workspace 单会话）
 //   - normal 终端：env 注入 BASE_URL/token/model（不读 settings.json 做路由）
-//   - derived 终端：env 注入 BASE_URL/token/四档别名
+//   - 终端：env 注入 BASE_URL/token/model
 //   - 两者 configDir 都共享 {ws}/.claude_proxy
 //   - WebSocket 双向流：PTY onData → 广播 WS；WS message → PTY write / resize
 //   - 会话状态 Map 内存管理 + 退出/断线清理 + listByWorkspace/listByConfig
@@ -68,8 +68,8 @@ export class ClaudeSessionManager {
      *   @param {string} params.configDir CLAUDE_CONFIG_DIR 路径（per-terminal，spawn 前 mkdir）
      *   @param {string} params.workspaceId 所属 workspace id（listByWorkspace 用）
      *   @param {string} params.configId 所属 config id（listByConfig 用）
-     *   @param {string} params.startedConfigName 启动时所基于的配置名（normal 终端显示用）
-     *   @param {'normal'|'derived'} params.kind 终端类型
+     *   @param {string} params.startedConfigName 启动时所基于的配置名（终端显示用）
+     *   @param {'normal'} params.kind 终端类型
      * @returns {Promise<{ terminalId: string, pid: number }>}
      * @throws {Error} binaryPath 为空 / cwd 为空 / spawn 失败
      */
@@ -81,7 +81,7 @@ export class ClaudeSessionManager {
             throw new Error('workspace 目录无效');
         }
 
-        // 确保 per-terminal configDir 存在（派生终端的独立空目录；normal 终端指向 .claude_proxy，已存在也无所谓）
+        // 确保 configDir 存在（终端共享 {ws}/.claude_proxy，已存在也无所谓）
         const configDir = params.configDir;
         if (configDir) {
             try {
@@ -95,7 +95,7 @@ export class ClaudeSessionManager {
         // 若 PTY 子进程拿不到 TERM，Claude CLI（Ink TUI）会退化成 dumb/行缓冲模式——
         // 此时 \r 与 \n 都被当行结束符=Submit，Shift+Enter 多行输入彻底失效（发什么字节都没用）。
         // 显式注入 xterm-256color 让 CLI 进 raw mode、启用高级按键监听，是多行输入的前提。
-        // params.env 优先级最高（派生/特殊配置可覆盖），故放最后展开。
+        // params.env 优先级最高（特殊配置可覆盖），故放最后展开。
         const env = {
             ...process.env,
             TERM: 'xterm-256color',
@@ -248,7 +248,7 @@ export class ClaudeSessionManager {
         return out;
     }
 
-    /** 列某 config 的所有活终端（derived 终端用）。 */
+    /** 列某 config 的所有活终端。 */
     listByConfig(configId) {
         const out = [];
         for (const h of this.sessions.values()) {

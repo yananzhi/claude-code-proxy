@@ -586,23 +586,19 @@ test('G1: alias-resolve 路径不被 mTermStop 误匹配（路由顺序正确）
     }
 });
 
-// 怀疑点 G2（边界：别名终端的 config 已删/找不到）
-//   alias-resolve 路由：info.kind==='derived' 但 configs.find 找不到 cfg →
-//   result 不含 derivedIndex/modelAliases，只返回 {kind:'derived', startedConfigName, configId}。
-//   前端 d.derivedIndex 为 falsy → 跳过别名渲染；d.kind !== 'normal' → 跳过静态渲染。
-//   顶栏保持默认文案。非崩溃，是静默降级——回归锁定。
-//   注：derived 终端需代理（proxyPort 19998 不可达 → 502），无法在测试中起 derived 终端。
-//   改验证路由源码：configs.find 找不到 cfg 时不崩（find 返回 undefined → if(cfg) 跳过）。
-test('G2: alias-resolve 路由源码——config 找不到时不崩（if(cfg) 守卫，静默降级）', async () => {
+// 派生配置已移除（2026-08）：alias-resolve 不再查 config / modelAliases，只返回 info 基础字段（kind 恒为 normal）。
+test('G2: alias-resolve 路由源码——只返回 info 基础字段，不查 config（派生已移除）', async () => {
     const { handle, port, home } = await startMgmt('g2');
     try {
-        // 读 managementServer.js 源码验证 alias-resolve 路由对 cfg 找不到时有守卫
+        // 读 managementServer.js 源码验证 alias-resolve 路由的简化形态
         const src = readFileSync(MS_JS, 'utf8');
-        const aliasResolveBlock = src.match(/mAliasResolve[\s\S]*?sendJson\(res, 200, result\)/);
-        assert.ok(aliasResolveBlock, '应找到 alias-resolve 路由块');
-        // 路由应先 find cfg，再 if (cfg) 守卫添加 derivedIndex/modelAliases
-        assert.ok(/configs\.find/.test(aliasResolveBlock[0]), '应 configs.find 查 cfg');
-        assert.ok(/if\s*\(\s*cfg\s*\)/.test(aliasResolveBlock[0]), '应用 if(cfg) 守卫（cfg 找不到时不加 derivedIndex）');
+        const idx = src.indexOf('mAliasResolve');
+        assert.ok(idx > 0, '应找到 alias-resolve 路由');
+        const block = src.slice(idx, idx + 400);
+        assert.ok(/kind: info\.kind/.test(block), '应返回 info.kind');
+        assert.ok(!/configs\.find/.test(block), '不应查 config（派生已移除）');
+        assert.ok(!/modelAliases/.test(block), '不应返回 modelAliases');
+        assert.ok(!/derivedIndex/.test(block), '不应返回 derivedIndex');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -629,32 +625,29 @@ test('G2b: alias-resolve normal 终端 → 无 derivedIndex/modelAliases（非 b
     }
 });
 
-// 怀疑点 G3（类型安全：modelAliases 为 undefined/非对象）
-//   路由 result.modelAliases = cfg.modelAliases || {} → 若 cfg.modelAliases 为 undefined → {}。
-//   "bug 存在"断言：路由直接赋 cfg.modelAliases（无兜底）→ undefined 传前端 → aliases[t[0]] 崩。
-//   若路由有 || {} 兜底则非 bug。
-//   注：derived 终端需代理（proxyPort 不可达 → 502），无法在测试中起 derived 终端验证端到端。
-//   改验证路由源码兜底（在 tree-html.test.mjs G3-source）+ 配置层允许 modelAliases 缺失（此测试）。
-test('G3: 配置层允许 modelAliases 缺失（路由 || {} 兜底在 G3-source 验证）', async () => {
+// 派生配置已移除：load 时剥离 legacy derived 节点（derivedFrom 非空）→ 该类 config 不可见（GET 404）。
+test('G3: 配置层剥离 legacy derived 节点（load 时过滤 derivedFrom）', async () => {
     const { handle, port, home } = await startMgmt('g3');
     const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'g3');
-    // 手写一个 modelAliases 为 undefined 的派生 config（绕过创建校验）
+    // 手写一个 legacy derived config 到文件（模拟旧数据残留）
     const derivedId = 'derived-g3-nomodel';
     const localCfgPath = join(proj, '.claude_proxy', 'local-configs.json');
     const arr = JSON.parse(readFileSync(localCfgPath, 'utf8'));
     arr.push({
         id: derivedId, name: 'deriv-no-aliases', content: directContent(), mode: 'proxy',
         updatedAt: '2026-01-01T00:00:00Z', derivedFrom: cfgId, derivedIndex: 3,
-        // 故意不设 modelAliases（模拟旧数据/手动编辑缺失）
         sessionContext1m: { main: false, haiku: false, sonnet: false, opus: false },
         derivedSnapshot: { baseUrl: 'https://up.test', token: 'tok', mode: 'proxy' },
     });
     writeFileSync(localCfgPath, JSON.stringify(arr), 'utf8');
     try {
-        // 验证 config 层确实允许 modelAliases 缺失（LocalConfigStore.load 不崩）
-        const cfgR = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}`)).json();
-        assert.equal(cfgR.config.modelAliases, undefined, 'config 层允许 modelAliases 缺失（不崩）');
-        // 路由源码 || {} 兜底验证在 tree-html.test.mjs G3-source
+        // 派生配置已移除：load 剥离 derivedFrom → GET 该 config 返回 404（不可见）
+        const cfgR = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}`);
+        assert.equal(cfgR.status, 404, 'legacy derived 配置应被 load 剥离（不可见）');
+        // 列表也不含 derived 节点（父 config 仍在）
+        const list = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`)).json();
+        assert.ok(!list.configs.find(c => c.id === derivedId), '列表不应含 derived 节点');
+        assert.ok(list.configs.find(c => c.id === cfgId), '父 config 应保留');
     } finally {
         await handle.stop();
         rmSync(home, { recursive: true, force: true });
@@ -751,61 +744,26 @@ test('R6e: alias-resolve 读到本地回写后的最新映射', async () => {
 });
 
 // ════════════════════════════════════════════════════════════
-// R6f alias 路由成功回写本地（临时代理，验证目标6 单向同步修复）
+// R6f alias 路由已移除（派生配置删除，2026-08）——POST /alias 与 /alias/delete 均应 404
 // ════════════════════════════════════════════════════════════
-test('R6f: alias 路由代理成功 → 回写本地 config.modelAliases', async () => {
-    const { spawn } = await import('node:child_process');
-    const SERVER_JS = resolve(__dirname, '..', '..', 'proxy', 'server.js');
-    const tmpProxyPort = 11630;
-    const proxyHome = newTmpDir('r6f-proxy');
-    writeFileSync(join(proxyHome, 'proxy-config.json'), JSON.stringify({
-        env: { ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_BASE_URL: '', API_TIMEOUT_MS: '600000', ANTHROPIC_MODEL: '' },
-        effortLevel: 'max',
-        proxy: { listenHost: '127.0.0.1', listenPort: tmpProxyPort, maxAttempts: 5, backoffSec: 1, backoffMaxSec: 16, passthrough: true, retryRules: [] },
-        modelAliases: {},
-    }));
-    mkdirSync(join(proxyHome, 'logs'), { recursive: true });
-    const child = spawn(process.execPath, [SERVER_JS], {
-        env: { ...process.env, CCP_CONFIG_PATH: join(proxyHome, 'proxy-config.json'), CCP_LOGS_DIR: join(proxyHome, 'logs'), CCP_LOGS_CONFIG_PATH: join(proxyHome, 'logs', 'logs-config.json'), ELECTRON_RUN_AS_NODE: '1' },
-        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    });
-    // 等代理就绪
-    let ready = false;
-    for (let i = 0; i < 30; i++) {
-        try { if ((await fetch(`http://127.0.0.1:${tmpProxyPort}/healthz`)).ok) { ready = true; break; } } catch {}
-        await new Promise(r => setTimeout(r, 150));
-    }
-    const home = newTmpDir('r6f-mgmt');
-    const port = 11990;
-    const handle = await startManagementServer({ homeDir: home, port, proxyPort: tmpProxyPort, sessionPty: makeMockPty() });
-    const proj = newTmpDir('r6f-proj');
-    const cr = await (await fetch(`http://127.0.0.1:${port}/api/workspaces`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'w', dir: proj }) })).json();
-    const wsId = cr.workspace.id;
-    const cc = await (await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'cfg', content: directContent(), mode: 'direct' }) })).json();
-    const cfgId = cc.config.id;
-    const derivedId = 'derived-r6f';
-    const localCfgPath = join(proj, '.claude_proxy', 'local-configs.json');
-    const arr = JSON.parse(readFileSync(localCfgPath, 'utf8'));
-    arr.push({ id: derivedId, name: 'deriv', content: directContent(), mode: 'proxy', updatedAt: '2026-01-01T00:00:00Z', derivedFrom: cfgId, derivedIndex: 8, modelAliases: {}, sessionContext1m: { main: false, haiku: false, sonnet: false, opus: false }, derivedSnapshot: { baseUrl: 'https://up.test', token: 'tok', mode: 'proxy' } });
-    writeFileSync(localCfgPath, JSON.stringify(arr), 'utf8');
+test('R6f: alias 路由已移除 → POST /configs/:id/alias 404（派生已删除）', async () => {
+    const { handle, port, home } = await startMgmt('r6f');
+    const { proj, wsId, cfgId } = await createWsAndDirectConfig(port, 'r6f');
     try {
-        if (!ready) { /* 跳过成功路径断言 */ }
-        else {
-            const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${derivedId}/alias`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ alias: 'ccp-main-8', model: 'new-model' }),
-            });
-            assert.equal(r.status, 200);
-            // 验证本地回写
-            const cfg2 = JSON.parse(readFileSync(localCfgPath, 'utf8')).find(c => c.id === derivedId);
-            assert.equal(cfg2.modelAliases.main, 'new-model', '代理成功后本地应回写 modelAliases.main');
-        }
+        const r = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/alias`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alias: 'ccp-main-8', model: 'new-model' }),
+        });
+        assert.equal(r.status, 404, 'alias 路由应已移除（404）');
+        const rd = await fetch(`http://127.0.0.1:${port}/api/workspaces/${wsId}/configs/${cfgId}/alias/delete`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alias: 'ccp-main-8' }),
+        });
+        assert.equal(rd.status, 404, 'alias/delete 路由应已移除（404）');
     } finally {
         await handle.stop();
-        try { child.kill('SIGTERM'); } catch {}
         rmSync(home, { recursive: true, force: true });
         rmSync(proj, { recursive: true, force: true });
-        rmSync(proxyHome, { recursive: true, force: true });
     }
 });
 
